@@ -8,4 +8,4 @@ an MV3 SW), persists wallet state to IndexedDB so it survives the ~30s SW idle-k
 The differentiator is first-class understanding of VTXO taproot script trees — collaborative,
 timelocked unilateral-exit, and custom-condition leaves — which no other Bitcoin wallet exposes.
 
-Built with [WXT](https://wxt.dev) + React. See `SPIKE.md` for the G0 service-worker/SDK validation harness.
+Built with [WXT](https://wxt.dev) + React.

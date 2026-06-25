@@ -4,8 +4,8 @@ import { NETWORK_CONFIG, networkConfig } from './wallet';
 /**
  * Track-C check: the network → operator/esplora/derivation mapping is the one piece
  * of `wallet.ts` with branching logic worth pinning (the rest is thin SDK
- * pass-through exercised live against nigiri). We assert the regtest defaults match
- * the G0 spike (arkd :7070, electrs REST :30000, testnet derivation) and that
+ * pass-through exercised live against nigiri). We assert the regtest defaults
+ * (arkd :7070, electrs REST :30000, testnet derivation) and that
  * mainnet is the only `isMainnet: true` network.
  */
 describe('network config mapping', () => {

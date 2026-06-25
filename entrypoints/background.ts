@@ -1,5 +1,4 @@
 import { onMessage } from '@/src/messaging';
-import { runG0Spike } from '@/src/spike';
 import {
   registerAutoLock,
   armAutoLock,
@@ -34,11 +33,10 @@ export default defineBackground(() => {
   // Track B: arm the idle auto-lock alarm handler (PLAN.md §7, Strict posture).
   registerAutoLock();
 
-  // ── Phase-0 chain + spike (kept) ───────────────────────────────────────────
+  // ── Messaging smoke-test (proves the provider→content→background chain) ──────
   onMessage('ping', ({ data }) => {
     return { pong: true as const, timestamp: Date.now(), echo: data?.echo };
   });
-  onMessage('runG0Spike', ({ data }) => runG0Spike(data?.arkServerUrl));
 
   // ── Keystore (seed stays in the SW) ────────────────────────────────────────
   onMessage('hasVault', () => hasVault());
