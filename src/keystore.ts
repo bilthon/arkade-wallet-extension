@@ -84,7 +84,12 @@ export async function unlock(password: string): Promise<void> {
   await holdUnlocked(mnemonic);
 }
 
-/** Lock: zero the seed buffer, drop references, clear the flag, cancel auto-lock. */
+/**
+ * Lock: zero the seed *buffer*, drop references, clear the flag, cancel auto-lock.
+ * Note: only the seed `Uint8Array` is scrubbed in place. The mnemonic is a JS string
+ * (immutable, un-zeroable) — dropping the reference makes it GC-reachable but it may
+ * linger in memory until collected. Don't assume the mnemonic is wiped synchronously.
+ */
 export async function lock(): Promise<void> {
   if (unlockedSeed) unlockedSeed.fill(0);
   unlockedSeed = null;

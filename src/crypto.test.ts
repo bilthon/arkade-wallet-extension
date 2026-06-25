@@ -73,6 +73,12 @@ describe('vault crypto', () => {
     await expect(decryptVault(blob, PASSWORD, 'mutinynet')).rejects.toThrow(/authentication failed/);
   });
 
+  it('rejects a downgraded KDF iteration count (offline brute-force defense)', async () => {
+    const blob = await encryptVault(TEST_MNEMONIC, PASSWORD, 'regtest');
+    const weakened: VaultBlob = { ...blob, kdfParams: { ...blob.kdfParams, iterations: 1 } };
+    await expect(decryptVault(weakened, PASSWORD, 'regtest')).rejects.toThrow(/authentication failed/);
+  });
+
   it('uses a fresh IV (and ciphertext) on each encrypt', async () => {
     const a = await encryptVault(TEST_MNEMONIC, PASSWORD, 'regtest');
     const b = await encryptVault(TEST_MNEMONIC, PASSWORD, 'regtest');

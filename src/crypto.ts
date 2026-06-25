@@ -147,6 +147,14 @@ export async function decryptVault(
   if (blob.v !== VAULT_VERSION) throw new Error(`decryptVault: unsupported version ${blob.v}`);
   if (blob.kdf !== 'pbkdf2') throw new Error(`decryptVault: unsupported kdf ${blob.kdf}`);
 
+  // Downgrade defense: the blob lives in chrome.storage.local, so an attacker who
+  // can rewrite it could drop `iterations` to 1 (or weaken the hash) to make an
+  // offline brute-force against the real salt/ct far cheaper. Reject params below
+  // our floor. Same uniform error as auth failure — no new distinguishing oracle.
+  if (blob.kdfParams.iterations < PBKDF2_ITERATIONS || blob.kdfParams.hash !== 'SHA-256') {
+    throw new Error('decryptVault: authentication failed');
+  }
+
   const salt = base64.decode(blob.salt);
   const iv = base64.decode(blob.iv);
   const ct = base64.decode(blob.ct);
