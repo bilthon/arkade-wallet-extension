@@ -50,6 +50,17 @@ export interface ProtocolMap {
    * is unreachable (popup keeps showing the cached snapshot + an offline banner).
    */
   refreshWalletSnapshot(): { snapshot: WalletSnapshot };
+
+  // ─── Off-chain send (Track E — the first write/spend path) ─────────────────
+  /**
+   * In-wallet off-chain Arkade→Arkade send. Gated on unlock (`requireWallet`).
+   * The SW validates the address (well-formed Arkade address for the ACTIVE
+   * network — rejects on-chain/malformed/cross-network) and the amount (integer,
+   * > 0, ≥ dust, ≤ live available balance) BEFORE signing, then calls the SDK's
+   * `sendBitcoin`. The seed never crosses this boundary. Returns the txid.
+   * Validation failures surface as a typed `SendValidationError` (code + message).
+   */
+  sendBitcoin(data: { address: string; amount: number }): { txid: string };
 }
 
 export const { sendMessage, onMessage } = defineExtensionMessaging<ProtocolMap>();
