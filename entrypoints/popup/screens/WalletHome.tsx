@@ -3,6 +3,7 @@ import type { NetworkName, WalletBalance } from '@arkade-os/sdk';
 import { client, isLockedError } from '../client';
 import { formatSats, networkLabel, relativeTime } from '../format';
 import { Receive } from './Receive';
+import { Send } from './Send';
 
 /**
  * Wallet home (Track D + the UX review, team-lead brief #5).
@@ -30,6 +31,8 @@ export function WalletHome({
   const [loadingLive, setLoadingLive] = useState(true);
   const [offline, setOffline] = useState(false);
   const [showReceive, setShowReceive] = useState(false);
+  const [showSend, setShowSend] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -75,7 +78,7 @@ export function WalletHome({
     return () => {
       cancelled = true;
     };
-  }, [onLocked]);
+  }, [onLocked, reloadKey]);
 
   async function lock() {
     await client.lock();
@@ -88,6 +91,20 @@ export function WalletHome({
         arkAddress={address}
         boardingAddress={boardingAddress}
         onClose={() => setShowReceive(false)}
+      />
+    );
+  }
+
+  if (showSend) {
+    return (
+      <Send
+        availableSats={balance?.available ?? 0}
+        onClose={() => setShowSend(false)}
+        onLocked={onLocked}
+        onSent={() => {
+          setShowSend(false);
+          setReloadKey((k) => k + 1);
+        }}
       />
     );
   }
@@ -141,6 +158,13 @@ export function WalletHome({
           )}
 
           <div className="btn-row">
+            <button
+              className="btn-primary"
+              disabled={(balance?.available ?? 0) === 0 || !address || !boardingAddress}
+              onClick={() => setShowSend(true)}
+            >
+              Send
+            </button>
             <button
               className="btn-primary"
               disabled={!address || !boardingAddress}
