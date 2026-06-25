@@ -1,6 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { client, isLockedError, errorMessage } from '../client';
 import { formatSats } from '../format';
+
+/** Dust floor (sats) — mirrors the SW's authoritative DUST_SATS; used here only to
+ * pre-gate the Review button so the user doesn't wait out the settle-delay to fail. */
+const DUST_SATS = 330;
 
 type Stage = 'entry' | 'confirm' | 'done';
 
@@ -22,6 +26,10 @@ export function Send({
   const [error, setError] = useState('');
   const [sending, setSending] = useState(false);
   const [settled, setSettled] = useState(false);
+  // Synchronous re-entrancy guard: flips before the first await so two clicks in the
+  // same tick can't both issue a send (the `sending` state guard only applies after a
+  // re-render). This is the spend path — a double-send would spend distinct VTXOs.
+  const inFlight = useRef(false);
 
   // Anti-fat-finger: enable the confirm button only after ~450ms.
   useEffect(() => {
@@ -31,10 +39,17 @@ export function Send({
     return () => clearTimeout(id);
   }, [stage]);
 
-  const amountNum = parseInt(amount, 10);
-  const entryValid = address.trim().length > 0 && Number.isInteger(amountNum) && amountNum > 0;
+  // Strict integer parse: reject any non-digit tail (parseInt('5e3')→5, '50x'→50).
+  const amountNum = /^\d+$/.test(amount.trim()) ? Number(amount.trim()) : NaN;
+  const entryValid =
+    address.trim().length > 0 &&
+    Number.isInteger(amountNum) &&
+    amountNum >= DUST_SATS &&
+    amountNum <= availableSats;
 
   async function send() {
+    if (inFlight.current) return;
+    inFlight.current = true;
     setSending(true);
     setError('');
     try {
@@ -48,6 +63,7 @@ export function Send({
       }
       setError(errorMessage(err));
     } finally {
+      inFlight.current = false;
       setSending(false);
     }
   }

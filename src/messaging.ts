@@ -58,7 +58,9 @@ export interface ProtocolMap {
    * network — rejects on-chain/malformed/cross-network) and the amount (integer,
    * > 0, ≥ dust, ≤ live available balance) BEFORE signing, then calls the SDK's
    * `sendBitcoin`. The seed never crosses this boundary. Returns the txid.
-   * Validation failures surface as a typed `SendValidationError` (code + message).
+   * Validation failures surface as an Error whose serialized `.message` is the
+   * user-facing string the popup renders (the `SendValidationError` class/`code`
+   * live SW-side; only the message survives the message boundary).
    */
   sendBitcoin(data: { address: string; amount: number }): { txid: string };
 }
