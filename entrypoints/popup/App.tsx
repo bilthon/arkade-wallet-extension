@@ -1,81 +1,111 @@
-import { useState } from 'react';
-import { sendMessage } from '@/src/messaging';
-import type { G0SpikeResult } from '@/src/spike';
-import './App.css';
+import { useCallback, useEffect, useState } from 'react';
+import { client, errorMessage } from './client';
+import { Welcome } from './screens/Welcome';
+import { CreatePassword } from './screens/CreatePassword';
+import { Backup } from './screens/Backup';
+import { Import } from './screens/Import';
+import { Unlock } from './screens/Unlock';
+import { WalletHome } from './screens/WalletHome';
+import { Settings } from './screens/Settings';
 
-// ponytail: Phase-0 popup is a control panel for the two things Phase 0 must prove —
-// the messaging chain (ping) and the G0 spike. Real wallet UI lands in Phase 1+.
+/**
+ * Popup router (Track D). No router library — a small route union keyed off the
+ * lock state (PLAN.md §5 entrypoint layout). On mount we ask the SW for
+ * `{ hasVault, unlocked }` and pick the landing screen:
+ *   no vault            → welcome (→ create / import)
+ *   vault + locked      → unlock
+ *   vault + unlocked    → wallet-home
+ * Onboarding screens (create-password → backup) are transient routes that the
+ * create flow drives explicitly before landing on home.
+ */
+type Route =
+  | { name: 'loading' }
+  | { name: 'welcome' }
+  | { name: 'create' }
+  | { name: 'backup'; mnemonic: string }
+  | { name: 'import' }
+  | { name: 'unlock' }
+  | { name: 'home' }
+  | { name: 'settings' };
+
 function App() {
-  const [pingResult, setPingResult] = useState<string>('');
-  const [spike, setSpike] = useState<G0SpikeResult | null>(null);
-  const [spikeBusy, setSpikeBusy] = useState(false);
-  const [arkUrl, setArkUrl] = useState('http://localhost:7070');
+  const [route, setRoute] = useState<Route>({ name: 'loading' });
+  const [bootError, setBootError] = useState<string>('');
 
-  async function doPing() {
+  const refreshRoute = useCallback(async () => {
     try {
-      const res = await sendMessage('ping', { echo: 'from-popup' });
-      setPingResult(`pong @ ${new Date(res.timestamp).toISOString()} (echo: ${res.echo})`);
+      const { hasVault, unlocked } = await client.getLockState();
+      if (!hasVault) setRoute({ name: 'welcome' });
+      else if (!unlocked) setRoute({ name: 'unlock' });
+      else setRoute({ name: 'home' });
     } catch (err) {
-      setPingResult(`error: ${err instanceof Error ? err.message : String(err)}`);
+      setBootError(errorMessage(err));
     }
-  }
+  }, []);
 
-  async function doSpike() {
-    setSpikeBusy(true);
-    setSpike(null);
-    try {
-      const res = await sendMessage('runG0Spike', { arkServerUrl: arkUrl });
-      setSpike(res);
-    } catch (err) {
-      setSpike({
-        arkServerUrl: arkUrl,
-        startedAt: Date.now(),
-        finishedAt: Date.now(),
-        stages: [{ stage: 'runG0Spike', status: 'error', detail: String(err) }],
-        walletUsableInSW: false,
-      });
-    } finally {
-      setSpikeBusy(false);
-    }
-  }
+  useEffect(() => {
+    void refreshRoute();
+  }, [refreshRoute]);
 
-  return (
-    <main style={{ width: 360, padding: 16, textAlign: 'left' }}>
-      <h1 style={{ fontSize: 18 }}>Arkade Wallet — Phase 0</h1>
-
-      <section style={{ marginTop: 12 }}>
-        <button onClick={doPing}>Ping background</button>
-        {pingResult && <p style={{ fontSize: 12 }}>{pingResult}</p>}
-      </section>
-
-      <section style={{ marginTop: 16 }}>
-        <label style={{ fontSize: 12, display: 'block' }}>
-          ark server URL
-          <input
-            value={arkUrl}
-            onChange={(e) => setArkUrl(e.target.value)}
-            style={{ width: '100%', marginTop: 4 }}
-          />
-        </label>
-        <button onClick={doSpike} disabled={spikeBusy} style={{ marginTop: 8 }}>
-          {spikeBusy ? 'Running G0 spike…' : 'Run G0 spike'}
+  if (bootError) {
+    return (
+      <main className="screen">
+        <h1>Arkade Wallet</h1>
+        <p className="error">Could not reach the wallet service: {bootError}</p>
+        <button className="btn-block" onClick={() => location.reload()}>
+          Retry
         </button>
-        {spike && (
-          <ul style={{ fontSize: 12, marginTop: 8, paddingLeft: 16 }}>
-            {spike.stages.map((s, i) => (
-              <li key={i}>
-                <strong>{s.stage}</strong>: {s.status}
-                {s.detail ? ` — ${s.detail}` : ''}
-              </li>
-            ))}
-            <li>
-              <strong>walletUsableInSW</strong>: {String(spike.walletUsableInSW)}
-            </li>
-          </ul>
-        )}
-      </section>
-    </main>
-  );
+      </main>
+    );
+  }
+
+  switch (route.name) {
+    case 'loading':
+      return <main className="screen" />;
+
+    case 'welcome':
+      return (
+        <Welcome
+          onCreate={() => setRoute({ name: 'create' })}
+          onImport={() => setRoute({ name: 'import' })}
+        />
+      );
+
+    case 'create':
+      return (
+        <CreatePassword
+          onCreated={(mnemonic) => setRoute({ name: 'backup', mnemonic })}
+          onBack={() => setRoute({ name: 'welcome' })}
+        />
+      );
+
+    case 'backup':
+      return <Backup mnemonic={route.mnemonic} onDone={() => setRoute({ name: 'home' })} />;
+
+    case 'import':
+      return (
+        <Import onImported={() => setRoute({ name: 'home' })} onBack={() => setRoute({ name: 'welcome' })} />
+      );
+
+    case 'unlock':
+      return <Unlock onUnlocked={() => setRoute({ name: 'home' })} />;
+
+    case 'home':
+      return (
+        <WalletHome
+          onLocked={() => setRoute({ name: 'unlock' })}
+          onSettings={() => setRoute({ name: 'settings' })}
+        />
+      );
+
+    case 'settings':
+      return (
+        <Settings
+          onBack={() => setRoute({ name: 'home' })}
+          onLocked={() => setRoute({ name: 'unlock' })}
+        />
+      );
+  }
 }
 
 export default App;

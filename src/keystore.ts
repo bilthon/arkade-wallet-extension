@@ -1,5 +1,5 @@
 import { decryptVault, encryptVault, generateMnemonic, mnemonicToSeed, validateMnemonic } from './crypto';
-import { getNetwork, getVault, setUnlockFlag, setVault } from './storage';
+import { getNetwork, getVault, hasVault, setUnlockFlag, setVault } from './storage';
 
 /**
  * Lock model under MV3 (Track B, PLAN.md §7 — Strict posture).
@@ -37,6 +37,37 @@ export function getUnlockedSeed(): Uint8Array | null {
 /** The decrypted mnemonic, or null if locked. Consumed by `buildWallet` (Track C). */
 export function getUnlockedMnemonic(): string | null {
   return unlockedMnemonic;
+}
+
+/**
+ * Lock state for the popup router. `hasVault` decides welcome-vs-unlock; `unlocked`
+ * is the AUTHORITY (the in-memory seed), not the session flag — after an SW kill the
+ * seed is gone so this correctly reports locked even if a stale flag lingered.
+ */
+export interface LockState {
+  hasVault: boolean;
+  unlocked: boolean;
+}
+
+export async function getLockState(): Promise<LockState> {
+  return { hasVault: await hasVault(), unlocked: isUnlocked() };
+}
+
+/**
+ * Backup re-reveal behind re-auth (team-lead brief #4, settings-lite). Re-decrypts
+ * the vault with the supplied password and returns the mnemonic for a one-time
+ * tap-to-reveal. We re-auth from the vault (not the in-memory mnemonic) so the
+ * reveal always costs the password — even when already unlocked. A wrong password
+ * throws from `decryptVault`; we never return the phrase on failed auth.
+ *
+ * This is the ONLY path by which the mnemonic crosses the SW boundary, and only on
+ * an explicit, user-initiated request (M1 boundary rule).
+ */
+export async function getMnemonicForBackup(password: string): Promise<string> {
+  const blob = await getVault();
+  if (!blob) throw new Error('getMnemonicForBackup: no vault');
+  const network = await getNetwork();
+  return decryptVault(blob, password, network); // throws on bad password/tamper
 }
 
 // ─── Create / import ─────────────────────────────────────────────────────────
