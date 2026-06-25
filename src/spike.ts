@@ -71,12 +71,18 @@ export async function runG0Spike(
 
   // Stage 1 — Wallet.create inside the MV3 background SW, IndexedDB-backed.
   try {
-    const identity = MnemonicIdentity.fromMnemonic(TEST_MNEMONIC);
+    // Spike targets local regtest (localhost:7070), so use testnet derivation (coin type 1).
+    // ponytail: hardcoded for the regtest spike; a multi-network harness would derive this from getInfo().network.
+    const identity = MnemonicIdentity.fromMnemonic(TEST_MNEMONIC, { isMainnet: false });
     wallet = await Wallet.create({
       identity,
       // arkServerUrl is @deprecated in favor of an explicit arkProvider, but PLAN.md §2/§4
       // and the Phase-0 spec call it out by name; it still resolves to a RestArkProvider.
       arkServerUrl,
+      // Esplora REST API for on-chain UTXO lookups. nigiri exposes electrs REST on :30000
+      // (chopsticks :3000 is not the REST base in this build; arkd's internal chopsticks:3000 is unreachable from the host).
+      // ponytail: hardcoded for the regtest spike; production derives this per-network.
+      esploraUrl: 'http://localhost:30000',
       storage: {
         walletRepository: new IndexedDBWalletRepository(),
         contractRepository: new IndexedDBContractRepository(),
@@ -86,6 +92,18 @@ export async function runG0Spike(
     log({ stage: 'Wallet.create', status: 'ok' });
   } catch (err) {
     log({ stage: 'Wallet.create', status: 'error', detail: describe(err) });
+  }
+
+  // Stage 1b — log addresses so the boarding address can be funded via `nigiri faucet`
+  // to drive a real, funded settle() (the true multi-round MuSig2 + SW-survival test).
+  if (wallet) {
+    try {
+      const boarding = await wallet.getBoardingAddress();
+      const arkAddr = await wallet.getAddress();
+      log({ stage: 'addresses', status: 'ok', detail: `boarding=${boarding} ark=${arkAddr}` });
+    } catch (err) {
+      log({ stage: 'addresses', status: 'error', detail: describe(err) });
+    }
   }
 
   // Stage 2 — fetch a balance (proves operator reachability + IndexedDB read/write).
