@@ -13,5 +13,11 @@ export default defineConfig({
     content_security_policy: {
       extension_pages: "script-src 'self'; object-src 'none';",
     },
+    // MAIN-world provider is injected into pages by the ISOLATED content bridge
+    // (wxt/utils/inject-script), so it must be web-accessible. Same mechanism the
+    // PLAN names for the Firefox port — already cross-browser.
+    web_accessible_resources: [
+      { resources: ['provider.js'], matches: ['<all_urls>'] },
+    ],
   },
 });
