@@ -37,7 +37,7 @@ export interface NetworkConfig {
  * Boltz/delegate URLs are intentionally absent here (Tracks F/G); this is read-only.
  *
  * ponytail: regtest points at nigiri's local services. arkd on :7070, electrs REST
- * on :30000 (NOT chopsticks :3000 — that's not the REST base; see G0 spike notes).
+ * on :30000 — verified reachable from the SW (NOT chopsticks :3000, which is not the REST base).
  */
 export const NETWORK_CONFIG: Record<NetworkName, NetworkConfig> = {
   regtest: {
