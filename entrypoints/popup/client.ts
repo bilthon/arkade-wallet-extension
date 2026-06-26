@@ -21,6 +21,9 @@ export const client = {
   refreshWalletSnapshot: () => sendMessage('refreshWalletSnapshot', undefined),
   send: (address: string, amount: number) =>
     sendMessage('send', { address, amount }),
+  renewNow: () => sendMessage('renewNow', undefined),
+  onboardNow: () => sendMessage('onboardNow', undefined),
+  getRenewalWarning: () => sendMessage('getRenewalWarning', undefined),
 };
 
 /** True when a read failed because the wallet is locked (SW threw 'LOCKED'). */

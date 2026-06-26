@@ -1,4 +1,5 @@
-import type { NetworkName, WalletBalance } from '@arkade-os/sdk';
+import type { NetworkName } from '@arkade-os/sdk';
+import type { AdjustedBalance } from './vtxo-state';
 
 /**
  * Cache-first read contract (team-lead brief #3, PLAN.md §10).
@@ -18,8 +19,8 @@ export interface WalletSnapshot {
   address: string;
   /** On-chain boarding address. */
   boardingAddress: string;
-  /** Last-known balance breakdown, or null if never fetched. */
-  balance: WalletBalance | null;
+  /** Last-known expiry-adjusted balance breakdown, or null if never fetched. */
+  balance: AdjustedBalance | null;
   /** Epoch ms when the live operator call last succeeded. Drives staleness UI. */
   fetchedAt: number;
 }

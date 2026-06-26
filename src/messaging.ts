@@ -1,7 +1,9 @@
 import { defineExtensionMessaging } from '@webext-core/messaging';
-import type { NetworkName, WalletBalance } from '@arkade-os/sdk';
+import type { NetworkName } from '@arkade-os/sdk';
 import type { LockState } from './keystore';
 import type { WalletSnapshot } from './wallet-cache';
+import type { AdjustedBalance } from './vtxo-state';
+import type { RenewalWarning } from './renewal';
 
 /**
  * Typed content <-> background protocol (PLAN.md §3, the `browser.runtime` hop).
@@ -35,7 +37,9 @@ export interface ProtocolMap {
   // ─── Read methods (public results only) ────────────────────────────────────
   getAddress(): { address: string };
   getBoardingAddress(): { boardingAddress: string };
-  getBalance(): WalletBalance;
+  /** Expiry-adjusted balance: expired-but-unswept VTXOs are pulled out of
+   *  `available` into the `expired` bucket (Track F bug fix). */
+  getBalance(): AdjustedBalance;
   getNetwork(): { network: NetworkName };
   /**
    * Cache-first read: returns the last-known addresses + balance from storage
@@ -63,6 +67,25 @@ export interface ProtocolMap {
    * live SW-side; only the message survives the message boundary).
    */
   send(data: { address: string; amount: number }): { txid: string };
+
+  // ─── Renewal + onboarding (Track F — deliberate, unlock-gated liveness) ─────
+  /**
+   * Explicitly renew every VTXO within the safety margin of its batch expiry.
+   * Unlock-gated (throws 'LOCKED' when locked — renewal signs). Returns how many
+   * coins were renewed and the commitment txid (absent when nothing was due).
+   */
+  renewNow(): { renewed: number; txid?: string };
+  /**
+   * Explicitly onboard confirmed boarding UTXOs into VTXOs (Boarding → spendable).
+   * Unlock-gated. Returns whether anything was onboarded + the commitment txid.
+   */
+  onboardNow(): { onboarded: boolean; txid?: string };
+  /**
+   * The latest expiry/renewal warning (counts + soonest expiry), or null. Read by
+   * the popup to drive the "needs renewal — unlock to renew" / countdown UI. No
+   * secrets — just figures. Safe to call while locked.
+   */
+  getRenewalWarning(): { warning: RenewalWarning | null };
 }
 
 export const { sendMessage, onMessage } = defineExtensionMessaging<ProtocolMap>();
