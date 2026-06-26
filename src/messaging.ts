@@ -4,6 +4,9 @@ import type { LockState } from './keystore';
 import type { WalletSnapshot } from './wallet-cache';
 import type { AdjustedBalance } from './vtxo-state';
 import type { RenewalWarning } from './renewal';
+import type { Grant } from './permissions';
+import type { PendingRequest } from './approvals';
+import type { NetworkInfo, PublicKeyInfo } from './provider-api';
 
 /**
  * Typed content <-> background protocol (PLAN.md §3, the `browser.runtime` hop).
@@ -95,6 +98,38 @@ export interface ProtocolMap {
    * secrets — just figures. Safe to call while locked.
    */
   getRenewalWarning(): { warning: RenewalWarning | null };
+
+  // ─── Dapp provider surface (Track E2a — origin + grant gated) ──────────────
+  //
+  // These are the ONLY messages the ISOLATED content bridge forwards on a dapp's
+  // behalf. The background derives the origin from `sender` (NEVER a body field),
+  // checks the per-origin grant, and returns public results only. They are distinct
+  // from the popup read methods above so the trusted popup path is never confused
+  // with the untrusted dapp path. `connect` prompts via the approval window; the rest
+  // read the existing grant + require the wallet unlocked (typed LOCKED/NOT_CONNECTED).
+  //
+  // dappConnect carries no params — the origin is the sender's, resolved SW-side.
+  dappConnect(): { accounts: string[] };
+  dappDisconnect(): { ok: true };
+  dappIsConnected(): { connected: boolean };
+  dappGetAccounts(): { accounts: string[] };
+  dappGetAddress(): { address: string };
+  dappGetBoardingAddress(): { boardingAddress: string };
+  dappGetPublicKey(): PublicKeyInfo;
+  dappGetBalance(): AdjustedBalance;
+  dappGetNetwork(): NetworkInfo;
+
+  // ─── Approval window ↔ background (trusted extension page) ──────────────────
+  /** The approval window reads its request by id (shows the SW-derived origin). */
+  getApprovalRequest(data: { requestId: string }): { request: PendingRequest | null };
+  /** The approval window posts the user's decision; resolves the dapp's promise. */
+  approvalResponse(data: { requestId: string; approved: boolean }): { ok: true };
+
+  // ─── Connected-sites management (popup Settings — trusted) ──────────────────
+  /** Every active grant, for the Connected-sites screen. */
+  listConnectedSites(): { grants: Grant[] };
+  /** Revoke a site's grant: immediate, rejects any pending request + emits disconnect. */
+  revokeConnectedSite(data: { origin: string }): { ok: true };
 }
 
 export const { sendMessage, onMessage } = defineExtensionMessaging<ProtocolMap>();

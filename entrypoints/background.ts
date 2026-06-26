@@ -9,6 +9,7 @@ import {
   importWallet,
   unlock,
   lock,
+  onLock,
   getMnemonicForBackup,
 } from '@/src/keystore';
 import { hasVault, getNetwork as getStoredNetwork } from '@/src/storage';
@@ -17,6 +18,7 @@ import {
   getAddress,
   getBoardingAddress,
   getBalance,
+  getPublicKey,
   send,
   renewExpiringVtxos,
   recoverExpiredVtxos,
@@ -28,6 +30,20 @@ import {
   getRenewalWarning,
   RENEW_MARGIN_MS,
 } from '@/src/renewal';
+import { listGrants } from '@/src/permissions';
+import { getPendingRequest } from '@/src/approvals';
+import {
+  handleConnect,
+  handleDisconnect,
+  handleIsConnected,
+  handleGetAccounts,
+  handleGetNetwork,
+  requireRead,
+  revokeSite,
+  emitToAllConnected,
+  resolveApproval,
+  onWindowClosed,
+} from '@/src/dapp-handlers';
 
 /**
  * Stateless request router (PLAN.md §2/§3). Holds no secret/wallet state in memory
@@ -43,6 +59,11 @@ export default defineBackground(() => {
   registerAutoLock();
   // Track F: arm the recurring VTXO-renewal alarm (renew-while-unlocked fallback).
   registerRenewal();
+  // Track E2a: on lock (manual or auto), notify connected dapps their session ended.
+  // Reads need the wallet unlocked, so a lock effectively disconnects them.
+  onLock(() => {
+    void emitToAllConnected('disconnect');
+  });
 
   // ── Messaging smoke-test (proves the provider→content→background chain) ──────
   onMessage('ping', ({ data }) => {
@@ -156,6 +177,65 @@ export default defineBackground(() => {
   // Read-only, safe while locked — just returns cached counts for the UI.
   onMessage('getRenewalWarning', async () => {
     return { warning: await getRenewalWarning() };
+  });
+
+  // ── Dapp provider surface (Track E2a) ──────────────────────────────────────
+  //
+  // The ONLY handlers that take an untrusted origin. Each derives the origin from
+  // `sender` (M4 — NEVER a body field) and checks the per-origin grant before doing
+  // any work. `connect` opens the approval window; the reads are grant + unlock gated
+  // and return typed LOCKED/NOT_CONNECTED/BAD_ORIGIN the dapp can handle.
+
+  onMessage('dappConnect', ({ sender }) => handleConnect(sender, requireWallet));
+  onMessage('dappDisconnect', ({ sender }) => handleDisconnect(sender));
+  onMessage('dappIsConnected', ({ sender }) => handleIsConnected(sender));
+  onMessage('dappGetAccounts', ({ sender }) => handleGetAccounts(sender));
+
+  onMessage('dappGetAddress', async ({ sender }) => {
+    await requireRead(sender, 'getAddress');
+    return { address: await getAddress(await requireWallet()) };
+  });
+
+  onMessage('dappGetBoardingAddress', async ({ sender }) => {
+    await requireRead(sender, 'getBoardingAddress');
+    return { boardingAddress: await getBoardingAddress(await requireWallet()) };
+  });
+
+  onMessage('dappGetPublicKey', async ({ sender }) => {
+    await requireRead(sender, 'getPublicKey');
+    return getPublicKey(await requireWallet());
+  });
+
+  onMessage('dappGetBalance', async ({ sender }) => {
+    await requireRead(sender, 'getBalance');
+    return getBalance(await requireWallet());
+  });
+
+  onMessage('dappGetNetwork', ({ sender }) => handleGetNetwork(sender));
+
+  // ── Approval window ↔ background (trusted extension page) ──────────────────
+  onMessage('getApprovalRequest', async ({ data }) => {
+    return { request: await getPendingRequest(data.requestId) };
+  });
+
+  onMessage('approvalResponse', async ({ data }) => {
+    await resolveApproval(data.requestId, { approved: data.approved });
+    return { ok: true as const };
+  });
+
+  // When the approval window is closed without a decision, reject the dapp's promise.
+  browser.windows.onRemoved.addListener((windowId) => {
+    void onWindowClosed(windowId);
+  });
+
+  // ── Connected-sites management (popup Settings — trusted) ──────────────────
+  onMessage('listConnectedSites', async () => {
+    return { grants: await listGrants() };
+  });
+
+  onMessage('revokeConnectedSite', async ({ data }) => {
+    await revokeSite(data.origin);
+    return { ok: true as const };
   });
 
   console.log('[arkade] background ready');

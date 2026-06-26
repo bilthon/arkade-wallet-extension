@@ -10,6 +10,7 @@ import { networkLabel } from '../format';
 export function Settings({ onBack, onLocked }: { onBack: () => void; onLocked: () => void }) {
   const [network, setNetwork] = useState<NetworkName | null>(null);
   const [revealing, setRevealing] = useState(false);
+  const [sites, setSites] = useState(false);
 
   useEffect(() => {
     void client.getNetwork().then(({ network }) => setNetwork(network));
@@ -22,6 +23,10 @@ export function Settings({ onBack, onLocked }: { onBack: () => void; onLocked: (
 
   if (revealing) {
     return <RevealBackup onClose={() => setRevealing(false)} />;
+  }
+
+  if (sites) {
+    return <ConnectedSites onClose={() => setSites(false)} />;
   }
 
   return (
@@ -50,6 +55,14 @@ export function Settings({ onBack, onLocked }: { onBack: () => void; onLocked: (
             renewal via delegation is coming.)
           </div>
         </div>
+      </div>
+
+      <div className="row">
+        <div>
+          <div className="row-label">Connected sites</div>
+          <div className="row-sub">Websites that can read your wallet.</div>
+        </div>
+        <button onClick={() => setSites(true)}>Manage</button>
       </div>
 
       <div className="row">
@@ -143,6 +156,70 @@ function RevealBackup({ onClose }: { onClose: () => void }) {
       <div className="spacer" />
       <button className="btn-primary btn-block" disabled={!password || busy} onClick={reveal}>
         {busy ? 'Checking…' : 'Reveal phrase'}
+      </button>
+    </main>
+  );
+}
+
+/**
+ * Connected sites (Track E2a). Lists per-origin dapp grants and revokes them. Revoke
+ * is immediate: the background drops the grant, rejects any pending request from that
+ * origin, and pushes a `disconnect` event so the dapp's session ends right away.
+ */
+function ConnectedSites({ onClose }: { onClose: () => void }) {
+  const [grants, setGrants] = useState<{ origin: string; grantedAt: number }[] | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  async function refresh() {
+    const { grants } = await client.listConnectedSites();
+    setGrants(grants);
+  }
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  async function revoke(origin: string) {
+    setBusy(origin);
+    try {
+      await client.revokeConnectedSite(origin);
+      await refresh();
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <main className="screen">
+      <div className="home-top">
+        <h1>Connected sites</h1>
+        <button className="icon-btn" onClick={onClose} aria-label="Back">
+          ✕
+        </button>
+      </div>
+
+      {grants === null && <p className="subtitle">Loading…</p>}
+      {grants !== null && grants.length === 0 && (
+        <p className="subtitle">No sites are connected to your wallet.</p>
+      )}
+
+      {grants?.map((g) => (
+        <div className="row" key={g.origin}>
+          <div>
+            <div className="row-label mono">{g.origin}</div>
+            <div className="row-sub">
+              Connected {new Date(g.grantedAt).toLocaleDateString()} · read-only
+            </div>
+          </div>
+          <button disabled={busy === g.origin} onClick={() => revoke(g.origin)}>
+            {busy === g.origin ? '…' : 'Disconnect'}
+          </button>
+        </div>
+      ))}
+
+      <div className="spacer" />
+      <button className="btn-block" onClick={onClose}>
+        Done
       </button>
     </main>
   );

@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Arkade Wallet — test dapp</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 640px;
+        margin: 40px auto;
+        padding: 0 16px;
+        color: #1a1d21;
+      }
+      h1 { font-size: 20px; }
+      .status { font-size: 13px; color: #6b7280; margin-bottom: 16px; }
+      .status.ok { color: #16a34a; }
+      .status.no { color: #c2410c; }
+      .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+      button {
+        padding: 8px 12px;
+        border: 1px solid #d1d5db;
+        border-radius: 8px;
+        background: #f6f7f9;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      button:hover { border-color: #2f6df6; }
+      pre {
+        background: #16181c;
+        color: #e8eaed;
+        padding: 12px;
+        border-radius: 8px;
+        font-size: 12px;
+        max-height: 380px;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Arkade Wallet — test dapp</h1>
+    <p class="status" id="status">Checking for window.arkadeWallet…</p>
+
+    <div class="buttons">
+      <button data-call="connect">connect()</button>
+      <button data-call="isConnected">isConnected()</button>
+      <button data-call="getAccounts">getAccounts()</button>
+      <button data-call="getAddress">getAddress()</button>
+      <button data-call="getBoardingAddress">getBoardingAddress()</button>
+      <button data-call="getPublicKey">getPublicKey()</button>
+      <button data-call="getBalance">getBalance()</button>
+      <button data-call="getNetwork">getNetwork()</button>
+      <button data-call="disconnect">disconnect()</button>
+      <button id="clear">clear log</button>
+    </div>
+
+    <pre id="log"></pre>
+
+    <script>
+      const logEl = document.getElementById('log');
+      const statusEl = document.getElementById('status');
+
+      function log(label, value) {
+        const time = new Date().toLocaleTimeString();
+        const body = value instanceof Error
+          ? `${value.name}: ${value.message}` + (value.code ? `  [code=${value.code}]` : '')
+          : JSON.stringify(value, null, 2);
+        logEl.textContent = `[${time}] ${label}\n${body}\n\n` + logEl.textContent;
+      }
+
+      // The provider injects at document_start, but be defensive on slow loads.
+      function ready() {
+        const w = window.arkadeWallet;
+        if (w) {
+          statusEl.textContent = 'window.arkadeWallet detected ✓';
+          statusEl.className = 'status ok';
+          // Subscribe to provider events to prove they reach the page.
+          ['accountsChanged', 'networkChanged', 'disconnect'].forEach((ev) =>
+            w.on(ev, (data) => log(`event: ${ev}`, data ?? null)),
+          );
+        } else {
+          statusEl.textContent =
+            'window.arkadeWallet NOT found — is the extension loaded on this origin?';
+          statusEl.className = 'status no';
+        }
+      }
+      if (window.arkadeWallet) ready();
+      else window.addEventListener('load', ready);
+
+      document.querySelectorAll('button[data-call]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const method = btn.dataset.call;
+          const w = window.arkadeWallet;
+          if (!w) return log(method, new Error('window.arkadeWallet is undefined'));
+          try {
+            const result = await w[method]();
+            log(`${method}() →`, result ?? null);
+          } catch (err) {
+            log(`${method}() threw`, err);
+          }
+        });
+      });
+
+      document.getElementById('clear').addEventListener('click', () => {
+        logEl.textContent = '';
+      });
+    </script>
+  </body>
+</html>

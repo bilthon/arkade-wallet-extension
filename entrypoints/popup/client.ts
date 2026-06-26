@@ -25,6 +25,10 @@ export const client = {
   recoverNow: () => sendMessage('recoverNow', undefined),
   onboardNow: () => sendMessage('onboardNow', undefined),
   getRenewalWarning: () => sendMessage('getRenewalWarning', undefined),
+  // Connected sites (Track E2a): list + revoke per-origin dapp grants.
+  listConnectedSites: () => sendMessage('listConnectedSites', undefined),
+  revokeConnectedSite: (origin: string) =>
+    sendMessage('revokeConnectedSite', { origin }),
 };
 
 /** True when a read failed because the wallet is locked (SW threw 'LOCKED'). */
