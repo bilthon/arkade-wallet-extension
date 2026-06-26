@@ -43,7 +43,7 @@ import {
   emitToAllConnected,
   resolveApproval,
   onWindowClosed,
-} from '@/src/dapp-handlers';
+} from '@/src/provider-handlers';
 
 /**
  * Stateless request router (PLAN.md §2/§3). Holds no secret/wallet state in memory
@@ -59,7 +59,7 @@ export default defineBackground(() => {
   registerAutoLock();
   // Track F: arm the recurring VTXO-renewal alarm (renew-while-unlocked fallback).
   registerRenewal();
-  // Track E2a: on lock (manual or auto), notify connected dapps their session ended.
+  // Track E2a: on lock (manual or auto), notify connected sites their session ended.
   // Reads need the wallet unlocked, so a lock effectively disconnects them.
   onLock(() => {
     void emitToAllConnected('disconnect');
@@ -179,39 +179,39 @@ export default defineBackground(() => {
     return { warning: await getRenewalWarning() };
   });
 
-  // ── Dapp provider surface (Track E2a) ──────────────────────────────────────
+  // ── Provider surface (Track E2a) ───────────────────────────────────────────
   //
   // The ONLY handlers that take an untrusted origin. Each derives the origin from
   // `sender` (M4 — NEVER a body field) and checks the per-origin grant before doing
   // any work. `connect` opens the approval window; the reads are grant + unlock gated
-  // and return typed LOCKED/NOT_CONNECTED/BAD_ORIGIN the dapp can handle.
+  // and return typed LOCKED/NOT_CONNECTED/BAD_ORIGIN the web app can handle.
 
-  onMessage('dappConnect', ({ sender }) => handleConnect(sender, requireWallet));
-  onMessage('dappDisconnect', ({ sender }) => handleDisconnect(sender));
-  onMessage('dappIsConnected', ({ sender }) => handleIsConnected(sender));
-  onMessage('dappGetAccounts', ({ sender }) => handleGetAccounts(sender));
+  onMessage('providerConnect', ({ sender }) => handleConnect(sender, requireWallet));
+  onMessage('providerDisconnect', ({ sender }) => handleDisconnect(sender));
+  onMessage('providerIsConnected', ({ sender }) => handleIsConnected(sender));
+  onMessage('providerGetAccounts', ({ sender }) => handleGetAccounts(sender));
 
-  onMessage('dappGetAddress', async ({ sender }) => {
+  onMessage('providerGetAddress', async ({ sender }) => {
     await requireRead(sender, 'getAddress');
     return { address: await getAddress(await requireWallet()) };
   });
 
-  onMessage('dappGetBoardingAddress', async ({ sender }) => {
+  onMessage('providerGetBoardingAddress', async ({ sender }) => {
     await requireRead(sender, 'getBoardingAddress');
     return { boardingAddress: await getBoardingAddress(await requireWallet()) };
   });
 
-  onMessage('dappGetPublicKey', async ({ sender }) => {
+  onMessage('providerGetPublicKey', async ({ sender }) => {
     await requireRead(sender, 'getPublicKey');
     return getPublicKey(await requireWallet());
   });
 
-  onMessage('dappGetBalance', async ({ sender }) => {
+  onMessage('providerGetBalance', async ({ sender }) => {
     await requireRead(sender, 'getBalance');
     return getBalance(await requireWallet());
   });
 
-  onMessage('dappGetNetwork', ({ sender }) => handleGetNetwork(sender));
+  onMessage('providerGetNetwork', ({ sender }) => handleGetNetwork(sender));
 
   // ── Approval window ↔ background (trusted extension page) ──────────────────
   onMessage('getApprovalRequest', async ({ data }) => {
@@ -223,7 +223,7 @@ export default defineBackground(() => {
     return { ok: true as const };
   });
 
-  // When the approval window is closed without a decision, reject the dapp's promise.
+  // When the approval window is closed without a decision, reject the web app's promise.
   browser.windows.onRemoved.addListener((windowId) => {
     void onWindowClosed(windowId);
   });

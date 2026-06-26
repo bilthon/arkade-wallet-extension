@@ -1,25 +1,25 @@
 /**
  * Approval-window flow (PLAN.md §7, BUILD_PLAN Phase 3 Track E).
  *
- * A dapp request that needs user consent (currently only `connect`) does NOT resolve
+ * A web app request that needs user consent (currently only `connect`) does NOT resolve
  * inline. Instead:
  *   1. The background creates a pending request: a serializable record keyed by a
  *      random `requestId`, persisted to `chrome.storage.session`, plus an in-memory
  *      promise whose resolve/reject we hold.
  *   2. It opens a dedicated approval WINDOW (`chrome.windows.create`, type 'popup') at
  *      `approval.html?requestId=…`. A window — not an in-page modal — so a malicious
- *      dapp can't iframe or overlay it (anti-clickjacking); the page also sets CSP
+ *      web app can't iframe or overlay it (anti-clickjacking); the page also sets CSP
  *      `frame-ancestors 'none'`.
  *   3. The approval page reads the request (by id) — showing the SW-DERIVED origin,
- *      never a dapp-supplied label — waits out a settle-delay, and posts back
+ *      never a site-supplied label — waits out a settle-delay, and posts back
  *      approve/reject, which settles the original promise.
  *
  * ONE approval window at a time. A second request *from the same origin* while one is
- * pending is rejected (the dapp should await the first). A request from a DIFFERENT
+ * pending is rejected (the web app should await the first). A request from a DIFFERENT
  * origin while a window is open is also rejected — we never stack windows.
  *
  * The promise callbacks live only in SW memory: if the SW is killed before the user
- * answers, the dapp's call simply times out (provider has its own timeout). The
+ * answers, the web app's call simply times out (provider has its own timeout). The
  * persisted record is cleaned up on resolution or when a stale window is detected.
  */
 
@@ -40,7 +40,7 @@ export interface ApprovalDecision {
 
 const PENDING_KEY = 'pendingApproval';
 
-/** A typed error a dapp handler can surface when a request can't be queued. */
+/** A typed error a web app handler can surface when a request can't be queued. */
 export class ApprovalError extends Error {
   constructor(
     readonly code: 'BUSY' | 'NO_REQUEST' | 'WINDOW_FAILED',
@@ -181,7 +181,7 @@ async function clearInFlight(): Promise<void> {
 
 /**
  * Handle the approval window being closed without a decision (the user dismissed it):
- * reject the in-flight request so the dapp's promise doesn't hang. Called from the
+ * reject the in-flight request so the web app's promise doesn't hang. Called from the
  * background's `windows.onRemoved` listener with the closed window id.
  */
 export async function onWindowClosed(windowId: number): Promise<void> {

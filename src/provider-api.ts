@@ -2,34 +2,34 @@ import type { NetworkName } from '@arkade-os/sdk';
 import type { AdjustedBalance } from './vtxo-state';
 
 /**
- * Shared dapp-provider types (PLAN.md §8, `src/provider-api.ts`). Mirrors the SDK
+ * Shared provider types (PLAN.md §8, `src/provider-api.ts`). Mirrors the SDK
  * method names so the provider stays a thin pass-through (no translation layer that
  * can drift). E2a covers connect + the READ surface only — `sendBitcoin`/`signPsbt`/
  * `signMessage` land in E2b and are intentionally absent here.
  *
  * These types are imported by both the MAIN-world provider (to type `window.arkadeWallet`)
- * and the background (to type the dapp message results), so the wire shape is one source.
+ * and the background (to type the provider message results), so the wire shape is one source.
  */
 
-/** Network info returned to a dapp: the active network name + the operator URL. */
+/** Network info returned to a web app: the active network name + the operator URL. */
 export interface NetworkInfo {
   network: NetworkName;
   arkServerUrl: string;
 }
 
-/** Raw user key — x-only (32B) + compressed (33B), hex. Dapps building their own
+/** Raw user key — x-only (32B) + compressed (33B), hex. Web apps building their own
  * VtxoScripts (escrow/HTLC) need this; the Arkade address encodes a tweaked key. */
 export interface PublicKeyInfo {
   xOnly: string;
   compressed: string;
 }
 
-/** The provider events a dapp can subscribe to via `on()`. */
+/** The provider events a web app can subscribe to via `on()`. */
 export type ProviderEvent = 'accountsChanged' | 'networkChanged' | 'disconnect';
 
 /**
  * The `window.arkadeWallet` surface (E2a subset). Each method below maps to a
- * `dapp*` message handled in the background behind origin + grant gating.
+ * `provider*` message handled in the background behind origin + grant gating.
  */
 export interface ArkadeWalletProvider {
   // Connection (read-only grant) — `connect` prompts; the rest read the grant.
@@ -51,7 +51,7 @@ export interface ArkadeWalletProvider {
 }
 
 /**
- * Typed error codes the background returns to the dapp so the page can branch:
+ * Typed error codes the background returns to the web app so the page can branch:
  *  • LOCKED        — wallet exists but is locked; the user must unlock.
  *  • NOT_CONNECTED — the origin has no grant (call connect() first, or it was revoked).
  *  • REJECTED      — the user declined the approval.
@@ -67,7 +67,7 @@ export type ProviderErrorCode =
   | 'BUSY'
   | 'BAD_ORIGIN';
 
-/** Marker prefix so the provider can re-throw a code-tagged error to the dapp. */
+/** Marker prefix so the provider can re-throw a code-tagged error to the web app. */
 export const PROVIDER_ERROR_PREFIX = 'ARKADE_PROVIDER_ERROR:';
 
 /** Build the wire string for a typed provider error (background → content → page). */

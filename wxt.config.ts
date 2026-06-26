@@ -6,7 +6,7 @@ export default defineConfig({
   manifest: {
     name: 'Arkade Wallet',
     // `tabs`: needed to read each tab's URL when pushing provider events to connected
-    // dapp pages (origin-matched). `chrome.windows.create` (the approval window) needs
+    // site pages (origin-matched). `chrome.windows.create` (the approval window) needs
     // no permission. storage/alarms/offscreen unchanged.
     permissions: ['storage', 'alarms', 'offscreen', 'tabs'],
     // PLAN.md §7: no remote code / eval. script-src 'self'; object-src 'none'.

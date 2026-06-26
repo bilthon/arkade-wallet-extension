@@ -22,7 +22,7 @@ import { encodeProviderError, type ProviderEvent } from './provider-api';
 import { PROVIDER_EVENT_TYPE, type ProviderEventMessage } from './provider-events';
 
 /**
- * Dapp-facing handler logic (Track E2a). Every function here takes the message
+ * Provider-facing handler logic (Track E2a). Every function here takes the message
  * `sender` and derives the origin from it — NEVER from a body field (M4). It then
  * checks the per-origin grant and the wallet lock state, and returns public results
  * only. The seed/mnemonic never reach this layer (it lives in keystore.ts).
@@ -43,7 +43,7 @@ export interface ReadWallet {
   getAddress(): Promise<string>;
 }
 
-/** Throw a typed provider error the content bridge passes through to the dapp. */
+/** Throw a typed provider error the content bridge passes through to the web app. */
 function providerError(
   code: Parameters<typeof encodeProviderError>[0],
   message: string,
@@ -54,7 +54,7 @@ function providerError(
 /**
  * Resolve the SW-verified origin from the sender, mapping an `OriginError` to a typed
  * `BAD_ORIGIN` provider error (so a null/opaque/http page gets a clean rejection, not
- * an internal stack). This is the ONLY place origins enter the dapp path.
+ * an internal stack). This is the ONLY place origins enter the provider path.
  */
 export function originFromSender(sender: MessageSenderLike | undefined): string {
   try {
@@ -73,7 +73,7 @@ export function originFromSender(sender: MessageSenderLike | undefined): string 
  * Open the dedicated approval WINDOW for a pending request and return its window id.
  * A real `chrome.windows.create` to the extension's approval page with the requestId
  * in the query string. Centered popup, fixed size, focused. Anti-clickjacking: a
- * separate browser window the dapp can't iframe or overlay (the page also sets CSP
+ * separate browser window the site can't iframe or overlay (the page also sets CSP
  * `frame-ancestors 'none'`).
  */
 export async function openApprovalWindow(request: PendingRequest): Promise<number | null> {
@@ -93,7 +93,7 @@ export async function openApprovalWindow(request: PendingRequest): Promise<numbe
 }
 
 /**
- * Handle a dapp `connect`. Derives the origin (M4), requires a wallet to exist and be
+ * Handle a provider `connect`. Derives the origin (M4), requires a wallet to exist and be
  * unlocked, then — if not already connected — opens the approval window and awaits the
  * user's decision. On approve, persists a READ-ONLY grant and returns the account(s).
  * On reject, throws a typed `REJECTED`. An already-connected origin short-circuits
@@ -158,7 +158,7 @@ export async function handleDisconnect(
   sender: MessageSenderLike | undefined,
 ): Promise<{ ok: true }> {
   const origin = originFromSender(sender);
-  await rejectApprovalForOrigin(origin, 'Disconnected by the dapp.');
+  await rejectApprovalForOrigin(origin, 'Disconnected by the site.');
   await revokeGrant(origin);
   await emitToOrigin(origin, 'disconnect');
   return { ok: true };
@@ -255,7 +255,7 @@ export async function emitToOrigin(
 
 /**
  * Broadcast a provider event to ALL connected origins (e.g. `networkChanged` on a
- * network switch — every connected dapp's view of the network changed).
+ * network switch — every connected site's view of the network changed).
  */
 export async function emitToAllConnected(
   event: ProviderEvent,

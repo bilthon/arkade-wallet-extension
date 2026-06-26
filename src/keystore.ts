@@ -18,9 +18,9 @@ import { getNetwork, getVault, hasVault, setUnlockFlag, setVault } from './stora
 // ─── In-memory seed (M1) ─────────────────────────────────────────────────────
 
 // Observers notified AFTER the wallet locks (manual, auto, or any future path). The
-// background uses this to emit a `disconnect` provider event to connected dapps so a
-// lock drops their session — without the keystore importing the dapp layer (one-way
-// dependency: dapp-handlers depends on keystore, never the reverse).
+// background uses this to emit a `disconnect` provider event to connected web apps so a
+// lock drops their session — without the keystore importing the web app layer (one-way
+// dependency: web app-handlers depends on keystore, never the reverse).
 const lockListeners = new Set<() => void>();
 
 /** Register a callback fired after each successful `lock()`. Returns an unsubscribe. */
@@ -139,7 +139,7 @@ export async function lock(): Promise<void> {
   unlockedMnemonic = null;
   await browser.alarms.clear(ALARM_AUTO_LOCK);
   await setUnlockFlag(false);
-  // Notify observers (the background emits `disconnect` to connected dapps). Listener
+  // Notify observers (the background emits `disconnect` to connected web apps). Listener
   // errors must not break the lock — swallow them.
   for (const listener of [...lockListeners]) {
     try {

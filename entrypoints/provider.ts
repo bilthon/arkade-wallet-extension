@@ -19,13 +19,13 @@ import { decodeProviderError, type ProviderEvent } from '@/src/provider-api';
  * content bridge is the only half that touches `browser.runtime`. The provider is a
  * THIN pass-through — it never holds keys, never sees the seed, and forwards each call
  * by name. The background is where origin + grant gating happens; the provider just
- * surfaces typed errors back to the dapp.
+ * surfaces typed errors back to the web app.
  */
 export default defineUnlistedScript(() => {
   let counter = 0;
   const pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
 
-  // Dapp-registered event handlers (provider `on()` / `removeListener()`).
+  // Web-app-registered event handlers (provider `on()` / `removeListener()`).
   const listeners: Record<ProviderEvent, Set<(...args: unknown[]) => void>> = {
     accountsChanged: new Set(),
     networkChanged: new Set(),
@@ -53,13 +53,13 @@ export default defineUnlistedScript(() => {
         try {
           fn(data.data);
         } catch {
-          // A throwing dapp handler must not break our dispatch loop.
+          // A throwing web-app handler must not break our dispatch loop.
         }
       }
     }
   });
 
-  /** Re-tag a background error string into an Error a dapp can branch on (`.code`). */
+  /** Re-tag a background error string into an Error a web app can branch on (`.code`). */
   function toError(raw: string | undefined): Error & { code?: string } {
     const msg = raw ?? 'bridge error';
     const decoded = decodeProviderError(msg);
@@ -115,10 +115,6 @@ export default defineUnlistedScript(() => {
     removeListener(eventName: ProviderEvent, handler: (...args: unknown[]) => void) {
       if (eventName in listeners) listeners[eventName].delete(handler);
     },
-
-    // Phase-0 smoke-test, kept for the chain check.
-    ping: (data?: { echo?: string }) =>
-      call<{ pong: true; timestamp: number; echo?: string }>('ping', data),
   };
 
   (window as unknown as { arkadeWallet: typeof provider }).arkadeWallet = provider;

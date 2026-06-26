@@ -29,7 +29,7 @@ export const READ_METHODS = [
 export type GrantedMethod = (typeof READ_METHODS)[number];
 
 export interface Grant {
-  /** SW-derived origin (the grant key). Never a dapp-supplied label. */
+  /** SW-derived origin (the grant key). Never a site-supplied label. */
   origin: string;
   /** Arkade account address(es) the origin may see. Single-account for now. */
   accounts: string[];

@@ -5,17 +5,17 @@ import type { PendingRequest } from '@/src/approvals';
 
 /**
  * Approval window (PLAN.md §7, Track E2a). Rendered in a dedicated browser popup window
- * — NOT an in-page modal — so a malicious dapp cannot iframe or overlay it. The page
+ * — NOT an in-page modal — so a malicious web app cannot iframe or overlay it. The page
  * also declares CSP `frame-ancestors 'none'` (wxt.config.ts) so it can never be embedded.
  *
  * Anti-clickjacking measures:
  *  • The origin shown is the SW-DERIVED origin (read back from the background by
- *    requestId), never a dapp-supplied label.
+ *    requestId), never a site-supplied label.
  *  • A ~500 ms settle-delay keeps the Approve button disabled after the window opens,
- *    so a dapp that pops the window timed to a user's click can't get a blind approval.
+ *    so a web app that pops the window timed to a user's click can't get a blind approval.
  *
  * The window reads its `requestId` from the query string, fetches the request, shows it,
- * and posts the user's decision back via `approvalResponse` — which resolves the dapp's
+ * and posts the user's decision back via `approvalResponse` — which resolves the web app's
  * original `connect()` promise in the background.
  */
 
@@ -96,7 +96,7 @@ export function ApprovalPage() {
       <h1>Connection request</h1>
       <p className="subtitle">A website wants to connect to your Arkade wallet.</p>
 
-      {/* SW-derived origin — shown verbatim, never a dapp-supplied name. */}
+      {/* SW-derived origin — shown verbatim, never a site-supplied name. */}
       <div className="approval-origin">{request.origin}</div>
 
       <p>This site will be able to read:</p>

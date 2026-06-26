@@ -3,8 +3,8 @@ import { webcrypto } from 'node:crypto';
 import type { MessageSenderLike } from './origin';
 
 /**
- * Dapp-handler gating (Track E2a, M4). The end-to-end origin + grant contract the SW
- * exposes to a dapp:
+ * Provider-handler gating (Track E2a, M4). The end-to-end origin + grant contract the
+ * SW exposes to a web app:
  *   • a https origin can connect (approval) and then read; an http/null origin is
  *     rejected with BAD_ORIGIN and can never connect.
  *   • a granted read method is allowed; an ungranted one is NOT_CONNECTED; post-revoke
@@ -42,7 +42,7 @@ const browserMock = {
     onRemoved: { addListener: vi.fn() },
   },
   tabs: {
-    query: vi.fn(async () => [{ id: 1, url: 'https://dapp.example/page' }]),
+    query: vi.fn(async () => [{ id: 1, url: 'https://site.example/page' }]),
     sendMessage: vi.fn(async (_id: number, msg: unknown) => void tabsSent.push(msg)),
   },
 };
@@ -69,7 +69,7 @@ import {
   requireRead,
   revokeSite,
   resolveApproval,
-} from './dapp-handlers';
+} from './provider-handlers';
 import { setVault, setNetwork } from './storage';
 import { isMethodGranted } from './permissions';
 import { decodeProviderError } from './provider-api';
@@ -78,7 +78,7 @@ function sender(partial: MessageSenderLike): MessageSenderLike {
   return partial;
 }
 
-const HTTPS = sender({ origin: 'https://dapp.example' });
+const HTTPS = sender({ origin: 'https://site.example' });
 
 /** A fake read-only wallet returning a deterministic Arkade address. */
 const fakeWallet = () =>
@@ -118,7 +118,7 @@ beforeEach(async () => {
 describe('handleConnect — origin gating (M4)', () => {
   it('rejects an http (non-loopback) origin with BAD_ORIGIN before any approval', async () => {
     await expect(
-      handleConnect(sender({ origin: 'http://dapp.example' }), fakeWallet),
+      handleConnect(sender({ origin: 'http://site.example' }), fakeWallet),
     ).rejects.toSatisfy((e: unknown) => codeOf(e) === 'BAD_ORIGIN');
     expect(browserMock.windows.create).not.toHaveBeenCalled();
   });
@@ -134,7 +134,7 @@ describe('handleConnect — origin gating (M4)', () => {
     // Connecting from the real sender grants the real origin, never an attacker label.
     const accounts = await connectApproving(HTTPS);
     expect(accounts).toEqual({ accounts: ['tark1theaccount'] });
-    expect(await isMethodGranted('https://dapp.example', 'getBalance')).toBe(true);
+    expect(await isMethodGranted('https://site.example', 'getBalance')).toBe(true);
     expect(await isMethodGranted('https://bank.example', 'getBalance')).toBe(false);
   });
 });
@@ -146,8 +146,8 @@ describe('handleConnect — approval + grant', () => {
     expect(accounts.accounts).toEqual(['tark1theaccount']);
     expect(browserMock.windows.create).toHaveBeenCalledOnce();
     // Read-only: no signing method granted.
-    expect(await isMethodGranted('https://dapp.example', 'getBalance')).toBe(true);
-    expect(await isMethodGranted('https://dapp.example', 'signPsbt')).toBe(false);
+    expect(await isMethodGranted('https://site.example', 'getBalance')).toBe(true);
+    expect(await isMethodGranted('https://site.example', 'signPsbt')).toBe(false);
   });
 
   it('rejects with REJECTED when the user declines', async () => {
@@ -177,7 +177,7 @@ describe('handleConnect — approval + grant', () => {
 describe('requireRead — grant + lock gate', () => {
   it('allows a granted method and rejects an ungranted method', async () => {
     await connectApproving(HTTPS);
-    await expect(requireRead(HTTPS, 'getBalance')).resolves.toBe('https://dapp.example');
+    await expect(requireRead(HTTPS, 'getBalance')).resolves.toBe('https://site.example');
     // getBalance is granted; a never-granted origin is NOT_CONNECTED.
     await expect(
       requireRead(sender({ origin: 'https://other.example' }), 'getBalance'),
@@ -196,11 +196,11 @@ describe('requireRead — grant + lock gate', () => {
 describe('disconnect / revoke', () => {
   it('disconnect revokes the grant and emits a disconnect event to the origin', async () => {
     await connectApproving(HTTPS);
-    expect(await isMethodGranted('https://dapp.example', 'getBalance')).toBe(true);
+    expect(await isMethodGranted('https://site.example', 'getBalance')).toBe(true);
 
     await handleDisconnect(HTTPS);
 
-    expect(await isMethodGranted('https://dapp.example', 'getBalance')).toBe(false);
+    expect(await isMethodGranted('https://site.example', 'getBalance')).toBe(false);
     expect((await handleIsConnected(HTTPS)).connected).toBe(false);
     // A disconnect event was pushed to the matching tab.
     expect(tabsSent.some((m) => (m as { event?: string }).event === 'disconnect')).toBe(true);
@@ -208,7 +208,7 @@ describe('disconnect / revoke', () => {
 
   it('revokeSite (from Settings) revokes and reads then fail NOT_CONNECTED', async () => {
     await connectApproving(HTTPS);
-    await revokeSite('https://dapp.example');
+    await revokeSite('https://site.example');
     await expect(requireRead(HTTPS, 'getBalance')).rejects.toSatisfy(
       (e: unknown) => codeOf(e) === 'NOT_CONNECTED',
     );
