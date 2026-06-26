@@ -290,7 +290,7 @@ export function validateAmount(amount: number, available: number): void {
 /**
  * Off-chain Arkade→Arkade send. Validates the address (active network) and amount
  * (dust + live available balance) BEFORE signing, then calls the SDK's
- * `wallet.sendBitcoin({ address, amount })` — instant, ~zero fee, no L1 footprint
+ * `wallet.send({ address, amount })` — instant, ~zero fee, no L1 footprint
  * (PLAN.md §6 regime 1). Returns the txid the SDK gives.
  *
  * On-chain (`bc1…`) and Lightning are deliberately NOT routed here — they map to
@@ -308,6 +308,8 @@ export async function sendBitcoin(
   const balance = await wallet.getBalance();
   validateAmount(amount, balance.available);
 
-  const txid = await wallet.sendBitcoin({ address: address.trim(), amount });
+  // wallet.send is the non-deprecated successor to wallet.sendBitcoin; a single
+  // Recipient { address, amount } is the off-chain Arkade→Arkade case.
+  const txid = await wallet.send({ address: address.trim(), amount });
   return { txid };
 }
