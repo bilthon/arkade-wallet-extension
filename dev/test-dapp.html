@@ -52,8 +52,18 @@
       <button data-call="getPublicKey">getPublicKey()</button>
       <button data-call="getBalance">getBalance()</button>
       <button data-call="getNetwork">getNetwork()</button>
+      <button id="signMessage">signMessage()</button>
+      <button id="signPsbt">signPsbt(psbt, idx)</button>
       <button data-call="disconnect">disconnect()</button>
       <button id="clear">clear log</button>
+    </div>
+
+    <div class="buttons">
+      <input id="msg" placeholder="message to sign" value="Sign in to test web app" style="flex:1;min-width:200px;padding:8px;border:1px solid #d1d5db;border-radius:8px;" />
+    </div>
+    <div class="buttons">
+      <input id="psbt" placeholder="base64/hex PSBT" style="flex:1;min-width:200px;padding:8px;border:1px solid #d1d5db;border-radius:8px;" />
+      <input id="idx" placeholder="input indexes (e.g. 0,1)" value="0" style="width:160px;padding:8px;border:1px solid #d1d5db;border-radius:8px;" />
     </div>
 
     <pre id="log"></pre>
@@ -101,6 +111,38 @@
             log(`${method}() threw`, err);
           }
         });
+      });
+
+      // signMessage: BIP322 over the text in the message box (re-prompts every call).
+      document.getElementById('signMessage').addEventListener('click', async () => {
+        const w = window.arkadeWallet;
+        if (!w) return log('signMessage', new Error('window.arkadeWallet is undefined'));
+        const message = document.getElementById('msg').value;
+        try {
+          const sig = await w.signMessage({ message });
+          log('signMessage() →', sig);
+        } catch (err) {
+          log('signMessage() threw', err);
+        }
+      });
+
+      // signPsbt: partial-sign the given inputs, returns the UNFINALIZED PSBT (base64).
+      // Paste an escrow/own-coin PSBT and the input indexes to sign.
+      document.getElementById('signPsbt').addEventListener('click', async () => {
+        const w = window.arkadeWallet;
+        if (!w) return log('signPsbt', new Error('window.arkadeWallet is undefined'));
+        const psbt = document.getElementById('psbt').value.trim();
+        const inputIndexes = document
+          .getElementById('idx')
+          .value.split(',')
+          .map((s) => parseInt(s.trim(), 10))
+          .filter((n) => Number.isInteger(n));
+        try {
+          const signed = await w.signPsbt({ psbt, inputIndexes });
+          log('signPsbt() → (unfinalized)', signed);
+        } catch (err) {
+          log('signPsbt() threw', err);
+        }
       });
 
       document.getElementById('clear').addEventListener('click', () => {

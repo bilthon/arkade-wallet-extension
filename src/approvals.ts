@@ -1,7 +1,7 @@
 /**
  * Approval-window flow (PLAN.md §7, BUILD_PLAN Phase 3 Track E).
  *
- * A web app request that needs user consent (currently only `connect`) does NOT resolve
+ * A web app request that needs user consent (connect / signMessage / signPsbt) does NOT resolve
  * inline. Instead:
  *   1. The background creates a pending request: a serializable record keyed by a
  *      random `requestId`, persisted to `chrome.storage.session`, plus an in-memory
@@ -23,7 +23,23 @@
  * persisted record is cleaned up on resolution or when a stale window is detected.
  */
 
-export type ApprovalKind = 'connect';
+import type { PsbtSummary } from './psbt-inspect';
+
+export type ApprovalKind = 'connect' | 'signMessage' | 'signPsbt';
+
+/**
+ * The serializable payload each approval kind shows the user. NO secrets ever cross
+ * into this (it lands in `storage.session` and is read by the approval window):
+ *  • connect     — nothing extra (the origin + a fixed read-method list is the whole UI).
+ *  • signMessage — the exact message text the site asked us to BIP322-sign.
+ *  • signPsbt    — the SW-computed PSBT summary (outputs, own-change, fee, which inputs
+ *                  we sign, danger flags, contract co-sign details). NEVER a site-supplied
+ *                  summary — this is the inspector's output, computed in the SW.
+ */
+export type ApprovalPayload =
+  | { kind: 'connect' }
+  | { kind: 'signMessage'; message: string }
+  | { kind: 'signPsbt'; summary: PsbtSummary };
 
 /** Serializable request the approval window reads (NO secrets, NO promise callbacks). */
 export interface PendingRequest {
@@ -32,6 +48,8 @@ export interface PendingRequest {
   /** SW-derived origin (origin.ts). The approval UI shows THIS, verbatim. */
   origin: string;
   createdAt: number;
+  /** Kind-specific render data (the message / the PSBT summary). */
+  payload: ApprovalPayload;
 }
 
 export interface ApprovalDecision {
@@ -85,15 +103,15 @@ export async function getPendingRequest(requestId: string): Promise<PendingReque
 }
 
 /**
- * Open an approval window for `kind` from `origin` and return a promise that settles
+ * Open an approval window for `payload` from `origin` and return a promise that settles
  * when the user (or a revocation) resolves it. `openWindow` is injected so tests can
  * drive resolution without a real `chrome.windows.create`; in the background it is the
- * real window-create call.
+ * real window-create call. The `kind` is taken from the payload so the two never drift.
  *
  * Throws `ApprovalError('BUSY')` if a request is already in flight (one window at a time).
  */
 export async function requestApproval(
-  kind: ApprovalKind,
+  payload: ApprovalPayload,
   origin: string,
   openWindow: (request: PendingRequest) => Promise<number | null>,
 ): Promise<ApprovalDecision> {
@@ -106,9 +124,10 @@ export async function requestApproval(
 
   const request: PendingRequest = {
     requestId: randomId(),
-    kind,
+    kind: payload.kind,
     origin,
     createdAt: Date.now(),
+    payload,
   };
 
   // Establish the in-flight record BEFORE opening the window so a fast approve can't race

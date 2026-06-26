@@ -108,6 +108,12 @@ export default defineUnlistedScript(() => {
     getBalance: () => call('getBalance'),
     getNetwork: () => call('getNetwork'),
 
+    // Signing (each opens an approval window every call). Long timeout like connect.
+    signMessage: (params: { message: string }) =>
+      call<{ signature: string }>('signMessage', params).then((r) => r.signature),
+    signPsbt: (params: { psbt: string; inputIndexes: number[] }) =>
+      call<{ psbt: string }>('signPsbt', params).then((r) => r.psbt),
+
     // Events.
     on(eventName: ProviderEvent, handler: (...args: unknown[]) => void) {
       if (eventName in listeners) listeners[eventName].add(handler);

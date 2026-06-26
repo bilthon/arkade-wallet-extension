@@ -119,6 +119,15 @@ export interface ProtocolMap {
   providerGetPublicKey(): PublicKeyInfo;
   providerGetBalance(): AdjustedBalance;
   providerGetNetwork(): NetworkInfo;
+  // Signing — each re-prompts via the approval window (NOT granted by connect). The SW
+  // validates everything itself; the seed never crosses this boundary, only the signature
+  // / signed PSBT does. `signPsbt` returns the PSBT UNFINALIZED (others co-sign after us).
+  providerSignMessage(data: { message: string }): { signature: string };
+  providerSignPsbt(data: {
+    psbt: string;
+    inputIndexes: number[];
+    allowHighFee?: boolean;
+  }): { psbt: string };
 
   // ─── Approval window ↔ background (trusted extension page) ──────────────────
   /** The approval window reads its request by id (shows the SW-derived origin). */

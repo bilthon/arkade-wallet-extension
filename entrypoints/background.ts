@@ -38,6 +38,8 @@ import {
   handleIsConnected,
   handleGetAccounts,
   handleGetNetwork,
+  handleSignMessage,
+  handleSignPsbt,
   requireRead,
   revokeSite,
   emitToAllConnected,
@@ -212,6 +214,13 @@ export default defineBackground(() => {
   });
 
   onMessage('providerGetNetwork', ({ sender }) => handleGetNetwork(sender));
+
+  // Signing — never auto-granted by connect; each opens its own approval window. The SW
+  // validates the request, signs only on approve, and returns only the public result.
+  onMessage('providerSignMessage', ({ sender, data }) =>
+    handleSignMessage(sender, data.message, requireWallet),
+  );
+  onMessage('providerSignPsbt', ({ sender, data }) => handleSignPsbt(sender, data, requireWallet));
 
   // ── Approval window ↔ background (trusted extension page) ──────────────────
   onMessage('getApprovalRequest', async ({ data }) => {

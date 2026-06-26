@@ -4,8 +4,9 @@ import type { AdjustedBalance } from './vtxo-state';
 /**
  * Shared provider types (PLAN.md §8, `src/provider-api.ts`). Mirrors the SDK
  * method names so the provider stays a thin pass-through (no translation layer that
- * can drift). E2a covers connect + the READ surface only — `sendBitcoin`/`signPsbt`/
- * `signMessage` land in E2b and are intentionally absent here.
+ * can drift). Covers connect + the read surface (E2a) and the signing surface (E2b:
+ * `signMessage` + `signPsbt`). `sendBitcoin` (off-chain) + on-chain/Lightning are out
+ * of this generic provider — they map to their own flows (PLAN.md §8).
  *
  * These types are imported by both the MAIN-world provider (to type `window.arkadeWallet`)
  * and the background (to type the provider message results), so the wire shape is one source.
@@ -28,8 +29,9 @@ export interface PublicKeyInfo {
 export type ProviderEvent = 'accountsChanged' | 'networkChanged' | 'disconnect';
 
 /**
- * The `window.arkadeWallet` surface (E2a subset). Each method below maps to a
- * `provider*` message handled in the background behind origin + grant gating.
+ * The `window.arkadeWallet` surface. Each method below maps to a `provider*` message
+ * handled in the background behind origin + grant gating. Reads require an active grant;
+ * the two signing methods are NEVER auto-granted — they re-prompt on every call.
  */
 export interface ArkadeWalletProvider {
   // Connection (read-only grant) — `connect` prompts; the rest read the grant.
@@ -45,6 +47,15 @@ export interface ArkadeWalletProvider {
   getBalance(): Promise<AdjustedBalance>;
   getNetwork(): Promise<NetworkInfo>;
 
+  // Signing (each re-prompts; never granted by connect).
+  /** BIP322/Schnorr message signing. Returns the base64 signature. Rejects a
+   *  sighash-shaped (bare 32-byte) message — only human-readable text is signed here. */
+  signMessage(params: { message: string }): Promise<string>;
+  /** Partial-sign the given inputs and return the PSBT UNFINALIZED (base64). The SW
+   *  validates the PSBT itself; for a co-signed VtxoScript leaf it adds only our
+   *  Schnorr tapScriptSig so the other parties sign in sequence. */
+  signPsbt(params: { psbt: string; inputIndexes: number[] }): Promise<string>;
+
   // Events.
   on(event: ProviderEvent, handler: (...args: unknown[]) => void): void;
   removeListener(event: ProviderEvent, handler: (...args: unknown[]) => void): void;
@@ -58,6 +69,8 @@ export interface ArkadeWalletProvider {
  *  • NO_WALLET     — no wallet has been created yet.
  *  • BUSY          — another approval window is already open.
  *  • BAD_ORIGIN    — the request origin is null/opaque/insecure (cannot connect).
+ *  • BAD_REQUEST   — the call's arguments are malformed or unsafe (e.g. a sighash-shaped
+ *                    signMessage, an undecodable PSBT, an input we can't sign).
  */
 export type ProviderErrorCode =
   | 'LOCKED'
@@ -65,7 +78,8 @@ export type ProviderErrorCode =
   | 'REJECTED'
   | 'NO_WALLET'
   | 'BUSY'
-  | 'BAD_ORIGIN';
+  | 'BAD_ORIGIN'
+  | 'BAD_REQUEST';
 
 /** Marker prefix so the provider can re-throw a code-tagged error to the web app. */
 export const PROVIDER_ERROR_PREFIX = 'ARKADE_PROVIDER_ERROR:';
