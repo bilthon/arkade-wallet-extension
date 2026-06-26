@@ -24,7 +24,7 @@ export function Receive({
   const address = isArkade ? arkAddress : boardingAddress;
   const caption = isArkade
     ? 'Arkade address — instant, near-zero fee. Best for Arkade-to-Arkade payments.'
-    : 'On-chain boarding address — send regular Bitcoin here; it onboards into Arkade after confirmation.';
+    : 'On-chain boarding address — deposit regular Bitcoin here. It appears under "Boarding"; becoming spendable in Arkade (onboarding) ships in a later update.';
 
   async function copy() {
     try {
