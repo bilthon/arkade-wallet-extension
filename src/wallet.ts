@@ -2,6 +2,7 @@ import {
   Wallet,
   SeedIdentity,
   ArkAddress,
+  Ramps,
   networks,
   IndexedDBWalletRepository,
   IndexedDBContractRepository,
@@ -9,6 +10,12 @@ import {
   type WalletBalance,
 } from '@arkade-os/sdk';
 import { getNetwork as getStoredNetwork } from './storage';
+import {
+  adjustBalanceForExpiry,
+  partitionVtxos,
+  soonestExpiry,
+  type AdjustedBalance,
+} from './vtxo-state';
 
 /**
  * Track C — SDK wallet runtime (PLAN.md §2, BUILD_PLAN Track C).
@@ -130,9 +137,25 @@ export function getBoardingAddress(wallet: Wallet): Promise<string> {
   return wallet.getBoardingAddress();
 }
 
-/** Full balance breakdown (available/preconfirmed/settled/boarding/…) — NOT one number (PLAN.md §6). */
-export function getBalance(wallet: Wallet): Promise<WalletBalance> {
-  return wallet.getBalance();
+/**
+ * Full balance breakdown, corrected for expired-but-unswept VTXOs (Track F bug fix).
+ *
+ * The raw `wallet.getBalance()` counts a VTXO whose batch expiry has elapsed but
+ * which the operator hasn't swept (state still "settled"/"preconfirmed") into
+ * `available` — yet `wallet.send`'s coin selection refuses it. We re-read the VTXO
+ * set, partition out the expired ones via the SDK's `isExpired`/`isSpendable`, and
+ * subtract their value from `available`/`settled`/`preconfirmed`, surfacing it as a
+ * distinct `expired` bucket plus the soonest upcoming expiry (for the countdown UI).
+ *
+ * `getVtxos({ withRecoverable: true })` is needed so swept (recoverable) coins are
+ * visible and correctly excluded from spendable rather than silently inflating it.
+ */
+export async function getBalance(wallet: Wallet): Promise<AdjustedBalance> {
+  const [balance, vtxos] = await Promise.all([
+    wallet.getBalance(),
+    wallet.getVtxos({ withRecoverable: true }),
+  ]);
+  return adjustBalanceForExpiry(balance, vtxos);
 }
 
 /** The active network name (from storage; addresses are operator-bound to it). */
@@ -303,12 +326,101 @@ export async function send(
   const network = await getStoredNetwork();
   validateArkadeAddress(address, network);
 
-  // Validate the amount against the LIVE available balance (not a cached snapshot)
-  // so a stale UI can't authorize an over-spend.
-  const balance = await wallet.getBalance();
+  // Validate the amount against the LIVE *expiry-adjusted* available balance (not the
+  // raw SDK balance, which over-counts expired coins). This is the pre-check that now
+  // catches the expired-coin case up front (AMOUNT_EXCEEDS_BALANCE → "…available
+  // balance") instead of letting the SDK throw its opaque "Insufficient funds".
+  const balance = await getBalance(wallet);
   validateAmount(amount, balance.available);
 
   // A single Recipient { address, amount } is the off-chain Arkade→Arkade case.
-  const txid = await wallet.send({ address: address.trim(), amount });
-  return { txid };
+  try {
+    const txid = await wallet.send({ address: address.trim(), amount });
+    return { txid };
+  } catch (err) {
+    // Defense in depth: if coin selection still refuses (e.g. a coin expired in the
+    // window between our pre-check and the send), translate the raw SDK message into
+    // the human one rather than leaking "Insufficient funds".
+    if (err instanceof Error && /insufficient funds/i.test(err.message)) {
+      throw new Error(
+        balance.expired > 0
+          ? 'Some of your coins have expired and need renewal before they can be spent. Unlock and renew, then try again.'
+          : 'Not enough spendable balance to cover this send.',
+      );
+    }
+    throw err;
+  }
+}
+
+// ─── Renewal + onboarding (Track F — deliberate, unlock-gated liveness) ───────
+
+/**
+ * Deliberately renew VTXOs that fall within `marginMs` of their batch expiry.
+ *
+ * With `settlementConfig:false` the wallet does NO background renewal (Track E made
+ * the SW wallet never sign unprompted). This is the explicit fallback: it builds the
+ * SDK's `VtxoManager` and calls `renewVtxos({ thresholdSeconds })` — the manager
+ * settles the expiring coins into a fresh batch with a reset expiry, returning a
+ * commitment txid. We MUST pass an explicit threshold: with `settlementConfig:false`,
+ * the manager's `getExpiringVtxos()`/`renewVtxos()` short-circuit to a 3-day default
+ * (or nothing) unless told otherwise.
+ *
+ * The caller guarantees the wallet is unlocked (this signs). "No VTXOs available to
+ * renew" from the SDK is a no-op, not an error — return `{ renewed: 0 }`.
+ */
+export async function renewExpiringVtxos(
+  wallet: Wallet,
+  marginMs: number,
+): Promise<{ renewed: number; txid?: string }> {
+  const manager = await wallet.getVtxoManager();
+  const thresholdSeconds = Math.max(1, Math.round(marginMs / 1000));
+  const expiring = await manager.getExpiringVtxos(marginMs);
+  if (expiring.length === 0) return { renewed: 0 };
+  try {
+    const txid = await manager.renewVtxos(undefined, { thresholdSeconds });
+    return { renewed: expiring.length, txid };
+  } catch (err) {
+    // Race: a coin stopped being renewable between the check and the call.
+    if (err instanceof Error && /no vtxos available to renew/i.test(err.message)) {
+      return { renewed: 0 };
+    }
+    throw err;
+  } finally {
+    await manager.dispose();
+  }
+}
+
+/**
+ * Deliberately onboard confirmed boarding UTXOs into VTXOs (Track F).
+ *
+ * `settlementConfig:false` also killed the silent boarding sweep, so on-chain
+ * deposits no longer auto-onboard. This is the explicit, unlock-gated path: fetch the
+ * operator's fee schedule and run `Ramps.onboard(fees)`, which settles all boarding
+ * inputs into VTXOs via a batch swap (returns a commitment txid). No-op when there's
+ * nothing confirmed to onboard.
+ *
+ * The caller guarantees the wallet is unlocked (this signs).
+ */
+export async function onboardBoarding(
+  wallet: Wallet,
+): Promise<{ onboarded: boolean; txid?: string }> {
+  const balance = await wallet.getBalance();
+  if (balance.boarding.confirmed <= 0) return { onboarded: false };
+  const info = await wallet.arkProvider.getInfo();
+  const txid = await new Ramps(wallet).onboard(info.fees);
+  return { onboarded: true, txid };
+}
+
+/**
+ * Count expired-but-unswept VTXOs (the needs-renewal bucket) plus the soonest
+ * upcoming expiry — used by the renewal scheduler to refresh the warning snapshot the
+ * popup reads ("N coins need renewal" / countdown). Lighter than recomputing the full
+ * balance; the actual "what to renew" selection is the SDK's (`getExpiringVtxos`).
+ */
+export async function getExpiredVtxoSummary(
+  wallet: Wallet,
+): Promise<{ expiredSats: number; count: number; nextExpiryAtMs: number | null }> {
+  const vtxos = await wallet.getVtxos({ withRecoverable: true });
+  const { spendable, expired, expiredSats } = partitionVtxos(vtxos);
+  return { expiredSats, count: expired.length, nextExpiryAtMs: soonestExpiry(spendable) };
 }
