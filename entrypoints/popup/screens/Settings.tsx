@@ -43,6 +43,17 @@ export function Settings({ onBack, onLocked }: { onBack: () => void; onLocked: (
 
       <div className="row">
         <div>
+          <div className="row-label">Renewal</div>
+          <div className="row-sub">
+            VTXOs are renewed automatically while your wallet is unlocked and open. Close or lock
+            it for a long time and coins can expire — reopen and unlock to renew. (Unattended
+            renewal via delegation is coming.)
+          </div>
+        </div>
+      </div>
+
+      <div className="row">
+        <div>
           <div className="row-label">Recovery phrase</div>
           <div className="row-sub">Reveal your backup (asks for your password).</div>
         </div>
