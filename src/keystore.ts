@@ -17,6 +17,18 @@ import { getNetwork, getVault, hasVault, setUnlockFlag, setVault } from './stora
 
 // ─── In-memory seed (M1) ─────────────────────────────────────────────────────
 
+// Observers notified AFTER the wallet locks (manual, auto, or any future path). The
+// background uses this to emit a `disconnect` provider event to connected dapps so a
+// lock drops their session — without the keystore importing the dapp layer (one-way
+// dependency: dapp-handlers depends on keystore, never the reverse).
+const lockListeners = new Set<() => void>();
+
+/** Register a callback fired after each successful `lock()`. Returns an unsubscribe. */
+export function onLock(listener: () => void): () => void {
+  lockListeners.add(listener);
+  return () => lockListeners.delete(listener);
+}
+
 let unlockedSeed: Uint8Array | null = null;
 // Kept alongside the seed so the build step (Track C) can re-derive the identity
 // without re-decrypting. Also in memory only; cleared on lock.
@@ -127,6 +139,15 @@ export async function lock(): Promise<void> {
   unlockedMnemonic = null;
   await browser.alarms.clear(ALARM_AUTO_LOCK);
   await setUnlockFlag(false);
+  // Notify observers (the background emits `disconnect` to connected dapps). Listener
+  // errors must not break the lock — swallow them.
+  for (const listener of [...lockListeners]) {
+    try {
+      listener();
+    } catch {
+      /* a faulty observer must never prevent locking */
+    }
+  }
 }
 
 /** Derive + hold the seed in memory and arm auto-lock. Internal to unlock paths. */

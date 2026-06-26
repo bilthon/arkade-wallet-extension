@@ -26,6 +26,18 @@ export interface BridgeResponse {
   error?: string;
 }
 
+/**
+ * ISOLATED content -> MAIN provider: a background-pushed provider EVENT (no `id`, not
+ * tied to a request). The provider dispatches `event`/`data` to the dapp's `on()`
+ * handlers (disconnect/networkChanged/accountsChanged).
+ */
+export interface BridgeEvent {
+  ns: typeof BRIDGE_NS;
+  dir: 'event';
+  event: string;
+  data?: unknown;
+}
+
 export function isBridgeRequest(d: unknown): d is BridgeRequest {
   return (
     typeof d === 'object' &&
@@ -44,5 +56,15 @@ export function isBridgeResponse(d: unknown): d is BridgeResponse {
     (d as BridgeResponse).ns === BRIDGE_NS &&
     (d as BridgeResponse).dir === 'response' &&
     typeof (d as BridgeResponse).id === 'string'
+  );
+}
+
+export function isBridgeEvent(d: unknown): d is BridgeEvent {
+  return (
+    typeof d === 'object' &&
+    d !== null &&
+    (d as BridgeEvent).ns === BRIDGE_NS &&
+    (d as BridgeEvent).dir === 'event' &&
+    typeof (d as BridgeEvent).event === 'string'
   );
 }
