@@ -53,7 +53,7 @@ export function Send({
     setSending(true);
     setError('');
     try {
-      const { txid: id } = await client.sendBitcoin(address.trim(), amountNum);
+      const { txid: id } = await client.send(address.trim(), amountNum);
       setTxid(id);
       setStage('done');
     } catch (err) {

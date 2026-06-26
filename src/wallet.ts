@@ -170,7 +170,7 @@ function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-// ─── Off-chain send: validation + sendBitcoin (Track E) ──────────────────────
+// ─── Off-chain send: validation + send (Track E) ──────────────────────
 
 /**
  * Dust floor for an Arkade send, in sats. 330 is the standard P2TR dust threshold
@@ -296,7 +296,7 @@ export function validateAmount(amount: number, available: number): void {
  * On-chain (`bc1…`) and Lightning are deliberately NOT routed here — they map to
  * `Ramps.offboard` / Boltz with their own approval UX (separate, later PRs).
  */
-export async function sendBitcoin(
+export async function send(
   wallet: Wallet,
   { address, amount }: { address: string; amount: number },
 ): Promise<{ txid: string }> {
@@ -308,8 +308,7 @@ export async function sendBitcoin(
   const balance = await wallet.getBalance();
   validateAmount(amount, balance.available);
 
-  // wallet.send is the non-deprecated successor to wallet.sendBitcoin; a single
-  // Recipient { address, amount } is the off-chain Arkade→Arkade case.
+  // A single Recipient { address, amount } is the off-chain Arkade→Arkade case.
   const txid = await wallet.send({ address: address.trim(), amount });
   return { txid };
 }

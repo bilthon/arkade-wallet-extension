@@ -17,7 +17,7 @@ import {
   getAddress,
   getBoardingAddress,
   getBalance,
-  sendBitcoin,
+  send,
 } from '@/src/wallet';
 import { getSnapshot, setSnapshot, type WalletSnapshot } from '@/src/wallet-cache';
 
@@ -119,9 +119,9 @@ export default defineBackground(() => {
   // Gated on unlock via requireWallet (re-arms auto-lock). The SW validates
   // address + amount and signs; only the txid crosses back. A thrown
   // SendValidationError / 'LOCKED' / operator error reaches the popup as its message.
-  onMessage('sendBitcoin', async ({ data }) => {
+  onMessage('send', async ({ data }) => {
     const wallet = await requireWallet();
-    return sendBitcoin(wallet, data);
+    return send(wallet, data);
   });
 
   console.log('[arkade] background ready');
