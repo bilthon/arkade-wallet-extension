@@ -230,19 +230,29 @@ export async function revokeSite(origin: string): Promise<void> {
 // ─── events ──────────────────────────────────────────────────────────────────
 
 /**
- * Push a provider event to every tab whose page origin matches `origin`. Best-effort:
- * a tab with no content script (or a closed one) just rejects the sendMessage, which
- * we swallow. Used for `disconnect` (revoke/lock) and could carry `accountsChanged`.
+ * Push a provider event to every tab at this `origin`. Best-effort: a tab with no
+ * content script (or a closed one) just rejects the sendMessage, which we swallow.
+ * Used for `disconnect` (revoke/lock) and could carry `accountsChanged`.
+ *
+ * Least-privilege (security review): we SCOPE the `tabs.query` to a match pattern
+ * built from `origin` (`https://host/*`) instead of `tabs.query({})`, so we never
+ * enumerate every open tab's URL — only tabs at an origin we already have a relationship
+ * with are ever read. `origin` here is always an SW-derived, grant-keyed origin (from
+ * `deriveOrigin`/`listGrants`), never a page-supplied string. The exact-origin post-
+ * filter still runs because match patterns ignore the port (so a port-bearing origin
+ * like `https://host:8443` wouldn't be distinguished by the pattern alone).
  */
 export async function emitToOrigin(
   origin: string,
   event: ProviderEvent,
   data?: unknown,
 ): Promise<void> {
+  const pattern = originMatchPattern(origin);
+  if (!pattern) return;
   const message: ProviderEventMessage = { type: PROVIDER_EVENT_TYPE, event, data };
   let tabs: { id?: number; url?: string }[] = [];
   try {
-    tabs = await browser.tabs.query({});
+    tabs = await browser.tabs.query({ url: pattern });
   } catch {
     return;
   }
@@ -251,6 +261,20 @@ export async function emitToOrigin(
       .filter((t) => t.id != null && t.url && safeOrigin(t.url) === origin)
       .map((t) => browser.tabs.sendMessage(t.id!, message).catch(() => undefined)),
   );
+}
+
+/**
+ * Build a host-scoped tab match pattern (`scheme://host/*`) from an SW-derived origin,
+ * or null if the origin can't be parsed. Drops the port — Chrome match patterns don't
+ * carry one — which is why `emitToOrigin` keeps the exact-origin post-filter.
+ */
+function originMatchPattern(origin: string): string | null {
+  try {
+    const url = new URL(origin);
+    return `${url.protocol}//${url.hostname}/*`;
+  } catch {
+    return null;
+  }
 }
 
 /**

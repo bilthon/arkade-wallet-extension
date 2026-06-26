@@ -5,9 +5,15 @@ export default defineConfig({
   modules: ['@wxt-dev/module-react'],
   manifest: {
     name: 'Arkade Wallet',
-    // `tabs`: needed to read each tab's URL when pushing provider events to connected
-    // site pages (origin-matched). `chrome.windows.create` (the approval window) needs
-    // no permission. storage/alarms/offscreen unchanged.
+    // `tabs`: needed to deliver provider events (disconnect/networkChanged) to the
+    // pages of a CONNECTED site. Least-privilege (security review): we never call
+    // `tabs.query({})` — `emitToOrigin` scopes the query to a `scheme://host/*` match
+    // pattern built from an already-granted origin, so we only ever read tabs at an
+    // origin the user has connected; we do not enumerate every open tab's URL. Matching
+    // tabs by `url` (and reading `tab.url`) needs the `tabs` permission; we keep it over
+    // a broad `host_permissions: ['<all_urls>']` grant because the scoped query is the
+    // tighter of the two for a wallet. `chrome.windows.create` (the approval window)
+    // needs no permission. storage/alarms/offscreen unchanged.
     permissions: ['storage', 'alarms', 'offscreen', 'tabs'],
     // PLAN.md §7: no remote code / eval. script-src 'self'; object-src 'none'.
     // `frame-ancestors 'none'` (Track E2a): NO extension page — popup OR approval window —
