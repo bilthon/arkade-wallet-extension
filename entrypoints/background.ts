@@ -18,8 +18,16 @@ import {
   getBoardingAddress,
   getBalance,
   send,
+  renewExpiringVtxos,
+  recoverExpiredVtxos,
+  onboardBoarding,
 } from '@/src/wallet';
 import { getSnapshot, setSnapshot, type WalletSnapshot } from '@/src/wallet-cache';
+import {
+  registerRenewal,
+  getRenewalWarning,
+  RENEW_MARGIN_MS,
+} from '@/src/renewal';
 
 /**
  * Stateless request router (PLAN.md §2/§3). Holds no secret/wallet state in memory
@@ -33,6 +41,8 @@ import { getSnapshot, setSnapshot, type WalletSnapshot } from '@/src/wallet-cach
 export default defineBackground(() => {
   // Track B: arm the idle auto-lock alarm handler (PLAN.md §7, Strict posture).
   registerAutoLock();
+  // Track F: arm the recurring VTXO-renewal alarm (renew-while-unlocked fallback).
+  registerRenewal();
 
   // ── Messaging smoke-test (proves the provider→content→background chain) ──────
   onMessage('ping', ({ data }) => {
@@ -122,6 +132,30 @@ export default defineBackground(() => {
   onMessage('send', async ({ data }) => {
     const wallet = await requireWallet();
     return send(wallet, data);
+  });
+
+  // ── Renewal + recovery + onboarding (Track F) ──────────────────────────────
+  // All sign, so all go through requireWallet (unlock-gated; throws 'LOCKED').
+  onMessage('renewNow', async () => {
+    const wallet = await requireWallet();
+    return renewExpiringVtxos(wallet, RENEW_MARGIN_MS);
+  });
+
+  // Recover swept/already-expired coins — the operator re-issues them (distinct from
+  // renewal, which only refreshes still-valid coins).
+  onMessage('recoverNow', async () => {
+    const wallet = await requireWallet();
+    return recoverExpiredVtxos(wallet);
+  });
+
+  onMessage('onboardNow', async () => {
+    const wallet = await requireWallet();
+    return onboardBoarding(wallet);
+  });
+
+  // Read-only, safe while locked — just returns cached counts for the UI.
+  onMessage('getRenewalWarning', async () => {
+    return { warning: await getRenewalWarning() };
   });
 
   console.log('[arkade] background ready');

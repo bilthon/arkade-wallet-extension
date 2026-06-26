@@ -2,13 +2,25 @@ import {
   Wallet,
   SeedIdentity,
   ArkAddress,
+  Ramps,
   networks,
+  isExpired,
+  isRecoverable,
+  isSpendable,
+  isVtxoExpiringSoon,
   IndexedDBWalletRepository,
   IndexedDBContractRepository,
   type NetworkName,
   type WalletBalance,
+  type ExtendedVirtualCoin,
 } from '@arkade-os/sdk';
 import { getNetwork as getStoredNetwork } from './storage';
+import {
+  adjustBalanceForExpiry,
+  partitionVtxos,
+  soonestExpiry,
+  type AdjustedBalance,
+} from './vtxo-state';
 
 /**
  * Track C — SDK wallet runtime (PLAN.md §2, BUILD_PLAN Track C).
@@ -130,9 +142,25 @@ export function getBoardingAddress(wallet: Wallet): Promise<string> {
   return wallet.getBoardingAddress();
 }
 
-/** Full balance breakdown (available/preconfirmed/settled/boarding/…) — NOT one number (PLAN.md §6). */
-export function getBalance(wallet: Wallet): Promise<WalletBalance> {
-  return wallet.getBalance();
+/**
+ * Full balance breakdown, corrected for expired-but-unswept VTXOs (Track F bug fix).
+ *
+ * The raw `wallet.getBalance()` counts a VTXO whose batch expiry has elapsed but
+ * which the operator hasn't swept (state still "settled"/"preconfirmed") into
+ * `available` — yet `wallet.send`'s coin selection refuses it. We re-read the VTXO
+ * set, partition out the expired ones via the SDK's `isExpired`/`isSpendable`, and
+ * subtract their value from `available`/`settled`/`preconfirmed`, surfacing it as a
+ * distinct `expired` bucket plus the soonest upcoming expiry (for the countdown UI).
+ *
+ * `getVtxos({ withRecoverable: true })` is needed so swept (recoverable) coins are
+ * visible and correctly excluded from spendable rather than silently inflating it.
+ */
+export async function getBalance(wallet: Wallet): Promise<AdjustedBalance> {
+  const [balance, vtxos] = await Promise.all([
+    wallet.getBalance(),
+    wallet.getVtxos({ withRecoverable: true }),
+  ]);
+  return adjustBalanceForExpiry(balance, vtxos);
 }
 
 /** The active network name (from storage; addresses are operator-bound to it). */
@@ -303,12 +331,295 @@ export async function send(
   const network = await getStoredNetwork();
   validateArkadeAddress(address, network);
 
-  // Validate the amount against the LIVE available balance (not a cached snapshot)
-  // so a stale UI can't authorize an over-spend.
-  const balance = await wallet.getBalance();
+  // Validate the amount against the LIVE *expiry-adjusted* available balance (not the
+  // raw SDK balance, which over-counts expired coins). This is the pre-check that now
+  // catches the expired-coin case up front (AMOUNT_EXCEEDS_BALANCE → "…available
+  // balance") instead of letting the SDK throw its opaque "Insufficient funds".
+  const balance = await getBalance(wallet);
   validateAmount(amount, balance.available);
 
   // A single Recipient { address, amount } is the off-chain Arkade→Arkade case.
-  const txid = await wallet.send({ address: address.trim(), amount });
-  return { txid };
+  try {
+    const txid = await wallet.send({ address: address.trim(), amount });
+    return { txid };
+  } catch (err) {
+    // Defense in depth: if coin selection still refuses (e.g. a coin expired in the
+    // window between our pre-check and the send), translate the raw SDK message into
+    // the human one rather than leaking "Insufficient funds".
+    if (err instanceof Error && /insufficient funds/i.test(err.message)) {
+      throw new Error(
+        balance.expired > 0
+          ? 'Some of your coins have expired and need renewal before they can be spent. Unlock and renew, then try again.'
+          : 'Not enough spendable balance to cover this send.',
+      );
+    }
+    throw err;
+  }
+}
+
+// ─── Renewal + onboarding (Track F — deliberate, unlock-gated liveness) ───────
+
+/**
+ * Translate a raw batch-settle / intent error into a human, non-fatal message.
+ *
+ * Renewal, recovery, and onboarding all drive a batch swap (`settle`) under the hood,
+ * which registers a pre-signed BIP322 intent with the operator. Two failure modes leak
+ * opaque protocol text we must not rethrow verbatim:
+ *
+ *  • `INVALID_INTENT_PROOF (23): no matching intents found` — the inputs we tried to
+ *    settle don't match a registered intent. The classic trigger (the runtime bug this
+ *    PR fixes) was feeding already-expired/recoverable coins into `renewVtxos`; the
+ *    recover-first drain in `renewExpiringVtxos` now prevents that, but the operator can
+ *    still reject a stale/raced intent, and the failed-settle `deleteIntent` cleanup can
+ *    itself fail ("intent may linger… 'duplicated input' on next settle"). We surface a
+ *    clear, retryable message instead of the raw code.
+ *  • `duplicated input` — a lingering intent from a prior failed settle is still
+ *    registered, wedging the next one. Same treatment: tell the user to retry shortly.
+ *
+ * Returns a user-facing `Error` for those cases, or `null` to signal "not one of these,
+ * rethrow as-is". Never throws.
+ */
+export function translateSettleError(err: unknown): Error | null {
+  if (!(err instanceof Error)) return null;
+  const msg = err.message;
+  if (/INVALID_INTENT_PROOF|no matching intents found/i.test(msg)) {
+    return new Error(
+      'The renewal round was rejected by the operator (no matching intent). ' +
+        'Your funds are safe — please try again in a moment.',
+    );
+  }
+  if (/duplicated input/i.test(msg)) {
+    return new Error(
+      'A previous renewal attempt is still settling. Your funds are safe — ' +
+        'please wait a moment and try again.',
+    );
+  }
+  return null;
+}
+
+/**
+ * Select the VTXOs that are genuinely RENEWABLE: expiring within `marginMs` of their
+ * batch expiry AND still valid (not yet expired, not swept, still spendable).
+ *
+ * Used as the GATE for {@link renewExpiringVtxos} — if nothing is renewable we skip the
+ * renew round entirely. Note it does NOT constrain `renewVtxos`'s inputs (that method
+ * re-derives its own broad set and accepts no input list); the actual protection
+ * against feeding expired/swept coins into renew is the recover-first drain inside
+ * {@link renewExpiringVtxos}. This predicate only answers "is there anything worth
+ * renewing at all?".
+ */
+export function selectRenewable(
+  vtxos: ExtendedVirtualCoin[],
+  marginMs: number,
+): ExtendedVirtualCoin[] {
+  return vtxos.filter(
+    (v) =>
+      isSpendable(v) &&
+      !isExpired(v) &&
+      !isRecoverable(v) &&
+      isVtxoExpiringSoon(v, marginMs),
+  );
+}
+
+/**
+ * Deliberately renew VTXOs that fall within `marginMs` of their batch expiry but are
+ * STILL VALID (not expired, not swept).
+ *
+ * With `settlementConfig:false` the wallet does NO background renewal (Track E made the
+ * SW wallet never sign unprompted). This is the explicit fallback: build the SDK's
+ * `VtxoManager` and call `renewVtxos({ thresholdSeconds })` — the manager settles the
+ * expiring coins into a fresh batch with a reset expiry, returning a commitment txid.
+ * We MUST pass an explicit threshold: with `settlementConfig:false`, the manager's
+ * default short-circuits to a 3-day window unless told otherwise.
+ *
+ * Selection is GUARDED here (not delegated to the SDK's broad `getExpiringVtxos`): only
+ * expiring-still-valid coins ever reach `renewVtxos`. Already-expired/recoverable coins
+ * are excluded — they go through `recoverExpiredVtxos`.
+ *
+ * The caller guarantees the wallet is unlocked (this signs). "No VTXOs available to
+ * renew" from the SDK is a no-op, not an error — return `{ renewed: 0 }`.
+ */
+export async function renewExpiringVtxos(
+  wallet: Wallet,
+  marginMs: number,
+): Promise<{ renewed: number; txid?: string }> {
+  const vtxos = await wallet.getVtxos({ withRecoverable: true });
+  const renewable = selectRenewable(vtxos, marginMs);
+  // Nothing renewable → no-op. Critically, we never call renewVtxos when only expired/
+  // recoverable coins exist: that is exactly what triggered INVALID_INTENT_PROOF.
+  if (renewable.length === 0) return { renewed: 0 };
+
+  const manager = await wallet.getVtxoManager();
+  const thresholdSeconds = Math.max(1, Math.round(marginMs / 1000));
+  try {
+    // PROTOCOL-CRITICAL ORDERING. The SDK's `renewVtxos` does NOT accept an input list:
+    // it re-derives its own set via `getExpiringAndRecoverableVtxos`, which is
+    // `isVtxoExpiringSoon || isRecoverable || (isSpendable && isExpired) || isSubdust`.
+    // So if any swept (`isRecoverable`) or already-expired (`isSpendable && isExpired`)
+    // coin coexists with a genuinely expiring-soon one, `renewVtxos` would settle the
+    // swept/expired coin too — the operator then rejects the round with
+    // `INVALID_INTENT_PROOF (23): no matching intents found` (the reproduced bug).
+    //
+    // We cannot filter renew's inputs, so we DRAIN the poisoning coins first:
+    // `recoverVtxos` settles exactly `isRecoverable || (isSpendable && isExpired) ||
+    // preconfirmed-subdust` back into fresh settled VTXOs. After it completes, none of
+    // those coins match `getExpiringAndRecoverableVtxos` any more, so the subsequent
+    // `renewVtxos` sees a CLEAN set of only expiring-soon-still-valid coins.
+    //
+    // Residual TOCTOU (documented, non-fatal): `renewVtxos` internally re-fetches and
+    // `revalidateBeforeSettle`s right before settling, so a coin the operator sweeps in
+    // the sub-second window between our recover call and that revalidation could re-enter
+    // the set and re-trigger `INVALID_INTENT_PROOF`. That deterministic case (an
+    // already-expired coin sitting there) is eliminated by recover-first; the remaining
+    // race is rare and SELF-HEALING — the catch below maps it to a retryable message
+    // (manual path) and the scheduler swallows + retries it next tick (recovering the
+    // newly-swept coin first), so no funds are stuck and no intent stays wedged.
+    if (hasRecoverableOrExpired(vtxos)) {
+      try {
+        await manager.recoverVtxos();
+      } catch (err) {
+        // "No recoverable" means nothing to drain (race) — fine, proceed to renew.
+        if (!(err instanceof Error && /no recoverable/i.test(err.message))) {
+          const human = translateSettleError(err);
+          throw human ?? err;
+        }
+      }
+    }
+
+    const txid = await manager.renewVtxos(undefined, { thresholdSeconds });
+    return { renewed: renewable.length, txid };
+  } catch (err) {
+    // Race: a coin stopped being renewable between the check and the call.
+    if (err instanceof Error && /no vtxos available to renew/i.test(err.message)) {
+      return { renewed: 0 };
+    }
+    // Lingering-intent / INVALID_INTENT_PROOF → human, non-fatal message (don't wedge).
+    const human = translateSettleError(err);
+    if (human) throw human;
+    throw err;
+  } finally {
+    await manager.dispose();
+  }
+}
+
+/**
+ * True when any VTXO is swept/recoverable or already-expired-but-spendable — the coins
+ * that POISON a renew round (renew settling them yields `INVALID_INTENT_PROOF`). Gates
+ * the recover-first drain in {@link renewExpiringVtxos}.
+ *
+ * Deliberately NARROWER than the SDK's full recovery set (`getRecoverableVtxos`, which
+ * also includes `state==='preconfirmed' && isSubdust`): a preconfirmed-subdust coin is
+ * neither swept nor expired, so it carries a valid registered intent and settles fine
+ * inside renew's own `isSubdust` clause — it does not poison the round. Including it
+ * here would spin up needless recover rounds for benign dust, so we leave it for renew
+ * to absorb.
+ */
+export function hasRecoverableOrExpired(vtxos: ExtendedVirtualCoin[]): boolean {
+  return vtxos.some((v) => isRecoverable(v) || (isSpendable(v) && isExpired(v)));
+}
+
+/**
+ * Recover already-expired / swept VTXOs by re-settling them back to the wallet's own
+ * Arkade address — the operator re-issues them in a fresh batch. This is the DISTINCT
+ * lifecycle from renewal: renewal refreshes still-valid coins approaching expiry;
+ * recovery reclaims coins whose batch expiry has ALREADY passed (swept by the operator,
+ * `state === "swept"`, OR time-expired-but-not-yet-swept). Renewal cannot touch these —
+ * feeding them to `renewVtxos` is the reproduced `INVALID_INTENT_PROOF` bug.
+ *
+ * Uses the SDK's `VtxoManager.recoverVtxos()`, whose selection (`getRecoverableVtxos`)
+ * is `isRecoverable || (isSpendable && isExpired) || preconfirmed-subdust` — so it
+ * covers BOTH the swept and the time-expired-unswept buckets, plus economically-viable
+ * subdust. Settles them home and returns a commitment txid. No-op when nothing is
+ * recoverable.
+ *
+ * The caller guarantees the wallet is unlocked (this signs).
+ */
+export async function recoverExpiredVtxos(
+  wallet: Wallet,
+): Promise<{ recovered: number; sats: number; txid?: string }> {
+  const manager = await wallet.getVtxoManager();
+  try {
+    // Cheap, no-signing probe first — avoids spinning up a batch round for nothing.
+    const recoverable = await manager.getRecoverableBalance();
+    if (recoverable.vtxoCount === 0 || recoverable.recoverable <= 0n) {
+      return { recovered: 0, sats: 0 };
+    }
+    const txid = await manager.recoverVtxos();
+    return {
+      recovered: recoverable.vtxoCount,
+      sats: Number(recoverable.recoverable),
+      txid,
+    };
+  } catch (err) {
+    // Best-effort no-op cases: nothing recoverable, or the capped batch fell below dust
+    // (the recoverable set existed but couldn't form an economical output) — neither is
+    // a user-facing failure.
+    if (
+      err instanceof Error &&
+      /no recoverable|below the dust threshold/i.test(err.message)
+    ) {
+      return { recovered: 0, sats: 0 };
+    }
+    const human = translateSettleError(err);
+    if (human) throw human;
+    throw err;
+  } finally {
+    await manager.dispose();
+  }
+}
+
+/**
+ * Deliberately onboard confirmed boarding UTXOs into VTXOs (Track F).
+ *
+ * `settlementConfig:false` also killed the silent boarding sweep, so on-chain
+ * deposits no longer auto-onboard. This is the explicit, unlock-gated path: fetch the
+ * operator's fee schedule and run `Ramps.onboard(fees)`, which settles all boarding
+ * inputs into VTXOs via a batch swap (returns a commitment txid). No-op when there's
+ * nothing confirmed to onboard.
+ *
+ * `Ramps.onboard` is a batch settle like any other, so the same opaque intent errors
+ * can surface — translate them to a human, non-fatal message rather than leaking the
+ * raw protocol text (parity with the send path).
+ *
+ * The caller guarantees the wallet is unlocked (this signs).
+ */
+export async function onboardBoarding(
+  wallet: Wallet,
+): Promise<{ onboarded: boolean; txid?: string }> {
+  const balance = await wallet.getBalance();
+  if (balance.boarding.confirmed <= 0) return { onboarded: false };
+  const info = await wallet.arkProvider.getInfo();
+  try {
+    const txid = await new Ramps(wallet).onboard(info.fees);
+    return { onboarded: true, txid };
+  } catch (err) {
+    const human = translateSettleError(err);
+    if (human) throw human;
+    throw err;
+  }
+}
+
+/**
+ * Count both the time-expired-but-unswept (needs-renewal) and swept-recoverable
+ * (needs-recovery) buckets plus the soonest upcoming expiry — used by the renewal
+ * scheduler to refresh the warning snapshot the popup reads. Lighter than recomputing
+ * the full balance.
+ */
+export async function getExpiredVtxoSummary(wallet: Wallet): Promise<{
+  expiredSats: number;
+  count: number;
+  recoverableSats: number;
+  recoverableCount: number;
+  nextExpiryAtMs: number | null;
+}> {
+  const vtxos = await wallet.getVtxos({ withRecoverable: true });
+  const { spendable, expired, expiredSats, recoverable, recoverableSats } =
+    partitionVtxos(vtxos);
+  return {
+    expiredSats,
+    count: expired.length,
+    recoverableSats,
+    recoverableCount: recoverable.length,
+    nextExpiryAtMs: soonestExpiry(spendable),
+  };
 }
