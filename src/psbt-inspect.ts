@@ -318,6 +318,16 @@ function classifyInput(tx: Transaction, index: number, ctx: InspectContext): Sig
     );
   }
 
+  // SECURITY (defense-in-depth): the `tapLeafScript` bytes are site-supplied, and neither
+  // `decodeTapscript` nor `Identity.sign` checks that this leaf is actually committed by
+  // the taproot OUTPUT we're spending. An unverified leaf could mislabel a real spend path
+  // (e.g. forge `Multisig(O, U)` so a foreign input reads as a safe own-coin spend, hiding
+  // a contract co-sign or dodging the fee bound). On-chain consensus would reject the
+  // resulting signature, but the APPROVAL DIFF the user sees must be trustworthy on its
+  // own. So we verify the leaf is committed by the input's witnessUtxo script before we
+  // trust ANY of its bytes (clause, signers, role). Inputs we can't verify are rejected.
+  verifyLeafCommitment(tx, index, input, leafScript);
+
   let decoded: ReturnType<typeof decodeTapscript>;
   try {
     decoded = decodeTapscript(leafScript);
@@ -382,6 +392,75 @@ function activeLeafScript(input: ReturnType<Transaction['getInput']>): Uint8Arra
   const last = value[value.length - 1];
   const isLeafVersionByte = last >= 0xc0 && (last & 1) === 0; // 0xc0, 0xc2, … 0xfe
   return isLeafVersionByte ? value.slice(0, -1) : value;
+}
+
+/**
+ * Verify that the active tapleaf is genuinely committed by the taproot OUTPUT the input
+ * spends — so the leaf bytes (and everything we derive from them) are trustworthy, not
+ * just attacker-supplied. Two checks, both against the PSBT's own data:
+ *   1. Rebuild the `VtxoScript` from the input's taptree field (`VtxoTaprootTree`) and
+ *      require its pkScript to EQUAL the input's `witnessUtxo.script`. This proves the
+ *      leaf set is the one committed by the spent output's taproot key (the output key is
+ *      the taproot tweak of that exact tree — a forged tree yields a different pkScript).
+ *   2. Require the active leaf to be one of that tree's leaves. This proves the chosen
+ *      spend path is actually in the committed tree, not an extra leaf bolted onto the
+ *      `tapLeafScript` field.
+ * Any input missing the taptree / witnessUtxo, or failing either check, is `NOT_OUR_INPUT`.
+ */
+function verifyLeafCommitment(
+  tx: Transaction,
+  index: number,
+  input: ReturnType<Transaction['getInput']>,
+  leafScript: Uint8Array,
+): void {
+  const prevScript = input.witnessUtxo?.script;
+  if (!prevScript) {
+    throw new PsbtRejectedError(
+      'NOT_OUR_INPUT',
+      `Input ${index} has no prevout to verify the spend against.`,
+    );
+  }
+
+  let trees: Uint8Array[];
+  try {
+    trees = getArkPsbtFields(tx, index, VtxoTaprootTree);
+  } catch {
+    trees = [];
+  }
+  if (trees.length === 0) {
+    throw new PsbtRejectedError(
+      'NOT_OUR_INPUT',
+      `Input ${index} carries no taproot tree to verify the spend path against.`,
+    );
+  }
+
+  let rebuilt: InstanceType<typeof VtxoScript>;
+  try {
+    rebuilt = VtxoScript.decode(trees[0]);
+  } catch {
+    throw new PsbtRejectedError(
+      'NOT_OUR_INPUT',
+      `Input ${index} has an undecodable taproot tree.`,
+    );
+  }
+
+  // (1) the tree must build the exact output we're spending.
+  if (hex.encode(rebuilt.pkScript) !== hex.encode(prevScript)) {
+    throw new PsbtRejectedError(
+      'NOT_OUR_INPUT',
+      `Input ${index}'s spend path is not committed by the coin it spends.`,
+    );
+  }
+
+  // (2) the active leaf must be one of that committed tree's leaves.
+  const leafHex = hex.encode(leafScript);
+  const committed = rebuilt.scripts.some((s) => hex.encode(s) === leafHex);
+  if (!committed) {
+    throw new PsbtRejectedError(
+      'NOT_OUR_INPUT',
+      `Input ${index}'s spend path is not part of the coin's taproot tree.`,
+    );
+  }
 }
 
 /** Pull the signer pubkeys out of any multisig-bearing leaf (all our leaf types carry

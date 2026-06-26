@@ -255,6 +255,29 @@ describe('reject paths', () => {
     }
   });
 
+  it('rejects an input whose taproot tree does not build the spent output (forged coin)', () => {
+    // The core leaf-commitment attack: the input claims a leaf naming us (O,U) — which
+    // WOULD read as our own coin — but its witnessUtxo (the coin actually being spent) is a
+    // DIFFERENT taproot output. Because the committed tree no longer tweaks to the spent
+    // output key, the leaf is not trustworthy and the input must be rejected (not signed,
+    // not shown as an own coin). Tamper the witnessUtxo script to simulate this.
+    const ours = MultisigTapscript.encode({ pubkeys: [O, U] }).script;
+    const { tx } = buildSpend([ours]);
+    const wu = tx.getInput(0).witnessUtxo!;
+    const wrongScript = new VtxoScript([MultisigTapscript.encode({ pubkeys: [O, X] }).script])
+      .pkScript;
+    tx.updateInput(0, { witnessUtxo: { script: wrongScript, amount: wu.amount } }, true);
+
+    try {
+      inspectPsbt(tx, [0], ctx);
+      throw new Error('should have thrown — uncommitted spend path must be rejected');
+    } catch (e) {
+      expect((e as PsbtRejectedError).code).toBe('NOT_OUR_INPUT');
+      expect((e as Error).message).toMatch(/committed|taproot tree|spend path|coin/i);
+    }
+  });
+
+
   it('rejects a fee above the sanity bound unless overridden (FEE_TOO_HIGH)', () => {
     // own-coin spend with a 100k input but only a 1k output → ~99k fee, over the 50k bound.
     const ownLeaf = MultisigTapscript.encode({ pubkeys: [O, U] }).script;
