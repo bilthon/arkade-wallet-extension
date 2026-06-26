@@ -19,6 +19,8 @@ export const client = {
   getNetwork: () => sendMessage('getNetwork', undefined),
   getWalletSnapshot: () => sendMessage('getWalletSnapshot', undefined),
   refreshWalletSnapshot: () => sendMessage('refreshWalletSnapshot', undefined),
+  send: (address: string, amount: number) =>
+    sendMessage('send', { address, amount }),
 };
 
 /** True when a read failed because the wallet is locked (SW threw 'LOCKED'). */

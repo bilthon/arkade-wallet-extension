@@ -88,12 +88,27 @@ export function Backup({ mnemonic, onDone }: { mnemonic: string; onDone: () => v
   );
 }
 
-/** Pick `count` distinct random indexes in [0, length). */
+/** Pick `count` distinct random indexes in [0, length). CSPRNG only — the wallet
+ * holds the "no Math.random anywhere" invariant (PLAN.md §7 spirit). */
 function pickRandom(length: number, count: number): number[] {
   const pool = Array.from({ length }, (_, i) => i);
   for (let i = pool.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = randomInt(i + 1);
     [pool[i], pool[j]] = [pool[j], pool[i]];
   }
   return pool.slice(0, count).sort((a, b) => a - b);
+}
+
+/** Unbiased random integer in [0, max) via `crypto.getRandomValues` (rejection
+ * sampling to drop the modulo bias). max is small here (word count), so the loop
+ * effectively never re-rolls. */
+function randomInt(max: number): number {
+  const limit = Math.floor(0x1_0000_0000 / max) * max;
+  const buf = new Uint32Array(1);
+  let x = 0;
+  do {
+    crypto.getRandomValues(buf);
+    x = buf[0];
+  } while (x >= limit);
+  return x % max;
 }
