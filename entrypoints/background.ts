@@ -19,6 +19,7 @@ import {
   getBalance,
   send,
   renewExpiringVtxos,
+  recoverExpiredVtxos,
   onboardBoarding,
 } from '@/src/wallet';
 import { getSnapshot, setSnapshot, type WalletSnapshot } from '@/src/wallet-cache';
@@ -133,11 +134,18 @@ export default defineBackground(() => {
     return send(wallet, data);
   });
 
-  // ── Renewal + onboarding (Track F) ─────────────────────────────────────────
-  // Both sign, so both go through requireWallet (unlock-gated; throws 'LOCKED').
+  // ── Renewal + recovery + onboarding (Track F) ──────────────────────────────
+  // All sign, so all go through requireWallet (unlock-gated; throws 'LOCKED').
   onMessage('renewNow', async () => {
     const wallet = await requireWallet();
     return renewExpiringVtxos(wallet, RENEW_MARGIN_MS);
+  });
+
+  // Recover swept/already-expired coins — the operator re-issues them (distinct from
+  // renewal, which only refreshes still-valid coins).
+  onMessage('recoverNow', async () => {
+    const wallet = await requireWallet();
+    return recoverExpiredVtxos(wallet);
   });
 
   onMessage('onboardNow', async () => {

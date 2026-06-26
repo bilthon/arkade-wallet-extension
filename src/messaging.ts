@@ -68,13 +68,22 @@ export interface ProtocolMap {
    */
   send(data: { address: string; amount: number }): { txid: string };
 
-  // ─── Renewal + onboarding (Track F — deliberate, unlock-gated liveness) ─────
+  // ─── Renewal + recovery + onboarding (Track F — deliberate, unlock-gated) ───
   /**
-   * Explicitly renew every VTXO within the safety margin of its batch expiry.
-   * Unlock-gated (throws 'LOCKED' when locked — renewal signs). Returns how many
-   * coins were renewed and the commitment txid (absent when nothing was due).
+   * Explicitly renew every still-VALID VTXO within the safety margin of its batch
+   * expiry (expiring-soon but not yet expired/swept). Unlock-gated (throws 'LOCKED'
+   * when locked — renewal signs). Returns how many coins were renewed and the
+   * commitment txid (absent when nothing was due). Already-expired/swept coins are
+   * NOT renewed here — they go through `recoverNow`.
    */
   renewNow(): { renewed: number; txid?: string };
+  /**
+   * Explicitly recover swept / already-expired ("recoverable") VTXOs — the operator
+   * re-issues them in a fresh batch back to the user's own address. Distinct round
+   * from renewal (`recoverVtxos`). Unlock-gated. Returns how many coins were recovered,
+   * their sats, and the commitment txid (absent when nothing was recoverable).
+   */
+  recoverNow(): { recovered: number; sats: number; txid?: string };
   /**
    * Explicitly onboard confirmed boarding UTXOs into VTXOs (Boarding → spendable).
    * Unlock-gated. Returns whether anything was onboarded + the commitment txid.

@@ -1,5 +1,10 @@
 import { isUnlocked, getUnlockedSeed, armAutoLock } from './keystore';
-import { buildWallet, renewExpiringVtxos, getExpiredVtxoSummary } from './wallet';
+import {
+  buildWallet,
+  renewExpiringVtxos,
+  recoverExpiredVtxos,
+  getExpiredVtxoSummary,
+} from './wallet';
 
 /**
  * Track F — VTXO renewal scheduler (the renew-while-unlocked fallback, BUILD_PLAN
@@ -42,18 +47,36 @@ export const RENEW_MARGIN_MS = 8 * 60 * 1000;
 const WARNING_KEY = 'renewalWarning';
 
 /**
- * What the popup shows when coins are expiring while locked. `expiredSats`/`count`
- * are the already-expired (needs-renewal-now) figures; `nextExpiryAtMs` drives the
- * countdown for coins still alive but approaching expiry.
+ * How long a warning snapshot stays "fresh". After this, the popup softens/ages the
+ * copy because the snapshot was written in a prior unlocked session and the SW may have
+ * respawned locked since (so we can't re-read the live operator to confirm it). 10 min
+ * matches the Strict auto-lock idle window — beyond it the wallet was almost certainly
+ * re-locked, so the figures are best treated as "last known", not current.
+ */
+export const WARNING_STALE_MS = 10 * 60 * 1000;
+
+/**
+ * What the popup shows when coins need attention while locked. `expiredSats`/`count`
+ * are the needs-RENEWAL figures (still-valid coins past their soft expiry);
+ * `recoverableSats`/`recoverableCount` are the needs-RECOVERY figures (swept coins);
+ * `nextExpiryAtMs` drives the countdown for coins still alive but approaching expiry.
  */
 export interface RenewalWarning {
-  /** Coins whose expiry has already elapsed (unswept) — most urgent. */
+  /** Coins whose batch expiry elapsed but not yet swept — renew to restore. */
   expiredSats: number;
   count: number;
+  /** Swept/recoverable coins — recover (operator re-issues) to restore. */
+  recoverableSats: number;
+  recoverableCount: number;
   /** Soonest upcoming expiry of a still-spendable coin (epoch ms), or null. */
   nextExpiryAtMs: number | null;
-  /** When this snapshot was taken (epoch ms). */
+  /** When this snapshot was taken (epoch ms). Drives staleness aging in the UI. */
   at: number;
+}
+
+/** True when a warning is older than {@link WARNING_STALE_MS} (written a session ago). */
+export function isWarningStale(w: RenewalWarning, now: number = Date.now()): boolean {
+  return now - w.at > WARNING_STALE_MS;
 }
 
 export async function getRenewalWarning(): Promise<RenewalWarning | null> {
@@ -73,32 +96,59 @@ async function setRenewalWarning(w: RenewalWarning | null): Promise<void> {
  */
 export async function runRenewalTick(): Promise<
   | { state: 'locked'; warning: RenewalWarning | null }
-  | { state: 'unlocked'; renewed: number; txid?: string }
+  | { state: 'unlocked'; renewed: number; recovered: number; txid?: string }
 > {
   const seed = getUnlockedSeed();
   if (!seed || !isUnlocked()) {
     // Locked: warn only. Build a read-only view of expiry from the cached VTXO set.
     // We cannot read the live operator without a wallet, but the IndexedDB-backed
     // wallet build needs the seed — so when locked we have no fresh read. Fall back
-    // to leaving any prior warning in place (it was written while unlocked).
+    // to leaving any prior warning in place (it was written while unlocked; the popup
+    // ages the copy via `isWarningStale` so a respawn-while-locked snapshot reads as
+    // "last known", not current).
     const warning = await getRenewalWarning();
     return { state: 'locked', warning };
   }
 
-  // Unlocked: renew, and refresh the warning snapshot for the popup.
+  // Unlocked: RECOVER first (drains already-expired/swept coins into fresh VTXOs), THEN
+  // renew the still-valid expiring remainder. This ordering matters: renewal's batch
+  // round must not include expired/recoverable coins (the reproduced INVALID_INTENT_PROOF
+  // bug), and recovering first clears them so renew sees a clean set. The two are distinct
+  // rounds — isolate their errors so a failed recover doesn't skip renew and vice-versa.
+  // (`renewExpiringVtxos` also recovers-first internally as a standalone safety net for
+  // the manual `renewNow` path; after this recover leg it re-reads fresh and finds
+  // nothing to drain, so there is no double-recover.)
   await armAutoLock(); // a renewal tick is activity — keep the session fresh
   const wallet = await buildWallet(seed);
-  const result = await renewExpiringVtxos(wallet, RENEW_MARGIN_MS);
 
-  // Re-read post-renewal so the warning reflects the new state (ideally cleared).
+  let recovered = 0;
+  let txid: string | undefined;
+  try {
+    const rec = await recoverExpiredVtxos(wallet);
+    recovered = rec.recovered;
+    txid = rec.txid;
+  } catch (err) {
+    console.warn('[arkade] recovery leg failed', err);
+  }
+
+  let renewed = 0;
+  try {
+    const r = await renewExpiringVtxos(wallet, RENEW_MARGIN_MS);
+    renewed = r.renewed;
+    txid ??= r.txid;
+  } catch (err) {
+    console.warn('[arkade] renewal leg failed', err);
+  }
+
+  // Re-read post-settle so the warning reflects the new state (ideally cleared).
   const summary = await getExpiredVtxoSummary(wallet);
-  await setRenewalWarning(
-    summary.count > 0 || summary.nextExpiryAtMs !== null
-      ? { ...summary, at: Date.now() }
-      : null,
-  );
+  const hasWork =
+    summary.count > 0 ||
+    summary.recoverableCount > 0 ||
+    summary.nextExpiryAtMs !== null;
+  await setRenewalWarning(hasWork ? { ...summary, at: Date.now() } : null);
 
-  return { state: 'unlocked', renewed: result.renewed, txid: result.txid };
+  return { state: 'unlocked', renewed, recovered, txid };
 }
 
 /**

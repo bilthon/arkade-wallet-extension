@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { NetworkName } from '@arkade-os/sdk';
 import type { AdjustedBalance } from '@/src/vtxo-state';
-import type { RenewalWarning } from '@/src/renewal';
+import { type RenewalWarning, isWarningStale } from '@/src/renewal';
 import { client, isLockedError, errorMessage } from '../client';
 import { formatSats, networkLabel, relativeTime, untilRelative } from '../format';
 import { Receive } from './Receive';
@@ -37,8 +37,8 @@ export function WalletHome({
   const [showSend, setShowSend] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [renewalWarning, setRenewalWarning] = useState<RenewalWarning | null>(null);
-  const [renewBusy, setRenewBusy] = useState(false);
-  const [renewError, setRenewError] = useState('');
+  const [recoverBusy, setRecoverBusy] = useState(false);
+  const [recoverError, setRecoverError] = useState('');
   const [onboardBusy, setOnboardBusy] = useState(false);
   const [onboardError, setOnboardError] = useState('');
 
@@ -101,21 +101,21 @@ export function WalletHome({
     onLocked();
   }
 
-  async function handleRenew() {
-    if (renewBusy) return;
-    setRenewBusy(true);
-    setRenewError('');
+  async function handleRecover() {
+    if (recoverBusy) return;
+    setRecoverBusy(true);
+    setRecoverError('');
     try {
-      await client.renewNow();
+      await client.recoverNow();
       setReloadKey((k) => k + 1);
     } catch (err) {
       if (isLockedError(err)) {
         onLocked();
         return;
       }
-      setRenewError(errorMessage(err));
+      setRecoverError(errorMessage(err));
     } finally {
-      setRenewBusy(false);
+      setRecoverBusy(false);
     }
   }
 
@@ -165,16 +165,30 @@ export function WalletHome({
   const showSkeleton = balance === null && loadingLive;
   const isEmpty = balance !== null && balance.total === 0;
 
-  // Show the locked warning banner only when we have no live balance with expired > 0.
-  // Once we have a fresh balance, the RenewalSection below takes over.
-  const hasLiveExpired = balance !== null && (balance as AdjustedBalance).expired > 0;
-  const showWarningBanner =
-    !hasLiveExpired && renewalWarning !== null && renewalWarning.expiredSats > 0;
-
   const adjBalance = balance as AdjustedBalance | null;
-  const hasExpired = adjBalance !== null && adjBalance.expired > 0;
-  const showRenewSection =
-    hasExpired || (renewalWarning !== null && renewalWarning.expiredSats > 0);
+  // ALREADY-EXPIRED funds are a RECOVERY target, not renewal. The SDK's recovery set
+  // (`recoverVtxos`) covers BOTH time-expired-but-unswept (`isSpendable && isExpired`)
+  // and swept (`isRecoverable`) coins; feeding either to `renewVtxos` is the reproduced
+  // INVALID_INTENT_PROOF bug. So both balance buckets drive the single Recover action.
+  // (Renewal is the proactive path for coins not yet expired — surfaced as the "next
+  // renewal due in …" countdown below, handled automatically by the scheduler.)
+  const liveRecoverSats =
+    adjBalance !== null ? adjBalance.expired + adjBalance.recoverableSats : 0;
+  const hasLiveAttention = liveRecoverSats > 0;
+
+  // Locked-warning banner: only when we have no fresh balance to drive the live Recover
+  // section, and the cached warning flags work to do. Stamp it stale when written a
+  // prior session ago (the SW may have respawned locked since).
+  const warnRecoverSats =
+    renewalWarning !== null
+      ? renewalWarning.expiredSats + renewalWarning.recoverableSats
+      : 0;
+  const showWarningBanner = !hasLiveAttention && warnRecoverSats > 0;
+  const warningStale = renewalWarning !== null && isWarningStale(renewalWarning);
+
+  // Recover section: all already-expired funds (live, or cached fallback).
+  const recoverSats = liveRecoverSats > 0 ? liveRecoverSats : warnRecoverSats;
+  const showRecoverSection = !showSkeleton && recoverSats > 0;
 
   return (
     <main className="screen">
@@ -199,8 +213,17 @@ export function WalletHome({
 
       {showWarningBanner && (
         <div className="banner">
-          {renewalWarning!.count} coin{renewalWarning!.count !== 1 ? 's' : ''} (
-          {formatSats(renewalWarning!.expiredSats)} sats) need renewal — unlock to renew.
+          {warningStale ? (
+            <>
+              Last we checked, some coins had expired and needed recovery
+              {` (${relativeTime(renewalWarning!.at)})`}. Unlock to refresh and recover
+              them.
+            </>
+          ) : (
+            <>
+              {warnBannerCounts(renewalWarning!)} expired — unlock to recover.
+            </>
+          )}
         </div>
       )}
 
@@ -232,13 +255,16 @@ export function WalletHome({
             />
           )}
 
-          {/* Renewal section: expired coins + renew button */}
-          {!showSkeleton && showRenewSection && (
-            <RenewalSection
-              expiredSats={adjBalance?.expired ?? renewalWarning?.expiredSats ?? 0}
-              busy={renewBusy}
-              error={renewError}
-              onRenew={handleRenew}
+          {/* Recover: all already-expired funds (time-expired-unswept + swept) →
+              recoverVtxos. Renewal is NOT offered for these — feeding an expired coin
+              to renewVtxos is the reproduced INVALID_INTENT_PROOF bug; the operator
+              re-issues them via the recovery round instead. */}
+          {showRecoverSection && (
+            <RecoverySection
+              sats={recoverSats}
+              busy={recoverBusy}
+              error={recoverError}
+              onAction={handleRecover}
             />
           )}
 
@@ -273,48 +299,95 @@ export function WalletHome({
   );
 }
 
+/** Compose the locked-warning banner count text across both expired buckets. */
+function warnBannerCounts(w: RenewalWarning): string {
+  const coins = w.count + w.recoverableCount;
+  const sats = w.expiredSats + w.recoverableSats;
+  return `${coins} coin${coins !== 1 ? 's' : ''} (${formatSats(sats)} sats)`;
+}
+
 /**
- * Expired-coin section. Shown above the Send/Receive row when funds need renewal.
- * Uses warn palette only — not red/danger.
+ * Action card for the recovery bucket: already-expired funds (time-expired-unswept +
+ * swept) the operator re-issues via `recoverVtxos`. Renewal is deliberately NOT offered
+ * for these — feeding an expired coin to `renewVtxos` is the reproduced bug. Warn
+ * palette only, not red/danger.
  */
-function RenewalSection({
-  expiredSats,
+function AttentionSection({
+  label,
+  tip,
+  note,
+  sats,
   busy,
+  busyLabel,
+  actionLabel,
   error,
-  onRenew,
+  onAction,
 }: {
-  expiredSats: number;
+  label: string;
+  tip: string;
+  note: string;
+  sats: number;
   busy: boolean;
+  busyLabel: string;
+  actionLabel: string;
   error: string;
-  onRenew: () => void;
+  onAction: () => void;
 }) {
   return (
     <div className="renewal-section">
       <div className="breakdown-row" style={{ alignItems: 'flex-start' }}>
         <span className="breakdown-label" style={{ color: 'var(--warn-text)' }}>
-          Needs renewal
-          <span
-            className="info"
-            title="While expired, a coin is no longer self-custodial — the operator could eventually sweep it. Renew to restore full custody."
-          >
+          {label}
+          <span className="info" title={tip}>
             i
           </span>
         </span>
         <span className="breakdown-amount" style={{ color: 'var(--warn-text)' }}>
-          {formatSats(expiredSats)} sats
+          {formatSats(sats)} sats
         </span>
       </div>
-      <p className="renewal-note">These coins expired and aren't spendable until renewed.</p>
+      <p className="renewal-note">{note}</p>
       {error && <p className="error" style={{ marginTop: 6 }}>{error}</p>}
       <button
         className="btn-primary btn-block"
         style={{ marginTop: 8 }}
         disabled={busy}
-        onClick={onRenew}
+        onClick={onAction}
       >
-        {busy ? 'Renewing…' : 'Renew now'}
+        {busy ? busyLabel : actionLabel}
       </button>
     </div>
+  );
+}
+
+/**
+ * Recover already-expired funds — both time-expired-but-unswept and operator-swept
+ * coins. The operator re-issues them in a fresh batch (`recoverVtxos`). The user keeps
+ * spending authority throughout; recovery just makes them spendable again.
+ */
+function RecoverySection({
+  sats,
+  busy,
+  error,
+  onAction,
+}: {
+  sats: number;
+  busy: boolean;
+  error: string;
+  onAction: () => void;
+}) {
+  return (
+    <AttentionSection
+      label="Needs recovery"
+      tip="These coins passed their batch expiry. You keep spending authority — recovering re-issues them back to your wallet so you can spend them again."
+      note="These coins expired and aren't spendable until recovered."
+      sats={sats}
+      busy={busy}
+      busyLabel="Recovering…"
+      actionLabel="Recover now"
+      error={error}
+      onAction={onAction}
+    />
   );
 }
 

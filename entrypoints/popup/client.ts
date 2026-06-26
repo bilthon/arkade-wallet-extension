@@ -22,6 +22,7 @@ export const client = {
   send: (address: string, amount: number) =>
     sendMessage('send', { address, amount }),
   renewNow: () => sendMessage('renewNow', undefined),
+  recoverNow: () => sendMessage('recoverNow', undefined),
   onboardNow: () => sendMessage('onboardNow', undefined),
   getRenewalWarning: () => sendMessage('getRenewalWarning', undefined),
 };

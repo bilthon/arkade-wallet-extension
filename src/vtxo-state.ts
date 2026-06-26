@@ -1,5 +1,6 @@
 import {
   isExpired,
+  isRecoverable,
   isSpendable,
   type ExtendedVirtualCoin,
   type VirtualCoin,
@@ -43,30 +44,54 @@ export interface VtxoPartition {
   /** Spendable now: not spent, not expired. Their value is the *true* available. */
   spendable: ExtendedVirtualCoin[];
   /**
-   * Expired-but-not-yet-spent VTXOs the SDK's balance may still be counting. These
-   * are the funds that exist but coin selection refuses — the renewal targets.
+   * Time-expired-but-not-yet-swept VTXOs (batch expiry elapsed, `state` still
+   * "settled"/"preconfirmed"). The SDK's `getBalance()` STILL sums these into
+   * `available`, yet coin selection refuses them — so these are the ones we must
+   * drain from `available`. They are renewed via `renewVtxos` (still valid coins).
    */
   expired: ExtendedVirtualCoin[];
-  /** Total sats across the expired bucket. */
+  /** Total sats across the time-expired-but-unswept bucket (the `available` drain). */
   expiredSats: number;
+  /**
+   * Swept/recoverable VTXOs (`state === "swept"`, still spendable). The SDK already
+   * accounts for these in `WalletBalance.recoverable` and NEVER in `available`, so we
+   * must NOT subtract them again. Surfaced separately to drive the Recover action;
+   * these need `recoverVtxos`, not `renewVtxos`.
+   */
+  recoverable: ExtendedVirtualCoin[];
+  /** Total sats across the swept/recoverable bucket. */
+  recoverableSats: number;
 }
 
 /**
- * Split the wallet's VTXOs into spendable vs expired-needs-renewal buckets using the
- * SDK's own state helpers. A swept/recoverable coin is also `isExpired`, so it lands
- * in `expired` here — correct, since it is likewise not directly spendable until
- * renewed/recovered.
+ * Split the wallet's VTXOs into spendable / time-expired-unswept / swept-recoverable
+ * buckets using the SDK's own state helpers.
+ *
+ * The swept-vs-time-expired split is load-bearing for the balance fix: the SDK's
+ * `getBalance()` already moves swept coins out of `available` into `recoverable`, but a
+ * coin whose `batchExpiry` merely *elapsed* (state still "settled"/"preconfirmed") is
+ * still counted in `available` even though coin selection refuses it. Only the latter
+ * may be drained from `available`; re-subtracting swept coins would double-count them.
  */
 export function partitionVtxos(vtxos: ExtendedVirtualCoin[]): VtxoPartition {
   const spendable: ExtendedVirtualCoin[] = [];
   const expired: ExtendedVirtualCoin[] = [];
+  const recoverable: ExtendedVirtualCoin[] = [];
   for (const v of vtxos) {
     if (!isSpendable(v)) continue; // already spent offchain — not our funds anymore
-    if (isExpired(v)) expired.push(v);
-    else spendable.push(v);
+    if (isRecoverable(v)) {
+      // Swept but still spendable → the SDK's `recoverable` bucket; recover, don't renew.
+      recoverable.push(v);
+    } else if (isExpired(v)) {
+      // batchExpiry elapsed but not yet swept → still in `available`, must be drained.
+      expired.push(v);
+    } else {
+      spendable.push(v);
+    }
   }
   const expiredSats = expired.reduce((sum, v) => sum + v.value, 0);
-  return { spendable, expired, expiredSats };
+  const recoverableSats = recoverable.reduce((sum, v) => sum + v.value, 0);
+  return { spendable, expired, expiredSats, recoverable, recoverableSats };
 }
 
 /**
@@ -76,19 +101,31 @@ export function partitionVtxos(vtxos: ExtendedVirtualCoin[]): VtxoPartition {
  */
 export interface AdjustedBalance extends WalletBalance {
   /**
-   * Sats in VTXOs whose batch expiry has elapsed but which the operator hasn't swept.
-   * Removed from `available`/`settled`/`preconfirmed` (coin selection refuses them)
-   * and surfaced here so the UI can show "exists but needs renewal" instead of
-   * silently inflating Available.
+   * Sats in VTXOs whose batch expiry has elapsed but which the operator hasn't swept
+   * (state still "settled"/"preconfirmed"). Removed from `available`/`settled`/
+   * `preconfirmed` (coin selection refuses them) and surfaced here so the UI can show
+   * "exists but needs renewal" instead of silently inflating Available. Renewed via
+   * `renewVtxos` — these coins are still valid, just close to / past their soft expiry.
    */
   expired: number;
+  /**
+   * Sats in swept VTXOs (`state === "swept"`, still spendable). These are ALREADY in
+   * the SDK's `recoverable` field and never in `available`, so they are NOT drained
+   * again here — this mirrors the SDK figure for the "needs recovery" UI bucket and
+   * drives the Recover action (`recoverVtxos`, distinct from renewal).
+   */
+  recoverableSats: number;
   /** Soonest upcoming batch expiry across *spendable* VTXOs (epoch ms), or null. */
   nextExpiryAtMs: number | null;
 }
 
 /**
- * Subtract the value of expired-but-still-counted VTXOs from the SDK balance's
- * spendable buckets and surface it as a distinct `expired` figure.
+ * Subtract only the time-expired-but-unswept VTXOs from the SDK balance's spendable
+ * buckets and surface them as a distinct `expired` figure. Swept (recoverable) coins
+ * are LEFT ALONE: the SDK already excludes them from `available` and counts them in
+ * `recoverable`, so re-subtracting them here would understate `available` whenever a
+ * live spendable coin co-exists with a swept one. We mirror the swept value into
+ * `recoverableSats` for the "needs recovery" UI bucket instead of draining it.
  *
  * The SDK does not tell us how the expired value is distributed across
  * settled/preconfirmed, so we drain `preconfirmed` first then `settled` (preconfirmed
@@ -100,10 +137,12 @@ export function adjustBalanceForExpiry(
   balance: WalletBalance,
   vtxos: ExtendedVirtualCoin[],
 ): AdjustedBalance {
-  const { spendable, expiredSats } = partitionVtxos(vtxos);
+  const { spendable, expiredSats, recoverableSats } = partitionVtxos(vtxos);
 
-  // Drain the expired sats from preconfirmed first, then settled (clamped at 0 so a
-  // mismatch between the indexer's balance and our VTXO sum can never go negative).
+  // Drain ONLY the time-expired-but-unswept sats from preconfirmed first, then settled
+  // (clamped at 0 so a mismatch between the indexer's balance and our VTXO sum can
+  // never go negative). Swept/recoverable coins are not touched — the SDK already kept
+  // them out of available.
   const preconfirmed = Math.max(0, balance.preconfirmed - expiredSats);
   const drainedFromPreconf = balance.preconfirmed - preconfirmed;
   const stillToDrain = expiredSats - drainedFromPreconf;
@@ -115,6 +154,9 @@ export function adjustBalanceForExpiry(
     preconfirmed,
     available: settled + preconfirmed,
     expired: expiredSats,
+    // Prefer the SDK's own `recoverable` figure (authoritative); fall back to our VTXO
+    // sum if the SDK left it at 0 but we observed swept coins (defensive).
+    recoverableSats: balance.recoverable > 0 ? balance.recoverable : recoverableSats,
     nextExpiryAtMs: soonestExpiry(spendable),
   };
 }
