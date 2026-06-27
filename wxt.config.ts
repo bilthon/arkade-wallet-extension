@@ -9,12 +9,23 @@ export default defineConfig({
     // pages of a CONNECTED site. Least-privilege (security review): we never call
     // `tabs.query({})` — `emitToOrigin` scopes the query to a `scheme://host/*` match
     // pattern built from an already-granted origin, so we only ever read tabs at an
-    // origin the user has connected; we do not enumerate every open tab's URL. Matching
-    // tabs by `url` (and reading `tab.url`) needs the `tabs` permission; we keep it over
-    // a broad `host_permissions: ['<all_urls>']` grant because the scoped query is the
-    // tighter of the two for a wallet. `chrome.windows.create` (the approval window)
-    // needs no permission. storage/alarms/offscreen unchanged.
+    // origin the user has connected; we do not enumerate every open tab's URL.
+    // `chrome.windows.create` (the approval window) needs no permission.
     permissions: ['storage', 'alarms', 'offscreen', 'tabs'],
+    // host_permissions = the operator + esplora endpoints the BACKGROUND SW must
+    // `fetch()` (Wallet.create talks to arkd + esplora). MV3 blocks SW cross-origin
+    // requests without these, which silently hangs every wallet-building read/sign.
+    // This is SEPARATE from the `tabs` event-delivery concern above — scoped to the
+    // known networks (PLAN.md §4 / NETWORK_CONFIG), NOT a broad <all_urls> grant.
+    // (Add delegate.arkade.money / Boltz hosts when Tracks F2 / Phase 6 land.)
+    host_permissions: [
+      'http://localhost/*', // regtest arkd :7070 + esplora :30000 (ports not allowed in match patterns)
+      'http://127.0.0.1/*',
+      'https://*.arkade.sh/*', // mutinynet / signet / testnet operators
+      'https://arkade.computer/*', // mainnet operator
+      'https://mutinynet.com/*', // mutinynet esplora
+      'https://mempool.space/*', // signet / testnet / mainnet esplora
+    ],
     // PLAN.md §7: no remote code / eval. script-src 'self'; object-src 'none'.
     // `frame-ancestors 'none'` (Track E2a): NO extension page — popup OR approval window —
     // may be embedded in an iframe by a dapp (anti-clickjacking). script-src 'self' is
