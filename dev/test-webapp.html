@@ -54,6 +54,7 @@
       <button data-call="getNetwork">getNetwork()</button>
       <button id="signMessage">signMessage()</button>
       <button id="signPsbt">signPsbt(psbt, idx)</button>
+      <button id="coSignTest">Test signPsbt co-sign</button>
       <button data-call="disconnect">disconnect()</button>
       <button id="clear">clear log</button>
     </div>
@@ -79,6 +80,8 @@
           : JSON.stringify(value, null, 2);
         logEl.textContent = `[${time}] ${label}\n${body}\n\n` + logEl.textContent;
       }
+      // Expose the logger so the ES-module harness (dev/harness.ts) can write here too.
+      window.appLog = log;
 
       // The provider injects at document_start, but be defensive on slow loads.
       function ready() {
@@ -149,5 +152,9 @@
         logEl.textContent = '';
       });
     </script>
+
+    <!-- ES module: needs the SDK, so it only works when served by Vite (npm run test:webapp),
+         not python http.server. Builds an escrow + spend PSBT and exercises signPsbt live. -->
+    <script type="module" src="./harness.ts"></script>
   </body>
 </html>
