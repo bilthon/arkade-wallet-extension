@@ -54,6 +54,12 @@ export function ApprovalPage() {
     return () => clearTimeout(t);
   }, [state.phase]);
 
+  // Reflect the request kind in the OS window-chrome title (index.html's static <title>
+  // defaults to "Connection request" — override it once we know the kind).
+  useEffect(() => {
+    if (state.phase === 'ready') document.title = `Arkade — ${headerTitle(state.request.kind)}`;
+  }, [state]);
+
   async function respond(approved: boolean) {
     const requestId = requestIdRef.current;
     if (!requestId) return;
@@ -119,13 +125,16 @@ export function ApprovalPage() {
 
 // ─── per-kind header + bodies ────────────────────────────────────────────────────
 
+function headerTitle(kind: string): string {
+  return kind === 'signMessage'
+    ? 'Signature request'
+    : kind === 'signPsbt'
+      ? 'Transaction signature'
+      : 'Connection request';
+}
+
 function ApprovalHeader({ kind, origin }: { kind: string; origin: string }) {
-  const title =
-    kind === 'signMessage'
-      ? 'Signature request'
-      : kind === 'signPsbt'
-        ? 'Transaction signature'
-        : 'Connection request';
+  const title = headerTitle(kind);
   const subtitle =
     kind === 'signMessage'
       ? 'A website is asking you to sign a message with your Arkade key.'
