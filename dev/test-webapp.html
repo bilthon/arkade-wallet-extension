@@ -55,8 +55,13 @@
       <button id="signMessage">signMessage()</button>
       <button id="signPsbt">signPsbt(psbt, idx)</button>
       <button id="coSignTest">Test signPsbt co-sign</button>
+      <button id="onchainCoSignTest">On-chain co-sign + broadcast</button>
       <button data-call="disconnect">disconnect()</button>
       <button id="clear">clear log</button>
+    </div>
+
+    <div class="buttons">
+      <input id="onchainDest" placeholder="dest bcrt1p… (nigiri rpc getnewaddress)" style="flex:1;min-width:200px;padding:8px;border:1px solid #d1d5db;border-radius:8px;" />
     </div>
 
     <div class="buttons">
@@ -156,5 +161,7 @@
     <!-- ES module: needs the SDK, so it only works when served by Vite (npm run test:webapp),
          not python http.server. Builds an escrow + spend PSBT and exercises signPsbt live. -->
     <script type="module" src="./harness.ts"></script>
+    <!-- On-chain funded co-sign + broadcast E2E (needs nigiri regtest esplora on :30000). -->
+    <script type="module" src="./onchain-harness.ts"></script>
   </body>
 </html>
