@@ -80,7 +80,7 @@ describe('requestApproval / resolveApproval', () => {
       return 42;
     });
 
-    const pending = track(requestApproval('connect', 'https://a.example', openWindow));
+    const pending = track(requestApproval({ kind: 'connect' }, 'https://a.example', openWindow));
     await settle();
 
     const rec = await getPendingRequest(captured);
@@ -98,7 +98,7 @@ describe('requestApproval / resolveApproval', () => {
 
   it('resolves with approved=false on reject', async () => {
     const c = capture();
-    const pending = track(requestApproval('connect', 'https://a.example', c.open));
+    const pending = track(requestApproval({ kind: 'connect' }, 'https://a.example', c.open));
     await settle();
     await resolveApproval(c.id(), { approved: false });
     await expect(pending).resolves.toEqual({ approved: false });
@@ -106,10 +106,10 @@ describe('requestApproval / resolveApproval', () => {
 
   it('rejects a concurrent second request (one window at a time)', async () => {
     const c = capture();
-    const first = track(requestApproval('connect', 'https://a.example', c.open));
+    const first = track(requestApproval({ kind: 'connect' }, 'https://a.example', c.open));
 
     await expect(
-      requestApproval('connect', 'https://b.example', async () => 2),
+      requestApproval({ kind: 'connect' }, 'https://b.example', async () => 2),
     ).rejects.toMatchObject({ code: 'BUSY' });
 
     await resolveApproval(c.id(), { approved: true });
@@ -118,7 +118,7 @@ describe('requestApproval / resolveApproval', () => {
 
   it('does not resolve on a mismatched requestId', async () => {
     const c = capture();
-    const pending = track(requestApproval('connect', 'https://a.example', c.open));
+    const pending = track(requestApproval({ kind: 'connect' }, 'https://a.example', c.open));
     await settle();
 
     expect(await resolveApproval('not-the-id', { approved: true })).toBe(false);
@@ -129,7 +129,7 @@ describe('requestApproval / resolveApproval', () => {
 
 describe('rejectApprovalForOrigin', () => {
   it('rejects a pending request from the matching origin (revoke during pending)', async () => {
-    const pending = track(requestApproval('connect', 'https://a.example', async () => 1));
+    const pending = track(requestApproval({ kind: 'connect' }, 'https://a.example', async () => 1));
     await settle();
 
     const rejected = await rejectApprovalForOrigin('https://a.example', 'revoked');
@@ -139,7 +139,7 @@ describe('rejectApprovalForOrigin', () => {
 
   it('does not reject a pending request from a different origin', async () => {
     const c = capture();
-    const pending = track(requestApproval('connect', 'https://a.example', c.open));
+    const pending = track(requestApproval({ kind: 'connect' }, 'https://a.example', c.open));
     await settle();
 
     expect(await rejectApprovalForOrigin('https://other.example', 'x')).toBe(false);
@@ -150,7 +150,7 @@ describe('rejectApprovalForOrigin', () => {
 
 describe('onWindowClosed', () => {
   it('rejects the in-flight request when its window is dismissed', async () => {
-    const pending = track(requestApproval('connect', 'https://a.example', async () => 99));
+    const pending = track(requestApproval({ kind: 'connect' }, 'https://a.example', async () => 99));
     await settle();
 
     await onWindowClosed(99);
@@ -160,7 +160,7 @@ describe('onWindowClosed', () => {
 
   it('ignores closure of an unrelated window', async () => {
     const c = capture();
-    const pending = track(requestApproval('connect', 'https://a.example', c.open));
+    const pending = track(requestApproval({ kind: 'connect' }, 'https://a.example', c.open));
     await settle();
 
     await onWindowClosed(123);

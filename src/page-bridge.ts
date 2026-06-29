@@ -28,7 +28,7 @@ export interface BridgeResponse {
 
 /**
  * ISOLATED content -> MAIN provider: a background-pushed provider EVENT (no `id`, not
- * tied to a request). The provider dispatches `event`/`data` to the dapp's `on()`
+ * tied to a request). The provider dispatches `event`/`data` to the web app's `on()`
  * handlers (disconnect/networkChanged/accountsChanged).
  */
 export interface BridgeEvent {

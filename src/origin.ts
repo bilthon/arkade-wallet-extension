@@ -15,8 +15,8 @@ export interface MessageSenderLike {
  *
  * The requesting origin is derived ONLY from the browser-attested message sender —
  * `sender.origin` (preferred) or `sender.tab.url`. It is NEVER read from a message
- * body field a dapp can forge. Every dapp-facing handler keys its grant lookup and
- * approval prompt off the value this module returns; a dapp cannot impersonate
+ * body field a web app can forge. Every provider-facing handler keys its grant lookup and
+ * approval prompt off the value this module returns; a web app cannot impersonate
  * another origin because it never gets to supply the string.
  *
  * Rejected, with no grant possible:
@@ -25,7 +25,7 @@ export interface MessageSenderLike {
  *  • `http:` origins — only secure (`https:`) contexts may connect; a wallet over
  *    plaintext HTTP is trivially MITM'd.
  *
- * `localhost`/`127.0.0.1` over http is allowed (dev: the test-dapp + local dapps run
+ * `localhost`/`127.0.0.1` over http is allowed (dev: the test page + local web apps run
  * there and browsers treat them as secure contexts).
  */
 
@@ -49,7 +49,7 @@ function isLoopbackHost(host: string): boolean {
  * `OriginError`. Prefers `sender.origin` (set by Chrome for content-script senders);
  * falls back to parsing `sender.tab.url`'s origin when `origin` is absent. Returns a
  * canonical `scheme://host[:port]` string — the key for grants and the label shown
- * (verbatim, never a dapp-supplied name) in the approval window.
+ * (verbatim, never a site-supplied name) in the approval window.
  */
 export function deriveOrigin(sender: MessageSenderLike | undefined): string {
   const raw = senderOrigin(sender);

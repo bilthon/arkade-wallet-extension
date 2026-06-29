@@ -179,7 +179,7 @@ export function getNetwork(): Promise<NetworkName> {
 export { setNetwork } from './storage';
 
 /**
- * Raw user key as hex — x-only (32B) + compressed (33B). Exposed for dapps that
+ * Raw user key as hex — x-only (32B) + compressed (33B). Exposed for web apps that
  * build their own VtxoScripts (escrow/HTLC); the operator-bound Arkade address
  * encodes a *tweaked* output key, not this raw key (PLAN.md §8). No UI; just exposed.
  */

@@ -14,15 +14,26 @@ import {
   currentInFlight,
   onWindowClosed,
   type PendingRequest,
+  type ApprovalPayload,
 } from './approvals';
 import { getNetwork as getStoredNetwork, hasVault } from './storage';
 import { isUnlocked } from './keystore';
 import { networkConfig } from './wallet';
 import { encodeProviderError, type ProviderEvent } from './provider-api';
 import { PROVIDER_EVENT_TYPE, type ProviderEventMessage } from './provider-events';
+import {
+  signMessageBIP322,
+  validatePsbtForSigning,
+  signPsbtPartial,
+  buildInspectContext,
+  isSighashShaped,
+  SignMessageError,
+} from './signing';
+import { PsbtRejectedError } from './psbt-inspect';
+import { networks, type Wallet } from '@arkade-os/sdk';
 
 /**
- * Dapp-facing handler logic (Track E2a). Every function here takes the message
+ * Provider-facing handler logic (Track E2a). Every function here takes the message
  * `sender` and derives the origin from it — NEVER from a body field (M4). It then
  * checks the per-origin grant and the wallet lock state, and returns public results
  * only. The seed/mnemonic never reach this layer (it lives in keystore.ts).
@@ -43,7 +54,7 @@ export interface ReadWallet {
   getAddress(): Promise<string>;
 }
 
-/** Throw a typed provider error the content bridge passes through to the dapp. */
+/** Throw a typed provider error the content bridge passes through to the web app. */
 function providerError(
   code: Parameters<typeof encodeProviderError>[0],
   message: string,
@@ -54,7 +65,7 @@ function providerError(
 /**
  * Resolve the SW-verified origin from the sender, mapping an `OriginError` to a typed
  * `BAD_ORIGIN` provider error (so a null/opaque/http page gets a clean rejection, not
- * an internal stack). This is the ONLY place origins enter the dapp path.
+ * an internal stack). This is the ONLY place origins enter the provider path.
  */
 export function originFromSender(sender: MessageSenderLike | undefined): string {
   try {
@@ -73,7 +84,7 @@ export function originFromSender(sender: MessageSenderLike | undefined): string 
  * Open the dedicated approval WINDOW for a pending request and return its window id.
  * A real `chrome.windows.create` to the extension's approval page with the requestId
  * in the query string. Centered popup, fixed size, focused. Anti-clickjacking: a
- * separate browser window the dapp can't iframe or overlay (the page also sets CSP
+ * separate browser window the site can't iframe or overlay (the page also sets CSP
  * `frame-ancestors 'none'`).
  */
 export async function openApprovalWindow(request: PendingRequest): Promise<number | null> {
@@ -93,7 +104,7 @@ export async function openApprovalWindow(request: PendingRequest): Promise<numbe
 }
 
 /**
- * Handle a dapp `connect`. Derives the origin (M4), requires a wallet to exist and be
+ * Handle a provider `connect`. Derives the origin (M4), requires a wallet to exist and be
  * unlocked, then — if not already connected — opens the approval window and awaits the
  * user's decision. On approve, persists a READ-ONLY grant and returns the account(s).
  * On reject, throws a typed `REJECTED`. An already-connected origin short-circuits
@@ -125,7 +136,7 @@ export async function handleConnect(
     providerError('LOCKED', 'Unlock your Arkade wallet, then connect again.');
   }
 
-  const decision = await requestApprovalSafe(origin);
+  const decision = await requestApprovalSafe({ kind: 'connect' }, origin);
   if (!decision.approved) {
     providerError('REJECTED', 'The connection request was declined.');
   }
@@ -137,10 +148,15 @@ export async function handleConnect(
   return { accounts: grant.accounts };
 }
 
-/** Wrap `requestApproval` so a BUSY collision surfaces as a typed provider error. */
-async function requestApprovalSafe(origin: string) {
+/**
+ * Wrap `requestApproval` so a BUSY collision surfaces as a typed provider error and a
+ * decline/close/revoke surfaces as REJECTED. Shared by every approval kind
+ * (connect / signMessage / signPsbt) so the one-window-at-a-time + typed-error contract
+ * is identical across them.
+ */
+async function requestApprovalSafe(payload: ApprovalPayload, origin: string) {
   try {
-    return await requestApproval('connect', origin, openApprovalWindow);
+    return await requestApproval(payload, origin, openApprovalWindow);
   } catch (err) {
     if (err instanceof Error && 'code' in err && (err as { code?: string }).code === 'BUSY') {
       providerError('BUSY', 'Another approval is already open. Try again in a moment.');
@@ -158,7 +174,7 @@ export async function handleDisconnect(
   sender: MessageSenderLike | undefined,
 ): Promise<{ ok: true }> {
   const origin = originFromSender(sender);
-  await rejectApprovalForOrigin(origin, 'Disconnected by the dapp.');
+  await rejectApprovalForOrigin(origin, 'Disconnected by the site.');
   await revokeGrant(origin);
   await emitToOrigin(origin, 'disconnect');
   return { ok: true };
@@ -218,6 +234,155 @@ export async function handleGetNetwork(
   return { network, arkServerUrl: networkConfig(network).arkServerUrl };
 }
 
+// ─── signing (always re-prompts; NOT granted by connect) ──────────────────────
+
+/**
+ * Gate a signing call. Unlike a read, signing is NEVER auto-granted by `connect` — but
+ * we still require the origin to be a CONNECTED site (so a never-connected page can't
+ * pop a signing prompt) and the wallet unlocked. Returns the origin; throws typed
+ * NOT_CONNECTED/LOCKED otherwise. The per-call approval window is opened by the handler.
+ */
+async function requireForSigning(sender: MessageSenderLike | undefined): Promise<string> {
+  const origin = originFromSender(sender);
+  if (!(await originIsConnected(origin))) {
+    providerError('NOT_CONNECTED', 'This site is not connected. Call connect() first.');
+  }
+  if (!isUnlocked()) {
+    providerError('LOCKED', 'The Arkade wallet is locked. Unlock it to continue.');
+  }
+  // One window at a time — reject a concurrent request up front (matches connect).
+  if (currentInFlight()) {
+    providerError('BUSY', 'Another approval is already open. Try again in a moment.');
+  }
+  return origin;
+}
+
+/**
+ * `signMessage` — BIP322/Schnorr message signing. ALWAYS re-prompts (a fresh approval
+ * window every call; never granted by connect). The approval window shows the message
+ * verbatim + the SW-derived origin. We reject sighash-shaped input (a bare 32-byte hash)
+ * BEFORE prompting, so the user never sees — and can never approve — a blind tx sign.
+ * Returns the base64 BIP322 signature. The seed never leaves the SW.
+ */
+export async function handleSignMessage(
+  sender: MessageSenderLike | undefined,
+  message: unknown,
+  buildWallet: () => Promise<Wallet>,
+): Promise<{ signature: string }> {
+  const origin = await requireForSigning(sender);
+
+  if (typeof message !== 'string') {
+    providerError('BAD_REQUEST', 'signMessage expects a string message.');
+  }
+
+  // Pre-validate (empty / sighash-shaped) BEFORE prompting — a dangerous request is
+  // rejected outright, never shown as approvable.
+  assertSignableMessage(message);
+
+  const decision = await requestApprovalSafe({ kind: 'signMessage', message }, origin);
+  if (!decision.approved) {
+    providerError('REJECTED', 'The signature request was declined.');
+  }
+
+  const wallet = await buildWallet();
+  const network = await getStoredNetwork();
+  try {
+    // Anchor the BIP322 signature to the wallet's ACTIVE network so a verifier checking
+    // against the user's real (testnet/regtest/mainnet) taproot address succeeds.
+    const signature = await signMessageBIP322(wallet.identity, message, networks[network]);
+    return { signature };
+  } catch (err) {
+    if (err instanceof SignMessageError) providerError('BAD_REQUEST', err.message);
+    throw err;
+  }
+}
+
+/**
+ * Throw a typed BAD_REQUEST if the message is empty or sighash-shaped — run BEFORE the
+ * prompt so a dangerous request is never shown as approvable. (`signMessageBIP322` runs
+ * the same checks again at sign time; this is the pre-prompt guard.)
+ */
+function assertSignableMessage(message: string): void {
+  if (message.trim().length === 0) {
+    providerError('BAD_REQUEST', 'Cannot sign an empty message.');
+  }
+  if (isSighashShaped(message)) {
+    providerError(
+      'BAD_REQUEST',
+      'This looks like a transaction hash, not a message. For your safety the wallet ' +
+        'only signs human-readable messages here, never a raw 32-byte hash.',
+    );
+  }
+}
+
+/**
+ * `signPsbt` — partial-sign a PSBT and return it UNFINALIZED. ALWAYS re-prompts. The SW
+ * PARSES + VALIDATES the PSBT itself (never a site-supplied summary): it decodes outputs,
+ * detects own-change by re-derivation, computes totals + fee, flags dangers, and
+ * classifies each signed input as an own-coin spend or a contract co-sign. Undecodable
+ * PSBTs / bad indexes / inputs we can't sign / fees over the bound are rejected before any
+ * prompt. On approve we add ONLY our partial Schnorr `tapScriptSig` (via `Identity.sign`)
+ * and return the PSBT unfinalized, so the other N-of-N parties + the operator co-sign in
+ * sequence. Accepts an Arkade checkpoint PSBT (a cooperative spend is two prompts).
+ *
+ * `allowHighFee` lets a second call override the fee-sanity rejection (explicit override).
+ */
+export async function handleSignPsbt(
+  sender: MessageSenderLike | undefined,
+  params: { psbt?: unknown; inputIndexes?: unknown; allowHighFee?: unknown },
+  buildWallet: () => Promise<Wallet>,
+): Promise<{ psbt: string }> {
+  const origin = await requireForSigning(sender);
+
+  const psbt = params?.psbt;
+  const inputIndexes = params?.inputIndexes;
+  if (typeof psbt !== 'string' || psbt.length === 0) {
+    providerError('BAD_REQUEST', 'signPsbt expects a base64/hex psbt string.');
+  }
+  if (!Array.isArray(inputIndexes) || !inputIndexes.every((i) => Number.isInteger(i))) {
+    providerError('BAD_REQUEST', 'signPsbt expects inputIndexes: number[].');
+  }
+  const allowHighFee = params?.allowHighFee === true;
+
+  // Build the wallet once: we need it both for the inspect context (own keys/scripts) and
+  // for the operator dust floor, and then for the actual signing on approve.
+  const wallet = await buildWallet();
+  const network = await getStoredNetwork();
+  const dustSats = await operatorDust(wallet);
+  const ctx = await buildInspectContext(wallet, network, dustSats);
+
+  // SW-side validate → the summary is what the user approves (NOT a site claim).
+  let summary;
+  try {
+    ({ summary } = validatePsbtForSigning(psbt as string, inputIndexes as number[], ctx, {
+      allowHighFee,
+    }));
+  } catch (err) {
+    if (err instanceof PsbtRejectedError) providerError('BAD_REQUEST', err.message);
+    throw err;
+  }
+
+  const decision = await requestApprovalSafe({ kind: 'signPsbt', summary }, origin);
+  if (!decision.approved) {
+    providerError('REJECTED', 'The signing request was declined.');
+  }
+
+  // Re-parse + sign from the SAME psbt string we inspected, add only our partial sig,
+  // return unfinalized.
+  const signedPsbt = await signPsbtPartial(wallet, psbt as string, inputIndexes as number[]);
+  return { psbt: signedPsbt };
+}
+
+/** The operator's dust floor in sats (`info.dust`), or a safe default if unreachable. */
+async function operatorDust(wallet: Wallet): Promise<number> {
+  try {
+    const info = await wallet.arkProvider.getInfo();
+    return Number(info.dust);
+  } catch {
+    return 330; // standard P2TR dust; only used to label tiny outputs
+  }
+}
+
 // ─── connected-sites management (popup Settings — trusted, no origin gate) ────
 
 /** Revoke a site from the popup. Rejects its pending request + emits disconnect. */
@@ -230,19 +395,29 @@ export async function revokeSite(origin: string): Promise<void> {
 // ─── events ──────────────────────────────────────────────────────────────────
 
 /**
- * Push a provider event to every tab whose page origin matches `origin`. Best-effort:
- * a tab with no content script (or a closed one) just rejects the sendMessage, which
- * we swallow. Used for `disconnect` (revoke/lock) and could carry `accountsChanged`.
+ * Push a provider event to every tab at this `origin`. Best-effort: a tab with no
+ * content script (or a closed one) just rejects the sendMessage, which we swallow.
+ * Used for `disconnect` (revoke/lock) and could carry `accountsChanged`.
+ *
+ * Least-privilege (security review): we SCOPE the `tabs.query` to a match pattern
+ * built from `origin` (`https://host/*`) instead of `tabs.query({})`, so we never
+ * enumerate every open tab's URL — only tabs at an origin we already have a relationship
+ * with are ever read. `origin` here is always an SW-derived, grant-keyed origin (from
+ * `deriveOrigin`/`listGrants`), never a page-supplied string. The exact-origin post-
+ * filter still runs because match patterns ignore the port (so a port-bearing origin
+ * like `https://host:8443` wouldn't be distinguished by the pattern alone).
  */
 export async function emitToOrigin(
   origin: string,
   event: ProviderEvent,
   data?: unknown,
 ): Promise<void> {
+  const pattern = originMatchPattern(origin);
+  if (!pattern) return;
   const message: ProviderEventMessage = { type: PROVIDER_EVENT_TYPE, event, data };
   let tabs: { id?: number; url?: string }[] = [];
   try {
-    tabs = await browser.tabs.query({});
+    tabs = await browser.tabs.query({ url: pattern });
   } catch {
     return;
   }
@@ -254,8 +429,22 @@ export async function emitToOrigin(
 }
 
 /**
+ * Build a host-scoped tab match pattern (`scheme://host/*`) from an SW-derived origin,
+ * or null if the origin can't be parsed. Drops the port — Chrome match patterns don't
+ * carry one — which is why `emitToOrigin` keeps the exact-origin post-filter.
+ */
+function originMatchPattern(origin: string): string | null {
+  try {
+    const url = new URL(origin);
+    return `${url.protocol}//${url.hostname}/*`;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Broadcast a provider event to ALL connected origins (e.g. `networkChanged` on a
- * network switch — every connected dapp's view of the network changed).
+ * network switch — every connected site's view of the network changed).
  */
 export async function emitToAllConnected(
   event: ProviderEvent,

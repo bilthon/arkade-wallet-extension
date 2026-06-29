@@ -14,16 +14,16 @@ function sender(partial: MessageSenderLike): MessageSenderLike {
 
 describe('deriveOrigin', () => {
   it('accepts an https origin from sender.origin', () => {
-    expect(deriveOrigin(sender({ origin: 'https://dapp.example' }))).toBe(
-      'https://dapp.example',
+    expect(deriveOrigin(sender({ origin: 'https://site.example' }))).toBe(
+      'https://site.example',
     );
   });
 
   it('accepts https with a port and strips any path', () => {
     // sender.origin is already an origin, but tab.url fallback must reduce to origin.
     expect(
-      deriveOrigin(sender({ tab: { url: 'https://dapp.example:8443/some/path?q=1' } })),
-    ).toBe('https://dapp.example:8443');
+      deriveOrigin(sender({ tab: { url: 'https://site.example:8443/some/path?q=1' } })),
+    ).toBe('https://site.example:8443');
   });
 
   it('prefers sender.origin over sender.tab.url', () => {
@@ -47,11 +47,11 @@ describe('deriveOrigin', () => {
   });
 
   it('rejects a non-loopback http origin', () => {
-    expect(() => deriveOrigin(sender({ origin: 'http://dapp.example' }))).toThrow(
+    expect(() => deriveOrigin(sender({ origin: 'http://site.example' }))).toThrow(
       OriginError,
     );
     try {
-      deriveOrigin(sender({ origin: 'http://dapp.example' }));
+      deriveOrigin(sender({ origin: 'http://site.example' }));
     } catch (e) {
       expect((e as OriginError).code).toBe('INSECURE_ORIGIN');
     }
@@ -88,7 +88,7 @@ describe('deriveOrigin', () => {
 
   it('cannot be overridden by a spoofed body-supplied origin (sender is the only source)', () => {
     // deriveOrigin's signature only accepts a sender — there is no body parameter to
-    // spoof. This test documents that contract: even if a dapp posts {origin: '...'}
+    // spoof. This test documents that contract: even if a web app posts {origin: '...'}
     // in the message body, the SW derives from sender alone.
     const s = sender({ origin: 'https://real.example' });
     // Simulate a malicious body that the handler must ignore.

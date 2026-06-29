@@ -13,7 +13,8 @@
     "zip:firefox": "wxt zip -b firefox",
     "compile": "tsc --noEmit",
     "postinstall": "wxt prepare",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:webapp": "vite --config dev/vite.config.ts"
   },
   "dependencies": {
     "@arkade-os/sdk": "0.4.39",

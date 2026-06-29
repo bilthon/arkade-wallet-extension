@@ -162,9 +162,9 @@ function RevealBackup({ onClose }: { onClose: () => void }) {
 }
 
 /**
- * Connected sites (Track E2a). Lists per-origin dapp grants and revokes them. Revoke
+ * Connected sites (Track E2a). Lists per-origin web app grants and revokes them. Revoke
  * is immediate: the background drops the grant, rejects any pending request from that
- * origin, and pushes a `disconnect` event so the dapp's session ends right away.
+ * origin, and pushes a `disconnect` event so the web app's session ends right away.
  */
 function ConnectedSites({ onClose }: { onClose: () => void }) {
   const [grants, setGrants] = useState<{ origin: string; grantedAt: number }[] | null>(null);

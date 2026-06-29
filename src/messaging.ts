@@ -99,30 +99,40 @@ export interface ProtocolMap {
    */
   getRenewalWarning(): { warning: RenewalWarning | null };
 
-  // ─── Dapp provider surface (Track E2a — origin + grant gated) ──────────────
+  // ─── Provider surface (Track E2a — origin + grant gated) ───────────────────
   //
-  // These are the ONLY messages the ISOLATED content bridge forwards on a dapp's
-  // behalf. The background derives the origin from `sender` (NEVER a body field),
-  // checks the per-origin grant, and returns public results only. They are distinct
-  // from the popup read methods above so the trusted popup path is never confused
-  // with the untrusted dapp path. `connect` prompts via the approval window; the rest
-  // read the existing grant + require the wallet unlocked (typed LOCKED/NOT_CONNECTED).
+  // These are the ONLY messages the ISOLATED content bridge forwards on a web
+  // app's behalf. The background derives the origin from `sender` (NEVER a body
+  // field), checks the per-origin grant, and returns public results only. They are
+  // distinct from the popup read methods above so the trusted popup path is never
+  // confused with the untrusted provider path. `connect` prompts via the approval
+  // window; the rest read the existing grant + require the wallet unlocked (typed
+  // LOCKED/NOT_CONNECTED).
   //
-  // dappConnect carries no params — the origin is the sender's, resolved SW-side.
-  dappConnect(): { accounts: string[] };
-  dappDisconnect(): { ok: true };
-  dappIsConnected(): { connected: boolean };
-  dappGetAccounts(): { accounts: string[] };
-  dappGetAddress(): { address: string };
-  dappGetBoardingAddress(): { boardingAddress: string };
-  dappGetPublicKey(): PublicKeyInfo;
-  dappGetBalance(): AdjustedBalance;
-  dappGetNetwork(): NetworkInfo;
+  // providerConnect carries no params — the origin is the sender's, resolved SW-side.
+  providerConnect(): { accounts: string[] };
+  providerDisconnect(): { ok: true };
+  providerIsConnected(): { connected: boolean };
+  providerGetAccounts(): { accounts: string[] };
+  providerGetAddress(): { address: string };
+  providerGetBoardingAddress(): { boardingAddress: string };
+  providerGetPublicKey(): PublicKeyInfo;
+  providerGetBalance(): AdjustedBalance;
+  providerGetNetwork(): NetworkInfo;
+  // Signing — each re-prompts via the approval window (NOT granted by connect). The SW
+  // validates everything itself; the seed never crosses this boundary, only the signature
+  // / signed PSBT does. `signPsbt` returns the PSBT UNFINALIZED (others co-sign after us).
+  providerSignMessage(data: { message: string }): { signature: string };
+  providerSignPsbt(data: {
+    psbt: string;
+    inputIndexes: number[];
+    allowHighFee?: boolean;
+  }): { psbt: string };
 
   // ─── Approval window ↔ background (trusted extension page) ──────────────────
   /** The approval window reads its request by id (shows the SW-derived origin). */
   getApprovalRequest(data: { requestId: string }): { request: PendingRequest | null };
-  /** The approval window posts the user's decision; resolves the dapp's promise. */
+  /** The approval window posts the user's decision; resolves the web app's promise. */
   approvalResponse(data: { requestId: string; approved: boolean }): { ok: true };
 
   // ─── Connected-sites management (popup Settings — trusted) ──────────────────

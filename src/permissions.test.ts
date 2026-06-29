@@ -39,30 +39,30 @@ beforeEach(() => {
 
 describe('grantConnect', () => {
   it('grants exactly the READ methods and records accounts + timestamp', async () => {
-    const grant = await grantConnect('https://dapp.example', ['tark1abc']);
-    expect(grant.origin).toBe('https://dapp.example');
+    const grant = await grantConnect('https://site.example', ['tark1abc']);
+    expect(grant.origin).toBe('https://site.example');
     expect(grant.accounts).toEqual(['tark1abc']);
     expect(grant.grantedMethods).toEqual([...READ_METHODS]);
     expect(grant.grantedAt).toBeGreaterThan(0);
   });
 
   it('does not grant any signing/sending method', async () => {
-    await grantConnect('https://dapp.example', ['tark1abc']);
-    expect(await isMethodGranted('https://dapp.example', 'signPsbt')).toBe(false);
-    expect(await isMethodGranted('https://dapp.example', 'signMessage')).toBe(false);
-    expect(await isMethodGranted('https://dapp.example', 'sendBitcoin')).toBe(false);
+    await grantConnect('https://site.example', ['tark1abc']);
+    expect(await isMethodGranted('https://site.example', 'signPsbt')).toBe(false);
+    expect(await isMethodGranted('https://site.example', 'signMessage')).toBe(false);
+    expect(await isMethodGranted('https://site.example', 'sendBitcoin')).toBe(false);
   });
 
   it('allows a granted read method', async () => {
-    await grantConnect('https://dapp.example', ['tark1abc']);
-    expect(await isMethodGranted('https://dapp.example', 'getBalance')).toBe(true);
-    expect(await isMethodGranted('https://dapp.example', 'getPublicKey')).toBe(true);
+    await grantConnect('https://site.example', ['tark1abc']);
+    expect(await isMethodGranted('https://site.example', 'getBalance')).toBe(true);
+    expect(await isMethodGranted('https://site.example', 'getPublicKey')).toBe(true);
   });
 
   it('re-connect overwrites accounts for the same origin', async () => {
-    await grantConnect('https://dapp.example', ['tark1old']);
-    await grantConnect('https://dapp.example', ['tark1new']);
-    const grant = await getGrant('https://dapp.example');
+    await grantConnect('https://site.example', ['tark1old']);
+    await grantConnect('https://site.example', ['tark1new']);
+    const grant = await getGrant('https://site.example');
     expect(grant?.accounts).toEqual(['tark1new']);
     expect((await listGrants()).length).toBe(1);
   });
@@ -79,14 +79,14 @@ describe('grant scoping by origin', () => {
 
 describe('revokeGrant', () => {
   it('rejects all methods after revocation', async () => {
-    await grantConnect('https://dapp.example', ['tark1abc']);
-    expect(await isMethodGranted('https://dapp.example', 'getBalance')).toBe(true);
+    await grantConnect('https://site.example', ['tark1abc']);
+    expect(await isMethodGranted('https://site.example', 'getBalance')).toBe(true);
 
-    await revokeGrant('https://dapp.example');
+    await revokeGrant('https://site.example');
 
-    expect(await isConnected('https://dapp.example')).toBe(false);
-    expect(await getGrant('https://dapp.example')).toBeNull();
-    expect(await isMethodGranted('https://dapp.example', 'getBalance')).toBe(false);
+    expect(await isConnected('https://site.example')).toBe(false);
+    expect(await getGrant('https://site.example')).toBeNull();
+    expect(await isMethodGranted('https://site.example', 'getBalance')).toBe(false);
   });
 
   it('is a no-op for an unknown origin', async () => {
