@@ -45,6 +45,17 @@ export async function setNetwork(network: NetworkName): Promise<void> {
   await browser.storage.local.set({ [NETWORK_KEY]: network });
 }
 
+/**
+ * Atomically persist a re-encrypted vault together with its active network in ONE
+ * write (network switching re-binds the vault's AES-GCM AAD to the network). A single
+ * `storage.local.set` is all-or-nothing: it closes the window where the vault could be
+ * bound to network A while the stored network said B — a mismatch that would fail the
+ * next unlock (wrong AAD) and brick the wallet until a mnemonic re-import.
+ */
+export async function setVaultAndNetwork(blob: VaultBlob, network: NetworkName): Promise<void> {
+  await browser.storage.local.set({ [VAULT_KEY]: blob, [NETWORK_KEY]: network });
+}
+
 // ─── session (ephemeral, nothing secret) ─────────────────────────────────────
 
 /** Set/clear the unlock flag. Strict posture: this is the ONLY thing session holds. */

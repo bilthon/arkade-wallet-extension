@@ -39,6 +39,7 @@ const browserMock = {
 vi.stubGlobal('browser', browserMock);
 
 const keystore = await import('./keystore');
+const crypto = await import('./crypto');
 
 const PASSWORD = 'correct horse battery staple';
 
@@ -80,5 +81,65 @@ describe('keystore handler round-trip (M1 boundary)', () => {
     const created = await keystore.createWallet(PASSWORD);
     await expect(keystore.getMnemonicForBackup('wrong-password')).rejects.toThrow();
     expect(await keystore.getMnemonicForBackup(PASSWORD)).toBe(created);
+  });
+});
+
+describe('switchNetwork', () => {
+  // Reuse the same browser mock (local/session) declared above; cleared before each case.
+  beforeEach(async () => {
+    local.clear();
+    session.clear();
+    await keystore.lock();
+  });
+
+  it('switches network: vault decryptable under new network, stored network updated', async () => {
+    // Create under default (regtest).
+    await keystore.createWallet(PASSWORD);
+
+    // Switch to mutinynet.
+    await keystore.switchNetwork('mutinynet', PASSWORD);
+
+    // The stored network flips.
+    expect(local.get('network')).toBe('mutinynet');
+
+    // unlock succeeds under the new network (vault was re-encrypted under mutinynet AAD).
+    await keystore.lock();
+    await expect(keystore.unlock(PASSWORD)).resolves.not.toThrow();
+    expect(keystore.isUnlocked()).toBe(true);
+
+    // …and the vault NO LONGER decrypts under the OLD network's AAD — proves the switch
+    // actually re-encrypted (rebound the AAD), not just flipped the stored network pointer.
+    await expect(
+      crypto.decryptVault(
+        local.get('vault') as Parameters<typeof crypto.decryptVault>[0],
+        PASSWORD,
+        'regtest',
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('wrong password leaves vault + network unchanged', async () => {
+    await keystore.createWallet(PASSWORD);
+    const vaultBefore = local.get('vault');
+
+    await expect(keystore.switchNetwork('mutinynet', 'wrong-password')).rejects.toThrow();
+
+    // Network unchanged (still regtest/default).
+    expect(local.get('network')).toBeUndefined(); // never set → default regtest
+    // Vault blob is identical.
+    expect(local.get('vault')).toEqual(vaultBefore);
+    // Still decryptable under the original network.
+    await expect(keystore.getMnemonicForBackup(PASSWORD)).resolves.toBeTruthy();
+  });
+
+  it('same-network target is a no-op (vault unchanged)', async () => {
+    await keystore.createWallet(PASSWORD);
+    const vaultBefore = local.get('vault');
+
+    // regtest is the default; switching to it again is a no-op.
+    await keystore.switchNetwork('regtest', PASSWORD);
+
+    expect(local.get('vault')).toEqual(vaultBefore);
+    expect(local.get('network')).toBeUndefined(); // setNetwork was never called
   });
 });

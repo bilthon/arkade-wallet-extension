@@ -1,5 +1,7 @@
 import { decryptVault, encryptVault, generateMnemonic, mnemonicToSeed, validateMnemonic } from './crypto';
-import { getNetwork, getVault, hasVault, setUnlockFlag, setVault } from './storage';
+import { getNetwork, getVault, hasVault, setUnlockFlag, setVault, setVaultAndNetwork } from './storage';
+import { clearSnapshot } from './wallet-cache';
+import type { NetworkName } from '@arkade-os/sdk';
 
 /**
  * Lock model under MV3 (Track B, PLAN.md §7 — Strict posture).
@@ -80,6 +82,36 @@ export async function getMnemonicForBackup(password: string): Promise<string> {
   if (!blob) throw new Error('getMnemonicForBackup: no vault');
   const network = await getNetwork();
   return decryptVault(blob, password, network); // throws on bad password/tamper
+}
+
+/**
+ * Switch the active network behind a password re-auth.
+ *
+ * The vault binds the encrypted mnemonic to its network via the AES-GCM
+ * additional-data (`"arkade-vault-v1" + network`), so a plain `setNetwork` call
+ * would leave the vault undecryptable on the new network. This function re-auth's
+ * under the CURRENT network, then re-encrypts the same mnemonic under the NEW
+ * network's AAD and atomically flips the stored network.
+ *
+ * M1 boundary: the mnemonic stays in the SW, only the password crosses in — same
+ * contract as `getMnemonicForBackup`. A wrong password (or tamper) throws from
+ * `decryptVault` and leaves the stored vault + network UNCHANGED (fail-closed).
+ */
+export async function switchNetwork(newNetwork: NetworkName, password: string): Promise<void> {
+  const blob = await getVault();
+  if (!blob) throw new Error('switchNetwork: no vault');
+  const current = await getNetwork();
+  if (newNetwork === current) return; // no-op
+  // Re-auth under the CURRENT network (fail-closed: wrong password/tamper throws from decryptVault).
+  const mnemonic = await decryptVault(blob, password, current);
+  // Re-encrypt the SAME mnemonic under the NEW network's AAD and flip the stored network
+  // in ONE atomic write — vault and network must never disagree (a mismatch can't unlock).
+  const newVault = await encryptVault(mnemonic, password, newNetwork);
+  await setVaultAndNetwork(newVault, newNetwork);
+  await clearSnapshot(); // per-network address/balance cache — drop the old one
+  // We just proved the password and hold the mnemonic → keep it unlocked under the new
+  // network rather than forcing a re-unlock. If it was locked, stay locked.
+  if (isUnlocked()) await holdUnlocked(mnemonic);
 }
 
 // ─── Create / import ─────────────────────────────────────────────────────────

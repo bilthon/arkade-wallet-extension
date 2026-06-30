@@ -36,6 +36,8 @@ export interface ProtocolMap {
   lock(): { ok: true };
   /** Re-auth-gated reveal — the ONLY message that returns the mnemonic post-creation. */
   getMnemonicForBackup(data: { password: string }): { mnemonic: string };
+  /** Re-encrypt the vault under a new network's AAD (requires the password). */
+  switchNetwork(data: { network: NetworkName; password: string }): { ok: true };
 
   // ─── Read methods (public results only) ────────────────────────────────────
   getAddress(): { address: string };
