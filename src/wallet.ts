@@ -223,7 +223,7 @@ export class SendValidationError extends Error {
       | 'AMOUNT_TOO_LOW'
       | 'AMOUNT_BELOW_DUST'
       | 'AMOUNT_EXCEEDS_BALANCE'
-      | 'SETTLEMENT_SCHEDULED',
+      | 'SETTLEMENT_WINDOW_NOT_OPEN',
     message: string,
   ) {
     super(message);
@@ -435,7 +435,7 @@ export async function sendOnchain(
     if (waitMs > 90_000) {
       const mins = Math.ceil(waitMs / 60_000);
       throw new SendValidationError(
-        'SETTLEMENT_SCHEDULED',
+        'SETTLEMENT_WINDOW_NOT_OPEN',
         `On-chain withdrawals settle in scheduled windows. The next one opens in about ${mins} minute${mins === 1 ? '' : 's'} — keep the wallet open and withdraw then.`,
       );
     }
