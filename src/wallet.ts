@@ -3,6 +3,7 @@ import {
   SeedIdentity,
   ArkAddress,
   Ramps,
+  DustChangeError,
   networks,
   isExpired,
   isRecoverable,
@@ -292,6 +293,41 @@ export function validateArkadeAddress(address: string, network: NetworkName): vo
   }
 }
 
+
+/**
+ * Validate that `address` is an on-chain Bitcoin address for the ACTIVE network.
+ *
+ * ponytail: prefix check only, consistent with `validateArkadeAddress`. The operator's
+ * `Ramps.offboard` enforces full bech32 validity at the protocol level. We catch the
+ * most common user error — pasting a mainnet address on regtest — with a clear
+ * cross-network message rather than an opaque protocol reject.
+ *
+ * Throws `SendValidationError`; returns nothing on success.
+ */
+export function validateOnchainAddress(address: string, network: NetworkName): void {
+  const trimmed = address.trim();
+  if (!trimmed) {
+    throw new SendValidationError('ADDRESS_MALFORMED', 'Enter a Bitcoin address.');
+  }
+  const onchainHrp = onchainPrefixFor(network);
+  const lower = trimmed.toLowerCase();
+  if (!lower.startsWith(`${onchainHrp}1`)) {
+    // Cross-network on-chain address (e.g. bc1… on regtest) → precise message.
+    const looksOnchain =
+      lower.startsWith('bc1') || lower.startsWith('tb1') || lower.startsWith('bcrt1');
+    if (looksOnchain) {
+      throw new SendValidationError(
+        'ADDRESS_WRONG_NETWORK',
+        `That address is for a different network (expected a "${onchainHrp}1…" address).`,
+      );
+    }
+    throw new SendValidationError(
+      'ADDRESS_MALFORMED',
+      'Enter a valid on-chain Bitcoin address (bc1… / tb1… / bcrt1…).',
+    );
+  }
+}
+
 /**
  * Validate the amount in sats against the dust floor and the live available balance.
  * `available` is `getBalance().available` (the only spendable bucket for an off-chain
@@ -356,6 +392,56 @@ export async function send(
           : 'Not enough spendable balance to cover this send.',
       );
     }
+    throw err;
+  }
+}
+
+/**
+ * On-chain exit (offboard): collaboratively settle VTXOs to a regular Bitcoin address
+ * via `Ramps.offboard`. Operator-cooperative batch settle — the same mechanism as
+ * `onboardBoarding` / `Ramps.onboard`. NOT unilateral exit. Signs in the SW (caller
+ * guarantees the wallet is unlocked).
+ *
+ * Fee semantics (from SDK d.ts): `feeInfo` is "deducted from the offboard amount" —
+ * the amount is GROSS; the recipient receives (amount − network fee). When `amount` is
+ * omitted, the SDK offboards ALL virtual outputs (send-all / "Max") and deducts the fee
+ * from the total internally.
+ */
+export async function sendOnchain(
+  wallet: Wallet,
+  { address, amount }: { address: string; amount?: number },
+): Promise<{ txid: string }> {
+  const network = await getStoredNetwork();
+  validateOnchainAddress(address, network);
+  if (amount !== undefined) {
+    const balance = await getBalance(wallet);
+    validateAmount(amount, balance.available);
+  }
+  const info = await wallet.arkProvider.getInfo();
+  try {
+    const txid = await new Ramps(wallet).offboard(
+      address.trim(),
+      info.fees,
+      amount !== undefined ? BigInt(amount) : undefined,
+    );
+    return { txid };
+  } catch (err) {
+    // `Ramps.offboard` deducts a per-input fee from each VTXO BEFORE checking the amount,
+    // so its real failures are fee-relative — none of them say "insufficient funds". Map
+    // each to a clear, actionable message so a funds-leaving popup never shows raw SDK text.
+    if (err instanceof DustChangeError) {
+      throw new Error('The leftover change would be too small to keep. Use Max to withdraw everything.');
+    }
+    if (err instanceof Error && /no vtxos available after deducting fees/i.test(err.message)) {
+      throw new Error('No spendable balance to withdraw on-chain right now.');
+    }
+    if (err instanceof Error && /greater than total amount of vtxos after fees/i.test(err.message)) {
+      throw new Error(
+        'That amount leaves too little after the network fee. Try a smaller amount, or use Max to withdraw everything.',
+      );
+    }
+    const human = translateSettleError(err);
+    if (human) throw human;
     throw err;
   }
 }

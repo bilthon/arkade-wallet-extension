@@ -21,6 +21,7 @@ import {
   getBalance,
   getPublicKey,
   send,
+  sendOnchain,
   renewExpiringVtxos,
   recoverExpiredVtxos,
   onboardBoarding,
@@ -164,6 +165,11 @@ export default defineBackground(() => {
   onMessage('send', async ({ data }) => {
     const wallet = await requireWallet();
     return send(wallet, data);
+  });
+
+  onMessage('sendOnchain', async ({ data }) => {
+    const wallet = await requireWallet();
+    return sendOnchain(wallet, data);
   });
 
   // ── Renewal + recovery + onboarding (Track F) ──────────────────────────────

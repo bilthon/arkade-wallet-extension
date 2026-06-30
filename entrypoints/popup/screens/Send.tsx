@@ -6,6 +6,13 @@ import { formatSats } from '../format';
  * pre-gate the Review button so the user doesn't wait out the settle-delay to fail. */
 const DUST_SATS = 330;
 
+/** Prefix check — mirrors `validateOnchainAddress` in wallet.ts. Network-agnostic
+ *  because the SW re-validates with the active network before signing. */
+function isOnchainAddress(addr: string): boolean {
+  const l = addr.trim().toLowerCase();
+  return l.startsWith('bc1') || l.startsWith('tb1') || l.startsWith('bcrt1');
+}
+
 type Stage = 'entry' | 'confirm' | 'done';
 
 export function Send({
@@ -26,6 +33,9 @@ export function Send({
   const [error, setError] = useState('');
   const [sending, setSending] = useState(false);
   const [settled, setSettled] = useState(false);
+  // On-chain Max: true when the user clicked Max in on-chain mode → omit amount from
+  // offboard call so the SDK offboards everything and deducts the fee internally.
+  const [sendAll, setSendAll] = useState(false);
   // Synchronous re-entrancy guard: flips before the first await so two clicks in the
   // same tick can't both issue a send (the `sending` state guard only applies after a
   // re-render). This is the spend path — a double-send would spend distinct VTXOs.
@@ -41,11 +51,12 @@ export function Send({
 
   // Strict integer parse: reject any non-digit tail (parseInt('5e3')→5, '50x'→50).
   const amountNum = /^\d+$/.test(amount.trim()) ? Number(amount.trim()) : NaN;
+  const onchainMode = isOnchainAddress(address);
+  // sendAll bypasses the amount bounds check (on-chain Max → SDK handles fee deduction).
   const entryValid =
     address.trim().length > 0 &&
-    Number.isInteger(amountNum) &&
-    amountNum >= DUST_SATS &&
-    amountNum <= availableSats;
+    (sendAll ||
+      (Number.isInteger(amountNum) && amountNum >= DUST_SATS && amountNum <= availableSats));
 
   async function send() {
     if (inFlight.current) return;
@@ -53,7 +64,17 @@ export function Send({
     setSending(true);
     setError('');
     try {
-      const { txid: id } = await client.send(address.trim(), amountNum);
+      let id: string;
+      if (onchainMode) {
+        // For on-chain Max (sendAll), omit amount — SDK offboards everything and
+        // deducts the network fee internally. Explicit amount passes as BigInt SW-side.
+        ({ txid: id } = await client.sendOnchain(
+          address.trim(),
+          sendAll ? undefined : amountNum,
+        ));
+      } else {
+        ({ txid: id } = await client.send(address.trim(), amountNum));
+      }
       setTxid(id);
       setStage('done');
     } catch (err) {
@@ -72,9 +93,13 @@ export function Send({
     return (
       <main className="screen">
         <div className="home-top">
-          <h1>Sent</h1>
+          <h1>{onchainMode ? 'Withdrawal submitted' : 'Sent'}</h1>
         </div>
-        <p className="subtitle">Instant — stayed within Arkade.</p>
+        <p className="subtitle">
+          {onchainMode
+            ? 'Settling on-chain via the next Arkade round.'
+            : 'Instant — stayed within Arkade.'}
+        </p>
         <div className="addr-box">
           <div className="addr-caption">Transaction ID</div>
           <div className="addr-mono">{txid}</div>
@@ -93,7 +118,7 @@ export function Send({
     return (
       <main className="screen">
         <div className="home-top">
-          <h1>Confirm send</h1>
+          <h1>{onchainMode ? 'Confirm withdrawal' : 'Confirm send'}</h1>
           <button className="icon-btn" onClick={() => setStage('entry')} aria-label="Back">
             ✕
           </button>
@@ -106,11 +131,17 @@ export function Send({
 
         <label>Amount</label>
         <div style={{ fontSize: 20, fontWeight: 700, margin: '4px 0 8px' }}>
-          {formatSats(amountNum)} sats
+          {sendAll ? `${formatSats(availableSats)} sats (Max)` : `${formatSats(amountNum)} sats`}
         </div>
 
         <div className="addr-box">
-          <div className="addr-caption">Instant · ~zero fee · stays within Arkade</div>
+          {onchainMode ? (
+            <div className="addr-caption">
+              On-chain · the recipient receives this minus the network fee · exits Arkade · not instant
+            </div>
+          ) : (
+            <div className="addr-caption">Instant · ~zero fee · stays within Arkade</div>
+          )}
         </div>
 
         {error && <div className="error">{error}</div>}
@@ -125,7 +156,9 @@ export function Send({
             disabled={!settled || sending}
             onClick={send}
           >
-            {sending ? 'Sending…' : 'Confirm & send'}
+            {sending
+              ? (onchainMode ? 'Withdrawing…' : 'Sending…')
+              : (onchainMode ? 'Confirm & withdraw' : 'Confirm & send')}
           </button>
         </div>
       </main>
@@ -142,15 +175,17 @@ export function Send({
         </button>
       </div>
 
-      <label htmlFor="send-address">Arkade address</label>
+      <label htmlFor="send-address">
+        {onchainMode ? 'Bitcoin address' : 'Arkade address'}
+      </label>
       <input
         id="send-address"
         type="text"
         autoCapitalize="none"
         autoCorrect="off"
         value={address}
-        onChange={(e) => setAddress(e.target.value)}
-        placeholder="ark1q…"
+        onChange={(e) => { setAddress(e.target.value); setSendAll(false); }}
+        placeholder={onchainMode ? 'bc1… / tb1… / bcrt1…' : 'tark1q… or ark1q…'}
       />
 
       <label htmlFor="send-amount">Amount (sats)</label>
@@ -161,12 +196,17 @@ export function Send({
           inputMode="numeric"
           min={1}
           value={amount}
-          onChange={(e) => setAmount(e.target.value)}
+          onChange={(e) => { setAmount(e.target.value); setSendAll(false); }}
           placeholder="0"
           style={{ flex: 1 }}
         />
         <button
-          onClick={() => setAmount(String(availableSats))}
+          onClick={() => {
+            setAmount(String(availableSats));
+            // On-chain Max: signal send-all so the SW offboards everything and
+            // deducts the fee internally (amount omitted from offboard call).
+            if (onchainMode) setSendAll(true);
+          }}
           disabled={availableSats === 0}
         >
           Max
@@ -174,6 +214,7 @@ export function Send({
       </div>
       <div className="row-sub" style={{ marginTop: 4 }}>
         Available: {formatSats(availableSats)} sats
+        {onchainMode && ' · use Max to withdraw everything (the network fee is taken from it)'}
       </div>
 
       <div className="spacer" />

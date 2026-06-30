@@ -72,6 +72,13 @@ export interface ProtocolMap {
    * live SW-side; only the message survives the message boundary).
    */
   send(data: { address: string; amount: number }): { txid: string };
+  /**
+   * On-chain collaborative exit (offboard) via `Ramps.offboard`. Gated on unlock.
+   * When `amount` is omitted, offboards ALL virtual outputs (send-all / "Max"). The
+   * network fee is deducted from the offboard amount (GROSS — recipient gets amount −
+   * fee). Returns the commitment txid.
+   */
+  sendOnchain(data: { address: string; amount?: number }): { txid: string };
 
   // ─── Renewal + recovery + onboarding (Track F — deliberate, unlock-gated) ───
   /**
