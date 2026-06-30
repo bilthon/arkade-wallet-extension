@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { client, isLockedError, errorMessage } from '../client';
 import { formatSats } from '../format';
+import { NetworkName } from '@arkade-os/sdk';
 
 /** Dust floor (sats) — mirrors the SW's authoritative DUST_SATS; used here only to
  * pre-gate the Review button so the user doesn't wait out the settle-delay to fail. */
@@ -26,6 +27,7 @@ export function Send({
   onLocked: () => void;
   onSent: () => void;
 }) {
+  const [network, setNetwork] = useState<NetworkName | null>(null)
   const [stage, setStage] = useState<Stage>('entry');
   const [address, setAddress] = useState('');
   const [amount, setAmount] = useState('');
@@ -48,6 +50,14 @@ export function Send({
     const id = setTimeout(() => setSettled(true), 450);
     return () => clearTimeout(id);
   }, [stage]);
+
+  useEffect(() => {
+    let cancelled = false
+    void client.getNetwork().then(({ network }) => {
+      if (!cancelled) setNetwork(network)
+    })
+    return () => { cancelled = true }
+  }, [])
 
   // Strict integer parse: reject any non-digit tail (parseInt('5e3')→5, '50x'→50).
   const amountNum = /^\d+$/.test(amount.trim()) ? Number(amount.trim()) : NaN;
@@ -176,7 +186,7 @@ export function Send({
       </div>
 
       <label htmlFor="send-address">
-        {onchainMode ? 'Bitcoin address' : 'Arkade address'}
+        Bitcoin or Arkade address
       </label>
       <input
         id="send-address"
@@ -185,7 +195,7 @@ export function Send({
         autoCorrect="off"
         value={address}
         onChange={(e) => { setAddress(e.target.value); setSendAll(false); }}
-        placeholder={onchainMode ? 'bc1… / tb1… / bcrt1…' : 'tark1q… or ark1q…'}
+        placeholder={network === 'bitcoin' ? 'bc1… / ark1q…' : 'tb1… / bcrt1… / tark1q…'}
       />
 
       <label htmlFor="send-amount">Amount (sats)</label>
