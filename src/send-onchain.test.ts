@@ -133,3 +133,38 @@ describe('sendOnchain — offboard error translation', () => {
     ).rejects.toThrow(/leftover change would be too small/i);
   });
 });
+
+describe('sendOnchain — scheduled-session guard', () => {
+  // An offboard's `settle` blocks until the next session; a far-out scheduled window would
+  // outlive the MV3 service worker, so sendOnchain refuses up front rather than hang.
+  function walletWithSession(nextStartTimeSec: number) {
+    const w = mockWallet();
+    w.arkProvider.getInfo = vi.fn(async () => ({
+      fees: { someField: 1 },
+      scheduledSession: {
+        nextStartTime: BigInt(nextStartTimeSec),
+        nextEndTime: 0n,
+        period: 0n,
+        duration: 0n,
+        fees: {},
+      },
+    })) as never;
+    return w;
+  }
+
+  it('refuses (with an ETA) when the next settlement window is far out', async () => {
+    const wallet = walletWithSession(Math.floor(Date.now() / 1000) + 3600); // ~1h out
+    await expect(sendOnchain(wallet, { address: 'bcrt1qtest' })).rejects.toThrow(
+      /scheduled windows/i,
+    );
+    expect(offboardMock).not.toHaveBeenCalled();
+  });
+
+  it('proceeds when the session window is open/imminent', async () => {
+    const wallet = walletWithSession(Math.floor(Date.now() / 1000)); // open now
+    await expect(sendOnchain(wallet, { address: 'bcrt1qtest' })).resolves.toEqual({
+      txid: 'offboard-txid',
+    });
+    expect(offboardMock).toHaveBeenCalledOnce();
+  });
+});

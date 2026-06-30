@@ -222,7 +222,8 @@ export class SendValidationError extends Error {
       | 'AMOUNT_NOT_INTEGER'
       | 'AMOUNT_TOO_LOW'
       | 'AMOUNT_BELOW_DUST'
-      | 'AMOUNT_EXCEEDS_BALANCE',
+      | 'AMOUNT_EXCEEDS_BALANCE'
+      | 'SETTLEMENT_SCHEDULED',
     message: string,
   ) {
     super(message);
@@ -418,6 +419,28 @@ export async function sendOnchain(
     validateAmount(amount, balance.available);
   }
   const info = await wallet.arkProvider.getInfo();
+
+  // An offboard is a collaborative-exit `settle` that BLOCKS until the operator's next
+  // settlement session runs. When the operator gates settlement to scheduled windows
+  // (market hours, `scheduledSession` non-null), that wait can be far longer than the MV3
+  // service worker survives (killed ~30s idle, ~5min max even while busy) — so a blind
+  // `await` would never resolve and the withdrawal would hang. Refuse up front with the
+  // ETA instead. Today both Arkade operators advertise `scheduledSession: null` (on-demand
+  // ~60s sessions), so this never fires; it's a guard for market-hours operators.
+  // ponytail: assumes `nextStartTime` is epoch SECONDS (matches `sessionDuration:"60"`s);
+  // unverified against a live scheduled operator — revisit if an operator enables sessions.
+  const sched = info.scheduledSession;
+  if (sched) {
+    const waitMs = Number(sched.nextStartTime) * 1000 - Date.now();
+    if (waitMs > 90_000) {
+      const mins = Math.ceil(waitMs / 60_000);
+      throw new SendValidationError(
+        'SETTLEMENT_SCHEDULED',
+        `On-chain withdrawals settle in scheduled windows. The next one opens in about ${mins} minute${mins === 1 ? '' : 's'} — keep the wallet open and withdraw then.`,
+      );
+    }
+  }
+
   try {
     const txid = await new Ramps(wallet).offboard(
       address.trim(),

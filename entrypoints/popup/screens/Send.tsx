@@ -97,7 +97,7 @@ export function Send({
         </div>
         <p className="subtitle">
           {onchainMode
-            ? 'Settling on-chain via the next Arkade round.'
+            ? 'Broadcast on-chain — pending confirmation.'
             : 'Instant — stayed within Arkade.'}
         </p>
         <div className="addr-box">
@@ -157,7 +157,7 @@ export function Send({
             onClick={send}
           >
             {sending
-              ? (onchainMode ? 'Withdrawing…' : 'Sending…')
+              ? (onchainMode ? 'Withdrawing… (up to a minute)' : 'Sending…')
               : (onchainMode ? 'Confirm & withdraw' : 'Confirm & send')}
           </button>
         </div>
