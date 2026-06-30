@@ -24,6 +24,8 @@ export const client = {
   refreshWalletSnapshot: () => sendMessage('refreshWalletSnapshot', undefined),
   send: (address: string, amount: number) =>
     sendMessage('send', { address, amount }),
+  sendOnchain: (address: string, amount?: number) =>
+    sendMessage('sendOnchain', { address, amount }),
   renewNow: () => sendMessage('renewNow', undefined),
   recoverNow: () => sendMessage('recoverNow', undefined),
   onboardNow: () => sendMessage('onboardNow', undefined),

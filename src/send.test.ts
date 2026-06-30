@@ -3,6 +3,7 @@ import { ArkAddress, networks, type NetworkName } from '@arkade-os/sdk';
 import {
   validateArkadeAddress,
   validateAmount,
+  validateOnchainAddress,
   SendValidationError,
   DUST_SATS,
 } from './wallet';
@@ -91,6 +92,32 @@ describe('validateArkadeAddress — malformed', () => {
       expect(err.code).toBe('ADDRESS_MALFORMED');
     },
   );
+});
+
+describe('validateOnchainAddress — network routing', () => {
+  it('accepts the active network HRP', () => {
+    expect(() => validateOnchainAddress('bcrt1qtest', 'regtest')).not.toThrow();
+    expect(() => validateOnchainAddress('bc1qtest', 'bitcoin')).not.toThrow();
+    expect(() => validateOnchainAddress('tb1qtest', 'mutinynet')).not.toThrow();
+    expect(() => validateOnchainAddress('tb1qtest', 'signet')).not.toThrow();
+    expect(() => validateOnchainAddress('tb1qtest', 'testnet')).not.toThrow();
+  });
+
+  it('rejects a cross-network on-chain address (bc1… on regtest)', () => {
+    const err = expectReject(() => validateOnchainAddress('bc1qtest', 'regtest'));
+    expect(err.code).toBe('ADDRESS_WRONG_NETWORK');
+    expect(err.message).toContain('bcrt1');
+  });
+
+  it('rejects an Arkade address as malformed', () => {
+    const err = expectReject(() => validateOnchainAddress(TARK, 'regtest'));
+    expect(err.code).toBe('ADDRESS_MALFORMED');
+  });
+
+  it('rejects empty input as malformed', () => {
+    const err = expectReject(() => validateOnchainAddress('', 'regtest'));
+    expect(err.code).toBe('ADDRESS_MALFORMED');
+  });
 });
 
 describe('validateAmount — bounds', () => {

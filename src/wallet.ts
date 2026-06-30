@@ -3,6 +3,7 @@ import {
   SeedIdentity,
   ArkAddress,
   Ramps,
+  DustChangeError,
   networks,
   isExpired,
   isRecoverable,
@@ -221,7 +222,8 @@ export class SendValidationError extends Error {
       | 'AMOUNT_NOT_INTEGER'
       | 'AMOUNT_TOO_LOW'
       | 'AMOUNT_BELOW_DUST'
-      | 'AMOUNT_EXCEEDS_BALANCE',
+      | 'AMOUNT_EXCEEDS_BALANCE'
+      | 'SETTLEMENT_WINDOW_NOT_OPEN',
     message: string,
   ) {
     super(message);
@@ -292,6 +294,41 @@ export function validateArkadeAddress(address: string, network: NetworkName): vo
   }
 }
 
+
+/**
+ * Validate that `address` is an on-chain Bitcoin address for the ACTIVE network.
+ *
+ * ponytail: prefix check only, consistent with `validateArkadeAddress`. The operator's
+ * `Ramps.offboard` enforces full bech32 validity at the protocol level. We catch the
+ * most common user error — pasting a mainnet address on regtest — with a clear
+ * cross-network message rather than an opaque protocol reject.
+ *
+ * Throws `SendValidationError`; returns nothing on success.
+ */
+export function validateOnchainAddress(address: string, network: NetworkName): void {
+  const trimmed = address.trim();
+  if (!trimmed) {
+    throw new SendValidationError('ADDRESS_MALFORMED', 'Enter a Bitcoin address.');
+  }
+  const onchainHrp = onchainPrefixFor(network);
+  const lower = trimmed.toLowerCase();
+  if (!lower.startsWith(`${onchainHrp}1`)) {
+    // Cross-network on-chain address (e.g. bc1… on regtest) → precise message.
+    const looksOnchain =
+      lower.startsWith('bc1') || lower.startsWith('tb1') || lower.startsWith('bcrt1');
+    if (looksOnchain) {
+      throw new SendValidationError(
+        'ADDRESS_WRONG_NETWORK',
+        `That address is for a different network (expected a "${onchainHrp}1…" address).`,
+      );
+    }
+    throw new SendValidationError(
+      'ADDRESS_MALFORMED',
+      'Enter a valid on-chain Bitcoin address (bc1… / tb1… / bcrt1…).',
+    );
+  }
+}
+
 /**
  * Validate the amount in sats against the dust floor and the live available balance.
  * `available` is `getBalance().available` (the only spendable bucket for an off-chain
@@ -356,6 +393,78 @@ export async function send(
           : 'Not enough spendable balance to cover this send.',
       );
     }
+    throw err;
+  }
+}
+
+/**
+ * On-chain exit (offboard): collaboratively settle VTXOs to a regular Bitcoin address
+ * via `Ramps.offboard`. Operator-cooperative batch settle — the same mechanism as
+ * `onboardBoarding` / `Ramps.onboard`. NOT unilateral exit. Signs in the SW (caller
+ * guarantees the wallet is unlocked).
+ *
+ * Fee semantics (from SDK d.ts): `feeInfo` is "deducted from the offboard amount" —
+ * the amount is GROSS; the recipient receives (amount − network fee). When `amount` is
+ * omitted, the SDK offboards ALL virtual outputs (send-all / "Max") and deducts the fee
+ * from the total internally.
+ */
+export async function sendOnchain(
+  wallet: Wallet,
+  { address, amount }: { address: string; amount?: number },
+): Promise<{ txid: string }> {
+  const network = await getStoredNetwork();
+  validateOnchainAddress(address, network);
+  if (amount !== undefined) {
+    const balance = await getBalance(wallet);
+    validateAmount(amount, balance.available);
+  }
+  const info = await wallet.arkProvider.getInfo();
+
+  // An offboard is a collaborative-exit `settle` that BLOCKS until the operator's next
+  // settlement session runs. When the operator gates settlement to scheduled windows
+  // (market hours, `scheduledSession` non-null), that wait can be far longer than the MV3
+  // service worker survives (killed ~30s idle, ~5min max even while busy) — so a blind
+  // `await` would never resolve and the withdrawal would hang. Refuse up front with the
+  // ETA instead. Today both Arkade operators advertise `scheduledSession: null` (on-demand
+  // ~60s sessions), so this never fires; it's a guard for market-hours operators.
+  // ponytail: assumes `nextStartTime` is epoch SECONDS (matches `sessionDuration:"60"`s);
+  // unverified against a live scheduled operator — revisit if an operator enables sessions.
+  const sched = info.scheduledSession;
+  if (sched) {
+    const waitMs = Number(sched.nextStartTime) * 1000 - Date.now();
+    if (waitMs > 90_000) {
+      const mins = Math.ceil(waitMs / 60_000);
+      throw new SendValidationError(
+        'SETTLEMENT_WINDOW_NOT_OPEN',
+        `On-chain withdrawals settle in scheduled windows. The next one opens in about ${mins} minute${mins === 1 ? '' : 's'} — keep the wallet open and withdraw then.`,
+      );
+    }
+  }
+
+  try {
+    const txid = await new Ramps(wallet).offboard(
+      address.trim(),
+      info.fees,
+      amount !== undefined ? BigInt(amount) : undefined,
+    );
+    return { txid };
+  } catch (err) {
+    // `Ramps.offboard` deducts a per-input fee from each VTXO BEFORE checking the amount,
+    // so its real failures are fee-relative — none of them say "insufficient funds". Map
+    // each to a clear, actionable message so a funds-leaving popup never shows raw SDK text.
+    if (err instanceof DustChangeError) {
+      throw new Error('The leftover change would be too small to keep. Use Max to withdraw everything.');
+    }
+    if (err instanceof Error && /no vtxos available after deducting fees/i.test(err.message)) {
+      throw new Error('No spendable balance to withdraw on-chain right now.');
+    }
+    if (err instanceof Error && /greater than total amount of vtxos after fees/i.test(err.message)) {
+      throw new Error(
+        'That amount leaves too little after the network fee. Try a smaller amount, or use Max to withdraw everything.',
+      );
+    }
+    const human = translateSettleError(err);
+    if (human) throw human;
     throw err;
   }
 }
