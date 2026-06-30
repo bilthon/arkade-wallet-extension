@@ -113,8 +113,11 @@ export async function buildWallet(seed: Uint8Array): Promise<Wallet> {
     // IndexedDB repos = the durability mechanism (survives SW restarts). Omitting
     // storage would default to in-memory and lose all state on every SW kill.
     storage: {
-      walletRepository: new IndexedDBWalletRepository(),
-      contractRepository: new IndexedDBContractRepository(),
+      // Per-network DB names keep each network's VTXO cache isolated across switches.
+      // This orphans the previous default-named DB — a harmless one-time re-sync on
+      // existing wallets (the SDK rebuilds the cache from the operator on the next read).
+      walletRepository: new IndexedDBWalletRepository(`arkade-wallet-${network}`),
+      contractRepository: new IndexedDBContractRepository(`arkade-contract-${network}`),
     },
     // settlementConfig: false makes the wallet DELIBERATE — no background signing.
     //

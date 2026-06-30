@@ -1,4 +1,5 @@
 import { sendMessage } from '@/src/messaging';
+import type { NetworkName } from '@arkade-os/sdk';
 
 /**
  * Thin popup → background client. Every call is a typed `sendMessage` to the SW
@@ -16,6 +17,8 @@ export const client = {
   lock: () => sendMessage('lock', undefined),
   getMnemonicForBackup: (password: string) =>
     sendMessage('getMnemonicForBackup', { password }),
+  switchNetwork: (network: NetworkName, password: string) =>
+    sendMessage('switchNetwork', { network, password }),
   getNetwork: () => sendMessage('getNetwork', undefined),
   getWalletSnapshot: () => sendMessage('getWalletSnapshot', undefined),
   refreshWalletSnapshot: () => sendMessage('refreshWalletSnapshot', undefined),

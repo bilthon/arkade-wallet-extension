@@ -11,6 +11,7 @@ import {
   lock,
   onLock,
   getMnemonicForBackup,
+  switchNetwork,
 } from '@/src/keystore';
 import { hasVault, getNetwork as getStoredNetwork } from '@/src/storage';
 import {
@@ -99,6 +100,14 @@ export default defineBackground(() => {
   onMessage('getMnemonicForBackup', async ({ data }) => {
     const mnemonic = await getMnemonicForBackup(data.password);
     return { mnemonic };
+  });
+
+  onMessage('switchNetwork', async ({ data }) => {
+    await switchNetwork(data.network, data.password);
+    // Operator network changed → notify connected sites so they don't keep acting on the
+    // old network (cached address/PSBTs would target the wrong operator).
+    await emitToAllConnected('networkChanged', { network: data.network });
+    return { ok: true as const };
   });
 
   // ── Read methods (public results only) ─────────────────────────────────────
