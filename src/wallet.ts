@@ -14,6 +14,7 @@ import {
   type NetworkName,
   type WalletBalance,
   type ExtendedVirtualCoin,
+  type ArkTransaction,
 } from '@arkade-os/sdk';
 import { getNetwork as getStoredNetwork } from './storage';
 import {
@@ -709,6 +710,61 @@ export async function onboardBoarding(
     if (human) throw human;
     throw err;
   }
+}
+
+// ─── Transaction history (Activity screen) ───────────────────────────────────
+
+export interface TxHistoryItem {
+  kind: 'deposit' | 'withdrawal' | 'sent' | 'received';
+  incoming: boolean;   // true → +, false → −
+  amount: number;      // sats, positive magnitude
+  settled: boolean;
+  createdAt: number;   // epoch ms
+  txid: string;        // the primary relevant txid (for copy)
+}
+
+/**
+ * Map an SDK `ArkTransaction` to the popup's display-ready `TxHistoryItem`.
+ * Classifies the kind (deposit/withdrawal/sent/received) from the composite key
+ * and derives the primary txid for the copy-to-clipboard affordance.
+ *
+ * NOTE: `tx.type` crosses the SW→popup JSON boundary as a plain string — compare
+ * against the literal values 'SENT'/'RECEIVED', never the TxType enum at runtime.
+ */
+export function toHistoryItem(tx: ArkTransaction): TxHistoryItem {
+  const { key, type, amount, settled, createdAt } = tx;
+  const isReceived = type === 'RECEIVED';
+
+  let kind: TxHistoryItem['kind'];
+  let txid: string;
+
+  if (isReceived && key.boardingTxid) {
+    // On-chain deposit → boarding txid is the primary reference.
+    kind = 'deposit';
+    txid = key.boardingTxid;
+  } else if (!isReceived && key.commitmentTxid && !key.arkTxid) {
+    // Offboard (collaborative exit): commitment anchors the L1 settlement. A renew/settle
+    // TO SELF never reaches here — the SDK only emits a SENT commitment record when
+    // forfeitAmount > settledAmount (a real net outflow), so renew-to-self emits nothing.
+    // Only edge: an exit netting to just the round fee shows as a tiny "Withdrawal".
+    kind = 'withdrawal';
+    txid = key.commitmentTxid;
+  } else if (key.arkTxid) {
+    // Off-chain Arkade send or receive.
+    kind = isReceived ? 'received' : 'sent';
+    txid = key.arkTxid;
+  } else {
+    // Fallback: classify by direction, pick the first non-empty txid.
+    kind = isReceived ? 'received' : 'sent';
+    txid = key.arkTxid || key.commitmentTxid || key.boardingTxid || '';
+  }
+
+  return { kind, incoming: isReceived, amount: Math.abs(amount), settled, createdAt, txid };
+}
+
+/** Fetch and normalise the wallet's full transaction history, newest first. */
+export async function getTransactionHistory(wallet: Wallet): Promise<TxHistoryItem[]> {
+  return (await wallet.getTransactionHistory()).map(toHistoryItem).sort((a, b) => b.createdAt - a.createdAt);
 }
 
 /**

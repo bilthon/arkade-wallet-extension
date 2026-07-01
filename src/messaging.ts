@@ -7,6 +7,7 @@ import type { RenewalWarning } from './renewal';
 import type { Grant } from './permissions';
 import type { PendingRequest } from './approvals';
 import type { NetworkInfo, PublicKeyInfo } from './provider-api';
+import type { TxHistoryItem } from './wallet';
 
 /**
  * Typed content <-> background protocol (PLAN.md §3, the `browser.runtime` hop).
@@ -107,6 +108,8 @@ export interface ProtocolMap {
    * secrets — just figures. Safe to call while locked.
    */
   getRenewalWarning(): { warning: RenewalWarning | null };
+  /** Full transaction history, newest-first, normalised for display. Unlock-gated. */
+  getTransactionHistory(): TxHistoryItem[];
 
   // ─── Provider surface (Track E2a — origin + grant gated) ───────────────────
   //
