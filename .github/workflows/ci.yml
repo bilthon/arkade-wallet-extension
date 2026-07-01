@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Least-privilege token: CI only needs to read the repo.
+permissions:
+  contents: read
+
+# One run per ref; a new push cancels the in-progress run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Frozen install straight from the exact-pinned lockfile, with third-party
+      # install/postinstall scripts blocked (supply-chain hardening). esbuild resolves its
+      # native binary from the @esbuild/<platform> package at runtime, so the build works
+      # without running its postinstall.
+      - run: npm ci --ignore-scripts
+
+      # Our own trusted prepare step — generates WXT's .wxt types that tsc needs.
+      - run: npx wxt prepare
+
+      - run: npm run compile
+      - run: npm test
+      - run: npm run build
+
+      # Gate on production dependencies only. Build-toolchain advisories live in
+      # devDependencies, are never shipped in the extension bundle, and are tracked
+      # separately — so they must not fail the build.
+      - run: npm audit --omit=dev
