@@ -25,19 +25,19 @@ import {
 } from './vtxo-state';
 
 /**
- * Track C — SDK wallet runtime (PLAN.md §2, BUILD_PLAN Track C).
+ * SDK wallet runtime.
  *
  * The MV3 background SW is a STATELESS router: it holds no live `Wallet` between
  * wakes. `buildWallet(seed)` re-creates one on each wake from the in-memory seed
- * (held only in `keystore.ts`, M1) + the IndexedDB repositories (where the SDK has
+ * (held only in `keystore.ts`) + the IndexedDB repositories (where the SDK has
  * already persisted VTXO/balance/history state). Construction is therefore cheap —
- * the durable state lives in IndexedDB and survives SW restarts (PLAN.md §10).
+ * the durable state lives in IndexedDB and survives SW restarts.
  *
  * Read-only scope only: addresses, balances, pubkey, network. NO send/sign/settle/
- * delegation here — those land in Phase 3+ (Tracks E/F).
+ * delegation here — those come later.
  */
 
-// ─── Network → operator/esplora config (PLAN.md §4) ──────────────────────────
+// ─── Network → operator/esplora config ──────────────────────────
 
 export interface NetworkConfig {
   /** Arkade operator (arkd) REST base. */
@@ -49,8 +49,8 @@ export interface NetworkConfig {
 }
 
 /**
- * Endpoints per network (PLAN.md §4 table). Switched together — operator + esplora.
- * Boltz/delegate URLs are intentionally absent here (Tracks F/G); this is read-only.
+ * Endpoints per network. Switched together — operator + esplora.
+ * Boltz/delegate URLs are intentionally absent here; this is read-only.
  *
  * ponytail: regtest points at nigiri's local services. arkd on :7070, electrs REST
  * on :30000 — verified reachable from the SW (NOT chopsticks :3000, which is not the REST base).
@@ -108,8 +108,8 @@ export async function buildWallet(seed: Uint8Array): Promise<Wallet> {
   return Wallet.create({
     identity,
     // arkServerUrl/esploraUrl are @deprecated in favor of explicit providers, but
-    // PLAN.md §2/§4 calls them out by name and they still resolve to Rest/Esplora
-    // providers under the hood. Keep the URL form until we need provider injection.
+    // they still resolve to Rest/Esplora providers under the hood. Keep the URL
+    // form until we need provider injection.
     arkServerUrl: cfg.arkServerUrl,
     esploraUrl: cfg.esploraUrl,
     // IndexedDB repos = the durability mechanism (survives SW restarts). Omitting
@@ -127,9 +127,9 @@ export async function buildWallet(seed: Uint8Array): Promise<Wallet> {
     // DEFAULT_SETTLEMENT_CONFIG (boardingUtxoSweep + 60s poll) and `Wallet.create`
     // eagerly starts a VtxoManager poll that auto-settles (onboards) new boarding
     // UTXOs into VTXOs and auto-renews on `vtxo_received` — all with NO user action.
-    // That is why the read-only Track-C wallet silently onboarded funds. A per-wake
-    // stateless SW wallet must not sign in the background, and Track E's explicit
-    // sends must be the only signing path. Deliberate renewal/delegation is Track F's
+    // That is why the read-only wallet silently onboarded funds. A per-wake
+    // stateless SW wallet must not sign in the background, and explicit sends
+    // must be the only signing path. Deliberate renewal/delegation is a later
     // job and will opt back in via `delegateProvider` / an explicit settlementConfig.
     settlementConfig: false,
   });
@@ -137,18 +137,18 @@ export async function buildWallet(seed: Uint8Array): Promise<Wallet> {
 
 // ─── Read methods (operate on a built wallet) ────────────────────────────────
 
-/** Operator-bound Arkade address (`ark`/`tark…`) — NOT a plain BIP86 P2TR (PLAN.md §6). */
+/** Operator-bound Arkade address (`ark`/`tark…`) — NOT a plain BIP86 P2TR. */
 export function getAddress(wallet: Wallet): Promise<string> {
   return wallet.getAddress();
 }
 
-/** On-chain boarding address — receives normal UTXOs, later onboarded to VTXOs (PLAN.md §6). */
+/** On-chain boarding address — receives normal UTXOs, later onboarded to VTXOs. */
 export function getBoardingAddress(wallet: Wallet): Promise<string> {
   return wallet.getBoardingAddress();
 }
 
 /**
- * Full balance breakdown, corrected for expired-but-unswept VTXOs (Track F bug fix).
+ * Full balance breakdown, corrected for expired-but-unswept VTXOs.
  *
  * The raw `wallet.getBalance()` counts a VTXO whose batch expiry has elapsed but
  * which the operator hasn't swept (state still "settled"/"preconfirmed") into
@@ -177,16 +177,16 @@ export function getNetwork(): Promise<NetworkName> {
 
 /**
  * Persist the active network. The next `buildWallet` picks up the new operator →
- * a different Arkade address (operator is baked into the address; PLAN.md §6).
- * ponytail: no interactive picker UI yet (read-only pill); this exists for Track F
- * and the settings screen to call, and for completeness of the wallet surface.
+ * a different Arkade address (operator is baked into the address).
+ * ponytail: no interactive picker UI yet (read-only pill); this exists for later
+ * renewal and the settings screen to call, and for completeness of the wallet surface.
  */
 export { setNetwork } from './storage';
 
 /**
  * Raw user key as hex — x-only (32B) + compressed (33B). Exposed for web apps that
  * build their own VtxoScripts (escrow/HTLC); the operator-bound Arkade address
- * encodes a *tweaked* output key, not this raw key (PLAN.md §8). No UI; just exposed.
+ * encodes a *tweaked* output key, not this raw key. No UI; just exposed.
  */
 export async function getPublicKey(
   wallet: Wallet,
@@ -203,7 +203,7 @@ function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-// ─── Off-chain send: validation + send (Track E) ──────────────────────
+// ─── Off-chain send: validation + send ──────────────────────
 
 /**
  * Dust floor for an Arkade send, in sats. 330 is the standard P2TR dust threshold
@@ -258,8 +258,8 @@ export function validateArkadeAddress(address: string, network: NetworkName): vo
     throw new SendValidationError('ADDRESS_MALFORMED', 'Enter an Arkade address.');
   }
 
-  // 1) On-chain address → explicit, non-silent rejection (PLAN.md §6 — offboard is
-  //    a separate, later flow; never silently route an Arkade send on-chain).
+  // 1) On-chain address → explicit, non-silent rejection (offboard is a separate,
+  //    later flow; never silently route an Arkade send on-chain).
   const onchainHrp = onchainPrefixFor(network);
   const lower = trimmed.toLowerCase();
   const looksOnchain =
@@ -359,8 +359,8 @@ export function validateAmount(amount: number, available: number): void {
 /**
  * Off-chain Arkade→Arkade send. Validates the address (active network) and amount
  * (dust + live available balance) BEFORE signing, then calls the SDK's
- * `wallet.send({ address, amount })` — instant, ~zero fee, no L1 footprint
- * (PLAN.md §6 regime 1). Returns the txid the SDK gives.
+ * `wallet.send({ address, amount })` — instant, ~zero fee, no L1 footprint.
+ * Returns the txid the SDK gives.
  *
  * On-chain (`bc1…`) and Lightning are deliberately NOT routed here — they map to
  * `Ramps.offboard` / Boltz with their own approval UX (separate, later PRs).
@@ -470,7 +470,7 @@ export async function sendOnchain(
   }
 }
 
-// ─── Renewal + onboarding (Track F — deliberate, unlock-gated liveness) ───────
+// ─── Renewal + onboarding (deliberate, unlock-gated liveness) ───────
 
 /**
  * Translate a raw batch-settle / intent error into a human, non-fatal message.
@@ -538,8 +538,8 @@ export function selectRenewable(
  * Deliberately renew VTXOs that fall within `marginMs` of their batch expiry but are
  * STILL VALID (not expired, not swept).
  *
- * With `settlementConfig:false` the wallet does NO background renewal (Track E made the
- * SW wallet never sign unprompted). This is the explicit fallback: build the SDK's
+ * With `settlementConfig:false` the wallet does NO background renewal (the SW wallet
+ * never signs unprompted). This is the explicit fallback: build the SDK's
  * `VtxoManager` and call `renewVtxos({ thresholdSeconds })` — the manager settles the
  * expiring coins into a fresh batch with a reset expiry, returning a commitment txid.
  * We MUST pass an explicit threshold: with `settlementConfig:false`, the manager's
@@ -682,7 +682,7 @@ export async function recoverExpiredVtxos(
 }
 
 /**
- * Deliberately onboard confirmed boarding UTXOs into VTXOs (Track F).
+ * Deliberately onboard confirmed boarding UTXOs into VTXOs.
  *
  * `settlementConfig:false` also killed the silent boarding sweep, so on-chain
  * deposits no longer auto-onboard. This is the explicit, unlock-gated path: fetch the

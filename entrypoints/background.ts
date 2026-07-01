@@ -51,20 +51,20 @@ import {
 } from '@/src/provider-handlers';
 
 /**
- * Stateless request router (PLAN.md §2/§3). Holds no secret/wallet state in memory
- * between wakes — every read handler rehydrates a `Wallet` from IndexedDB + the
- * in-memory seed on demand. The one persistent in-memory value is the unlocked seed,
- * held in `keystore.ts` module memory (M1) and zeroed on lock/auto-lock.
+ * Stateless request router. Holds no secret/wallet state in memory between wakes —
+ * every read handler rehydrates a `Wallet` from IndexedDB + the in-memory seed on
+ * demand. The one persistent in-memory value is the unlocked seed, held in
+ * `keystore.ts` module memory and zeroed on lock/auto-lock.
  *
- * Boundary rule (M1): keystore ops run entirely here; the seed/mnemonic NEVER leaves
+ * Boundary rule: keystore ops run entirely here; the seed/mnemonic NEVER leaves
  * the SW except the explicit, user-initiated `getMnemonicForBackup` reveal.
  */
 export default defineBackground(() => {
-  // Track B: arm the idle auto-lock alarm handler (PLAN.md §7, Strict posture).
+  // Arm the idle auto-lock alarm handler (Strict posture).
   registerAutoLock();
-  // Track F: arm the recurring VTXO-renewal alarm (renew-while-unlocked fallback).
+  // Arm the recurring VTXO-renewal alarm (renew-while-unlocked fallback).
   registerRenewal();
-  // Track E2a: on lock (manual or auto), notify connected sites their session ended.
+  // On lock (manual or auto), notify connected sites their session ended.
   // Reads need the wallet unlocked, so a lock effectively disconnects them.
   onLock(() => {
     void emitToAllConnected('disconnect');
@@ -159,7 +159,7 @@ export default defineBackground(() => {
     return { snapshot };
   });
 
-  // ── Off-chain send (Track E) ───────────────────────────────────────────────
+  // ── Off-chain send ─────────────────────────────────────────────────────────
   // Gated on unlock via requireWallet (re-arms auto-lock). The SW validates
   // address + amount and signs; only the txid crosses back. A thrown
   // SendValidationError / 'LOCKED' / operator error reaches the popup as its message.
@@ -173,7 +173,7 @@ export default defineBackground(() => {
     return sendOnchain(wallet, data);
   });
 
-  // ── Renewal + recovery + onboarding (Track F) ──────────────────────────────
+  // ── Renewal + recovery + onboarding ────────────────────────────────────────
   // All sign, so all go through requireWallet (unlock-gated; throws 'LOCKED').
   onMessage('renewNow', async () => {
     const wallet = await requireWallet();
@@ -199,10 +199,10 @@ export default defineBackground(() => {
 
   onMessage('getTransactionHistory', async () => getTransactionHistory(await requireWallet()));
 
-  // ── Provider surface (Track E2a) ───────────────────────────────────────────
+  // ── Provider surface ───────────────────────────────────────────────────────
   //
   // The ONLY handlers that take an untrusted origin. Each derives the origin from
-  // `sender` (M4 — NEVER a body field) and checks the per-origin grant before doing
+  // `sender` (NEVER a body field) and checks the per-origin grant before doing
   // any work. `connect` opens the approval window; the reads are grant + unlock gated
   // and return typed LOCKED/NOT_CONNECTED/BAD_ORIGIN the web app can handle.
 

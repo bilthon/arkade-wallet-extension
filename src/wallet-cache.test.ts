@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 /**
- * Cache-first read contract check (team-lead brief #3). Proves the snapshot store
+ * Cache-first read contract check. Proves the snapshot store
  * is network-scoped: a cached snapshot is only returned for the SAME network, so a
  * network switch (different operator → different addresses) never serves stale
  * addresses from the previous operator. Uses an in-memory `browser.storage.local`.

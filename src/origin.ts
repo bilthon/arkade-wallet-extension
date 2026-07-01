@@ -11,7 +11,7 @@ export interface MessageSenderLike {
 }
 
 /**
- * M4-critical: SW-side origin derivation (PLAN.md §7, BUILD_PLAN Phase 3 Track E).
+ * SW-side origin derivation.
  *
  * The requesting origin is derived ONLY from the browser-attested message sender —
  * `sender.origin` (preferred) or `sender.tab.url`. It is NEVER read from a message

@@ -9,7 +9,7 @@ import { Send } from './Send';
 import { History } from './History';
 
 /**
- * Wallet home (Track D + the UX review, team-lead brief #5; Track F renewal UI).
+ * Wallet home.
  *
  * Cache-first render: we read the cached snapshot from the SW first so addresses +
  * last-known balance paint INSTANTLY (or skeletons if never fetched — never a fake 0).
@@ -17,8 +17,8 @@ import { History } from './History';
  * failure we keep the cached values and show an operator-unreachable banner.
  *
  * Available is the hero; Preconfirmed / Settled / Boarding sit in a quiet "Also in
- * your wallet" list with plain-language (i) tooltips — no alarmist colors (Phase 5).
- * Expired coins surface in a distinct section with a Renew action (Track F).
+ * your wallet" list with plain-language (i) tooltips — no alarmist colors.
+ * Expired coins surface in a distinct section with a Renew action.
  */
 export function WalletHome({
   onLocked,
@@ -405,8 +405,8 @@ function RecoverySection({
 }
 
 /**
- * "Also in your wallet" — the non-Available states, with plain-language tooltips
- * (PLAN.md §6 spirit). Boarding shown only when it carries funds (it's an on-chain
+ * "Also in your wallet" — the non-Available states, with plain-language tooltips.
+ * Boarding shown only when it carries funds (it's an on-chain
  * pre-onboard state most users won't have). No alarmist colors at MVP.
  */
 function Breakdown({

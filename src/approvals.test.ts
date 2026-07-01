@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { webcrypto } from 'node:crypto';
 
 /**
- * Approval-window orchestration (PLAN.md §7). Pins the request/response resolution
+ * Approval-window orchestration. Pins the request/response resolution
  * contract that backs the connect flow:
  *   • requestApproval opens a window and returns a promise
  *   • resolveApproval(approved) settles that promise

@@ -18,8 +18,7 @@ import {
 } from './psbt-inspect';
 
 /**
- * PSBT inspector (M4 core, BUILD_PLAN Phase 3 Track E; PLAN.md §7) + the contract
- * co-sign acceptance test (the coordinator-critical path, p2p-coordinator-mvp-spec §5).
+ * PSBT inspector + the contract co-sign acceptance test.
  *
  * These exercise the REAL SDK primitives (`SingleKey`, `VtxoScript`,
  * `MultisigTapscript`, `buildOffchainTx`, `Transaction`) — no mocks of the crypto. We
@@ -90,7 +89,7 @@ function buildSpend(
   return { psbtB64: base64.encode(arkTx.toPSBT()), tx: arkTx, escrow };
 }
 
-// ─── ACCEPTANCE TEST: contract co-sign (the §5 L1 escrow path) ──────────────────
+// ─── ACCEPTANCE TEST: contract co-sign (the L1 escrow path) ──────────────────
 
 describe('contract co-sign — escrow L1 Multisig(O, user, other) [ACCEPTANCE]', () => {
   it('does NOT reject the escrow leaf as non-standard, and renders the co-sign view', () => {

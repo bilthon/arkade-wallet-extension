@@ -11,7 +11,7 @@ import { hex, base64 } from '@scure/base';
 import type { MessageSenderLike } from './origin';
 
 /**
- * signMessage + signPsbt HANDLER gating (Track E2b, M4). The end-to-end contract a
+ * signMessage + signPsbt HANDLER gating. The end-to-end contract a
  * connected site gets:
  *   • signing requires a CONNECTED origin + unlocked wallet; an unconnected origin is
  *     NOT_CONNECTED, a locked wallet is LOCKED.

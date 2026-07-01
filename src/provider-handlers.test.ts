@@ -3,7 +3,7 @@ import { webcrypto } from 'node:crypto';
 import type { MessageSenderLike } from './origin';
 
 /**
- * Provider-handler gating (Track E2a, M4). The end-to-end origin + grant contract the
+ * Provider-handler gating. The end-to-end origin + grant contract the
  * SW exposes to a web app:
  *   • a https origin can connect (approval) and then read; an http/null origin is
  *     rejected with BAD_ORIGIN and can never connect.
@@ -115,7 +115,7 @@ beforeEach(async () => {
   await setNetwork('regtest');
 });
 
-describe('handleConnect — origin gating (M4)', () => {
+describe('handleConnect — origin gating', () => {
   it('rejects an http (non-loopback) origin with BAD_ORIGIN before any approval', async () => {
     await expect(
       handleConnect(sender({ origin: 'http://site.example' }), fakeWallet),

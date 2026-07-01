@@ -3,7 +3,7 @@ import type { ExtendedVirtualCoin, Wallet } from '@arkade-os/sdk';
 import { NETWORK_CONFIG, networkConfig, renewExpiringVtxos } from './wallet';
 
 /**
- * Track-C check: the network → operator/esplora/derivation mapping is the one piece
+ * The network → operator/esplora/derivation mapping is the one piece
  * of `wallet.ts` with branching logic worth pinning (the rest is thin SDK
  * pass-through exercised live against nigiri). We assert the regtest defaults
  * (arkd :7070, electrs REST :30000, testnet derivation) and that
@@ -33,7 +33,7 @@ describe('network config mapping', () => {
 });
 
 /**
- * Track F — the protocol-critical recover-BEFORE-renew ORDERING (must-fix #1).
+ * The protocol-critical recover-BEFORE-renew ordering.
  *
  * `renewVtxos` re-derives its own broad input set (it ignores any filter we compute), so
  * the only way to keep already-expired/swept coins out of the renew round is to drain

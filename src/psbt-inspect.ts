@@ -13,7 +13,7 @@ import {
 import { base64, hex } from '@scure/base';
 
 /**
- * SW-side PSBT decode + validation (M4, BUILD_PLAN Phase 3 Track E; PLAN.md §7).
+ * SW-side PSBT decode + validation.
  *
  * The signing approval is the highest-leverage attack surface in the wallet: a
  * malicious site hands us a PSBT and a list of inputs to sign and tries to trick the

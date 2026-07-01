@@ -7,7 +7,7 @@ import {
 } from './wallet';
 
 /**
- * Track F — the renew-vs-recover split (MUST-FIX #1; reproduced runtime bug).
+ * The renew-vs-recover split (reproduced runtime bug).
  *
  * The reproduced failure: hitting "Renew" on an already-EXPIRED coin fed it to the
  * SDK's `renewVtxos`, and the operator rejected the round with `INVALID_INTENT_PROOF

@@ -7,8 +7,7 @@ import {
 } from './wallet';
 
 /**
- * Track F — VTXO renewal scheduler (the renew-while-unlocked fallback, BUILD_PLAN
- * Track F; PLAN.md §7.1).
+ * VTXO renewal scheduler (the renew-while-unlocked fallback).
  *
  * This is a *scheduling* problem under MV3, not a "build a renewer" problem — the SDK
  * does the actual renewal (`VtxoManager.renewVtxos`). A `chrome.alarms` wake is the
@@ -23,13 +22,13 @@ import {
  * INHERENT LIMIT (documented, not a bug): under the Strict posture + the ~30s SW
  * idle-kill, after the SW dies the wallet is effectively locked, so this only runs
  * while the user keeps the wallet active/unlocked. That is expected. Delegation
- * (Track F part 2, Mutinynet) is the real unattended answer; we do NOT hold a hot key
+ * (Mutinynet) is the real unattended answer; we do NOT hold a hot key
  * to work around the SW lifecycle (it would break encrypt-at-rest for marginal gain).
  *
  * Cadence is dev-friendly: regtest VtxoTreeExpiry is ~17 min, so a 1-min alarm (the
  * MV3 minimum period) with an ~8-min margin renews with comfortable headroom. Both
  * are constants here — bump the margin up toward the mainnet `batchExpiry` window
- * once that value is known (PLAN.md §11 open question).
+ * once that value is known (open question).
  */
 
 export const ALARM_RENEWAL = 'arkade:renew';

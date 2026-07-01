@@ -16,8 +16,8 @@ export default defineConfig({
     // `fetch()` (Wallet.create talks to arkd + esplora). MV3 blocks SW cross-origin
     // requests without these, which silently hangs every wallet-building read/sign.
     // This is SEPARATE from the `tabs` event-delivery concern above — scoped to the
-    // known networks (PLAN.md §4 / NETWORK_CONFIG), NOT a broad <all_urls> grant.
-    // (Add delegate.arkade.money / Boltz hosts when Tracks F2 / Phase 6 land.)
+    // known networks (NETWORK_CONFIG), NOT a broad <all_urls> grant.
+    // (Add delegate.arkade.money / Boltz hosts later when those features land.)
     host_permissions: [
       'http://localhost/*', // regtest arkd :7070 + esplora :30000 (ports not allowed in match patterns)
       'http://127.0.0.1/*',
@@ -26,19 +26,19 @@ export default defineConfig({
       'https://mutinynet.com/*', // mutinynet esplora
       'https://mempool.space/*', // signet / testnet / mainnet esplora
     ],
-    // PLAN.md §7: no remote code / eval. script-src 'self'; object-src 'none'.
-    // `frame-ancestors 'none'` (Track E2a): NO extension page — popup OR approval window —
+    // No remote code / eval. script-src 'self'; object-src 'none'.
+    // `frame-ancestors 'none'`: NO extension page — popup OR approval window —
     // may be embedded in an iframe by a dapp (anti-clickjacking). script-src 'self' is
     // unchanged (not weakened).
-    // ponytail: Phase-1 KDF ceiling — Argon2id-WASM needs 'wasm-unsafe-eval' added to
-    // script-src here (or demote to PBKDF2-600k). Do NOT add it in Phase 0; resolve in the
-    // Phase-1 Argon2id-WASM-under-CSP spike before locking the vault format (BUILD_PLAN §C/Phase1).
+    // ponytail: KDF ceiling — Argon2id-WASM needs 'wasm-unsafe-eval' added to
+    // script-src here (or demote to PBKDF2-600k). Don't add it now; resolve the
+    // Argon2id-WASM-under-CSP question before locking the vault format.
     content_security_policy: {
       extension_pages: "script-src 'self'; object-src 'none'; frame-ancestors 'none';",
     },
     // MAIN-world provider is injected into pages by the ISOLATED content bridge
-    // (wxt/utils/inject-script), so it must be web-accessible. Same mechanism the
-    // PLAN names for the Firefox port — already cross-browser.
+    // (wxt/utils/inject-script), so it must be web-accessible. The same mechanism
+    // works for the Firefox port — already cross-browser.
     web_accessible_resources: [
       { resources: ['provider.js'], matches: ['<all_urls>'] },
     ],

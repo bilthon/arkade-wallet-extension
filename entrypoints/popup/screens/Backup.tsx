@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react';
 
 /**
- * Backup flow (PLAN.md §5, team-lead brief #4): tap-to-reveal the mnemonic, then
- * confirm a few random words to prove it was written down. NO clipboard auto-copy —
+ * Backup flow: tap-to-reveal the mnemonic, then confirm a few random words to
+ * prove it was written down. NO clipboard auto-copy —
  * the seed phrase is never placed on the clipboard by us. The wallet is already
  * created and unlocked at this point; this gates the transition to home.
  */
@@ -89,7 +89,7 @@ export function Backup({ mnemonic, onDone }: { mnemonic: string; onDone: () => v
 }
 
 /** Pick `count` distinct random indexes in [0, length). CSPRNG only — the wallet
- * holds the "no Math.random anywhere" invariant (PLAN.md §7 spirit). */
+ * holds the "no Math.random anywhere" invariant. */
 function pickRandom(length: number, count: number): number[] {
   const pool = Array.from({ length }, (_, i) => i);
   for (let i = pool.length - 1; i > 0; i--) {

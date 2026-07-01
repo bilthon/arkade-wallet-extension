@@ -5,7 +5,7 @@ import type { PendingRequest } from '@/src/approvals';
 import type { PsbtSummary, LeafClause } from '@/src/psbt-inspect';
 
 /**
- * Approval window (PLAN.md §7, Track E2a). Rendered in a dedicated browser popup window
+ * Approval window. Rendered in a dedicated browser popup window
  * — NOT an in-page modal — so a malicious web app cannot iframe or overlay it. The page
  * also declares CSP `frame-ancestors 'none'` (wxt.config.ts) so it can never be embedded.
  *

@@ -9,12 +9,12 @@ import {
 } from './psbt-inspect';
 
 /**
- * The signing primitives behind `signMessage` + `signPsbt` (Track E2b, PLAN.md §7/§8).
+ * The signing primitives behind `signMessage` + `signPsbt`.
  * Pure-ish helpers operating on an SDK `Wallet`/`Identity` plus the PSBT inspector — the
  * orchestration (origin + grant gating, the approval window, re-prompt-every-call) lives
  * in `provider-handlers.ts`; these are the crypto half, unit-testable on their own.
  *
- * Hard rules enforced here (security review / M4):
+ * Hard rules enforced here (security review):
  *  • `signMessage` is BIP322/Schnorr ONLY and REJECTS sighash-shaped input (a bare 32-byte
  *    hash), so a site can't smuggle a transaction sighash through the message signer and
  *    get a signature valid over a real tx ("blind-sign" confusion). Arkade is Schnorr-only,

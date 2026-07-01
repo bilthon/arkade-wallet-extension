@@ -1,12 +1,12 @@
 import type { ProviderEvent } from './provider-api';
 
 /**
- * Background → page provider events (PLAN.md §8). `@webext-core/messaging` is
+ * Background → page provider events. `@webext-core/messaging` is
  * request/response; provider events are a SW-initiated PUSH, so we use a small typed
  * envelope sent with `browser.tabs.sendMessage` to the content script, which relays it
  * to the MAIN-world provider over the page bridge, where `on()` handlers fire.
  *
- * We emit at minimum (team-lead brief #5): `disconnect` on revoke/lock, and
+ * We emit at minimum: `disconnect` on revoke/lock, and
  * `networkChanged` on a network switch. `accountsChanged` is wired for completeness.
  */
 

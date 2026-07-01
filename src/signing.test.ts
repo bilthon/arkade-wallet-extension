@@ -16,7 +16,7 @@ import {
 } from './signing';
 
 /**
- * signMessage (BIP322 + sighash rejection) and signPsbt partial-sign (Track E2b, M4).
+ * signMessage (BIP322 + sighash rejection) and signPsbt partial-sign.
  * Exercises the REAL SDK crypto: `SingleKey` identities, `BIP322.sign`, and
  * `Identity.sign` on a real `buildOffchainTx` PSBT.
  */

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 
 /**
- * Receive view (team-lead brief #5). A single Receive entry with an Arkade / On-chain
+ * Receive view. A single Receive entry with an Arkade / On-chain
  * toggle (Arkade default), each with a one-line "what/when" caption + a Copy button.
  *
  * ponytail: QR is a fast-follow — Copy ships now (no QR yet). Copy here is an explicit

@@ -8,15 +8,15 @@ import {
 } from '@arkade-os/sdk';
 
 /**
- * Track F — VTXO expiry/renewal state (the confirmed-bug fix, BUILD_PLAN Track F).
+ * VTXO expiry/renewal state (the confirmed-bug fix).
  *
- * Two defects this module addresses (confirmed 2026-06-26):
+ * Two defects this module addresses:
  *  1. `getBalance().available` counts a VTXO whose batch expiry has elapsed but which
  *     the operator hasn't swept yet (its `virtualStatus.state` is still "settled"/
  *     "preconfirmed", so the SDK's balance sums it into `available`). Our send
  *     pre-check then passes, but `wallet.send`'s coin selection refuses the expired
  *     coin → the raw, opaque "Insufficient funds".
- *  2. With `settlementConfig:false` (Track E) nothing keeps VTXOs alive, so they DO
+ *  2. With `settlementConfig:false` nothing keeps VTXOs alive, so they DO
  *     expire. The renewal scheduler (renewal.ts) drives the deliberate fix; this
  *     module supplies the pure state math both the balance fix and the scheduler need.
  *

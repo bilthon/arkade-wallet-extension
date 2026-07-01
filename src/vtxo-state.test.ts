@@ -8,7 +8,7 @@ import {
 } from './vtxo-state';
 
 /**
- * Track F — the confirmed-bug fix (2026-06-26): an expired-but-unswept VTXO must NOT
+ * The confirmed-bug fix: an expired-but-unswept VTXO must NOT
  * count as `available`, and the renewal-trigger decision must be a pure function.
  *
  * Fixtures are synthetic VirtualCoins shaped to the SDK's `isExpired`/`isSpendable`

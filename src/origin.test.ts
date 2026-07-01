@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { deriveOrigin, OriginError, type MessageSenderLike } from './origin';
 
 /**
- * M4 origin verification (PLAN.md §7). The single most attack-prone decision in the
+ * Origin verification. The single most attack-prone decision in the
  * provider: the origin must come ONLY from the browser-attested sender, never a
  * message body. These tests pin: https accepted, loopback-http accepted (dev),
  * http/null/opaque rejected, and that a forged body-origin can't override the sender.

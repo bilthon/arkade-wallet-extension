@@ -10,18 +10,16 @@ import type { NetworkInfo, PublicKeyInfo } from './provider-api';
 import type { TxHistoryItem } from './wallet';
 
 /**
- * Typed content <-> background protocol (PLAN.md §3, the `browser.runtime` hop).
+ * Typed content <-> background protocol over the `browser.runtime` hop.
  * `@webext-core/messaging` gives full TS inference — no stringly-typed switch.
  *
- * Two surfaces here (team-lead brief #2):
+ * Two surfaces here:
  *  • KEYSTORE ops — run entirely in the SW; the seed/mnemonic NEVER crosses this
  *    boundary except the explicit, user-initiated `getMnemonicForBackup` reveal.
  *    Everything else returns only booleans / lock state.
  *  • READ methods — addresses, balances, network. Built per-wake from the in-memory
  *    seed; only the public results cross the boundary. Cache-first: the snapshot
  *    variants return the cached value instantly, the plain variants reconcile live.
- *
- * Send/sign/approvals/delegation land in Phase 3+ (Tracks E/F) — not here.
  */
 export interface ProtocolMap {
   // data: optional caller-supplied echo payload; returns pong + SW-side timestamp.
@@ -43,8 +41,8 @@ export interface ProtocolMap {
   // ─── Read methods (public results only) ────────────────────────────────────
   getAddress(): { address: string };
   getBoardingAddress(): { boardingAddress: string };
-  /** Expiry-adjusted balance: expired-but-unswept VTXOs are pulled out of
-   *  `available` into the `expired` bucket (Track F bug fix). */
+  /** Expiry-adjusted balance: expired-but-unswept VTXOs are moved out of
+   *  `available` into the `expired` bucket. */
   getBalance(): AdjustedBalance;
   getNetwork(): { network: NetworkName };
   /**
@@ -61,7 +59,7 @@ export interface ProtocolMap {
    */
   refreshWalletSnapshot(): { snapshot: WalletSnapshot };
 
-  // ─── Off-chain send (Track E — the first write/spend path) ─────────────────
+  // ─── Off-chain send (the first write/spend path) ───────────────────────────
   /**
    * In-wallet off-chain Arkade→Arkade send. Gated on unlock (`requireWallet`).
    * The SW validates the address (well-formed Arkade address for the ACTIVE
@@ -81,7 +79,7 @@ export interface ProtocolMap {
    */
   sendOnchain(data: { address: string; amount?: number }): { txid: string };
 
-  // ─── Renewal + recovery + onboarding (Track F — deliberate, unlock-gated) ───
+  // ─── Renewal + recovery + onboarding (deliberate, unlock-gated) ────────────
   /**
    * Explicitly renew every still-VALID VTXO within the safety margin of its batch
    * expiry (expiring-soon but not yet expired/swept). Unlock-gated (throws 'LOCKED'
@@ -111,7 +109,7 @@ export interface ProtocolMap {
   /** Full transaction history, newest-first, normalised for display. Unlock-gated. */
   getTransactionHistory(): TxHistoryItem[];
 
-  // ─── Provider surface (Track E2a — origin + grant gated) ───────────────────
+  // ─── Provider surface (origin + grant gated) ───────────────────────────────
   //
   // These are the ONLY messages the ISOLATED content bridge forwards on a web
   // app's behalf. The background derives the origin from `sender` (NEVER a body

@@ -8,8 +8,8 @@ import {
 } from './page-bridge';
 
 /**
- * The one runnable check on the message plumbing (Phase-0 requirement). It proves
- * the request/response envelope guards and id-correlation that the MAIN provider
+ * A runnable check on the message plumbing. It proves the request/response
+ * envelope guards and id-correlation that the MAIN provider
  * and ISOLATED content bridge rely on — without needing a live browser. The real
  * MAIN->ISOLATED->background->back path is exercised by the manual load-unpacked
  * `ping` smoke test documented in the PR.

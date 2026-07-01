@@ -33,8 +33,8 @@ import { PsbtRejectedError } from './psbt-inspect';
 import { networks, type Wallet } from '@arkade-os/sdk';
 
 /**
- * Provider-facing handler logic (Track E2a). Every function here takes the message
- * `sender` and derives the origin from it — NEVER from a body field (M4). It then
+ * Provider-facing handler logic. Every function here takes the message
+ * `sender` and derives the origin from it — NEVER from a body field. It then
  * checks the per-origin grant and the wallet lock state, and returns public results
  * only. The seed/mnemonic never reach this layer (it lives in keystore.ts).
  *
@@ -104,7 +104,7 @@ export async function openApprovalWindow(request: PendingRequest): Promise<numbe
 }
 
 /**
- * Handle a provider `connect`. Derives the origin (M4), requires a wallet to exist and be
+ * Handle a provider `connect`. Derives the origin, requires a wallet to exist and be
  * unlocked, then — if not already connected — opens the approval window and awaits the
  * user's decision. On approve, persists a READ-ONLY grant and returns the account(s).
  * On reject, throws a typed `REJECTED`. An already-connected origin short-circuits

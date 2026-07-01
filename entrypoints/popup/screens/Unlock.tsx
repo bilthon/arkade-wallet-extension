@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { client } from '../client';
 
 /**
- * Unlock screen (Strict posture, PLAN.md §7). After an SW kill the seed is gone, so
+ * Unlock screen (Strict posture). After an SW kill the seed is gone, so
  * the next sensitive action lands here. A wrong password leaves the wallet locked.
  */
 export function Unlock({ onUnlocked }: { onUnlocked: () => void }) {

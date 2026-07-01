@@ -4,7 +4,7 @@ import { BRIDGE_NS, isBridgeRequest, type BridgeResponse } from '@/src/page-brid
 import { isProviderEventMessage } from '@/src/provider-events';
 
 /**
- * ISOLATED-world bridge (PLAN.md §3). Three jobs:
+ * ISOLATED-world bridge. Three jobs:
  *  1. Inject the MAIN-world provider (`/provider.js`) at document_start so the page
  *     gets `window.arkadeWallet` before its own scripts run.
  *  2. Forward the provider's window.postMessage requests to the background over the
@@ -19,7 +19,7 @@ import { isProviderEventMessage } from '@/src/provider-events';
 /**
  * The provider methods this bridge will forward, mapped to their typed `sendMessage`
  * channel. A page can only invoke a method in this table; anything else is rejected
- * here before it reaches the background. (Names mirror the SDK / PLAN.md §8.)
+ * here before it reaches the background. (Names mirror the SDK.)
  *
  * `ping` is intentionally absent: the web-app surface is read methods + signing only.
  * `ping` stays as an internal extension smoke-test (it remains in the ProtocolMap and

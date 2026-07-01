@@ -2,7 +2,7 @@ import type { NetworkName } from '@arkade-os/sdk';
 import type { AdjustedBalance } from './vtxo-state';
 
 /**
- * Cache-first read contract (team-lead brief #3, PLAN.md §10).
+ * Cache-first read contract.
  *
  * Addresses and the last-known balance are persisted to `chrome.storage.local`,
  * keyed by network (operator-bound — a network switch yields different addresses).

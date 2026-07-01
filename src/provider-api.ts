@@ -2,11 +2,11 @@ import type { NetworkName } from '@arkade-os/sdk';
 import type { AdjustedBalance } from './vtxo-state';
 
 /**
- * Shared provider types (PLAN.md §8, `src/provider-api.ts`). Mirrors the SDK
- * method names so the provider stays a thin pass-through (no translation layer that
- * can drift). Covers connect + the read surface (E2a) and the signing surface (E2b:
- * `signMessage` + `signPsbt`). `sendBitcoin` (off-chain) + on-chain/Lightning are out
- * of this generic provider — they map to their own flows (PLAN.md §8).
+ * Shared provider types. Mirrors the SDK method names so the provider stays a thin
+ * pass-through (no translation layer that can drift). Covers connect + the read
+ * surface and the signing surface (`signMessage` + `signPsbt`). `sendBitcoin`
+ * (off-chain) + on-chain/Lightning are out of this generic provider — they map to
+ * their own flows.
  *
  * These types are imported by both the MAIN-world provider (to type `window.arkadeWallet`)
  * and the background (to type the provider message results), so the wire shape is one source.

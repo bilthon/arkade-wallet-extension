@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 /**
- * Per-origin scoped-grant logic (PLAN.md §7). Pins: connect grants READ methods only,
+ * Per-origin scoped-grant logic. Pins: connect grants READ methods only,
  * a granted read method is allowed, an ungranted method (e.g. a signing method) is
  * rejected, and revocation immediately removes access. Backed by an in-memory
  * `browser.storage.local` (same pattern as keystore.test).

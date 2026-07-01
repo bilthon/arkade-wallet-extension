@@ -1,5 +1,5 @@
 /**
- * Approval-window flow (PLAN.md §7, BUILD_PLAN Phase 3 Track E).
+ * Approval-window flow.
  *
  * A web app request that needs user consent (connect / signMessage / signPsbt) does NOT resolve
  * inline. Instead:

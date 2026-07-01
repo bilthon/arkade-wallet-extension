@@ -4,20 +4,20 @@ import { clearSnapshot } from './wallet-cache';
 import type { NetworkName } from '@arkade-os/sdk';
 
 /**
- * Lock model under MV3 (Track B, PLAN.md §7 — Strict posture).
+ * Lock model under MV3 (Strict posture).
  *
- * M1 (must-fix): the decrypted mnemonic/seed lives ONLY in this SW module-scope
- * memory. It is NEVER written to `chrome.storage.session` (which holds only the
- * unlock flag). When the SW is killed this memory is gone → the next sensitive
- * action re-prompts for the password. On manual/auto lock we zero the buffer.
+ * The decrypted mnemonic/seed lives ONLY in this SW module-scope memory. It is
+ * NEVER written to `chrome.storage.session` (which holds only the unlock flag).
+ * When the SW is killed this memory is gone → the next sensitive action re-prompts
+ * for the password. On manual/auto lock we zero the buffer.
  *
  * "Liveness" (VTXO renewal) does NOT need a hot key here — it uses pre-signed,
- * time-bounded intents produced while unlocked (PLAN.md §6/§7.1), so keeping the
- * seed encrypted at rest is compatible with the wallet staying fresh. This module
- * intentionally exposes no way to persist the seed.
+ * time-bounded intents produced while unlocked, so keeping the seed encrypted at
+ * rest is compatible with the wallet staying fresh. This module intentionally
+ * exposes no way to persist the seed.
  */
 
-// ─── In-memory seed (M1) ─────────────────────────────────────────────────────
+// ─── In-memory seed ──────────────────────────────────────────────────────────
 
 // Observers notified AFTER the wallet locks (manual, auto, or any future path). The
 // background uses this to emit a `disconnect` provider event to connected web apps so a
@@ -32,7 +32,7 @@ export function onLock(listener: () => void): () => void {
 }
 
 let unlockedSeed: Uint8Array | null = null;
-// Kept alongside the seed so the build step (Track C) can re-derive the identity
+// Kept alongside the seed so the build step can re-derive the identity
 // without re-decrypting. Also in memory only; cleared on lock.
 let unlockedMnemonic: string | null = null;
 
@@ -43,12 +43,12 @@ export function isUnlocked(): boolean {
   return unlockedSeed !== null;
 }
 
-/** The decrypted seed, or null if locked. Consumed by `buildWallet` (Track C). */
+/** The decrypted seed, or null if locked. Consumed by `buildWallet`. */
 export function getUnlockedSeed(): Uint8Array | null {
   return unlockedSeed;
 }
 
-/** The decrypted mnemonic, or null if locked. Consumed by `buildWallet` (Track C). */
+/** The decrypted mnemonic, or null if locked. Consumed by `buildWallet`. */
 export function getUnlockedMnemonic(): string | null {
   return unlockedMnemonic;
 }
@@ -68,14 +68,14 @@ export async function getLockState(): Promise<LockState> {
 }
 
 /**
- * Backup re-reveal behind re-auth (team-lead brief #4, settings-lite). Re-decrypts
- * the vault with the supplied password and returns the mnemonic for a one-time
- * tap-to-reveal. We re-auth from the vault (not the in-memory mnemonic) so the
- * reveal always costs the password — even when already unlocked. A wrong password
- * throws from `decryptVault`; we never return the phrase on failed auth.
+ * Backup re-reveal behind re-auth. Re-decrypts the vault with the supplied password
+ * and returns the mnemonic for a one-time tap-to-reveal. We re-auth from the vault
+ * (not the in-memory mnemonic) so the reveal always costs the password — even when
+ * already unlocked. A wrong password throws from `decryptVault`; we never return the
+ * phrase on failed auth.
  *
  * This is the ONLY path by which the mnemonic crosses the SW boundary, and only on
- * an explicit, user-initiated request (M1 boundary rule).
+ * an explicit, user-initiated request.
  */
 export async function getMnemonicForBackup(password: string): Promise<string> {
   const blob = await getVault();
@@ -93,7 +93,7 @@ export async function getMnemonicForBackup(password: string): Promise<string> {
  * under the CURRENT network, then re-encrypts the same mnemonic under the NEW
  * network's AAD and atomically flips the stored network.
  *
- * M1 boundary: the mnemonic stays in the SW, only the password crosses in — same
+ * Boundary: the mnemonic stays in the SW, only the password crosses in — same
  * contract as `getMnemonicForBackup`. A wrong password (or tamper) throws from
  * `decryptVault` and leaves the stored vault + network UNCHANGED (fail-closed).
  */
@@ -195,7 +195,7 @@ async function holdUnlocked(mnemonic: string): Promise<void> {
 /**
  * (Re)arm the idle auto-lock alarm. Call on unlock and on each sensitive action to
  * reset the idle window. `chrome.alarms` is the only timer that survives the SW
- * being suspended; if the SW is killed first, the seed is already gone (M1) so the
+ * being suspended; if the SW is killed first, the seed is already gone so the
  * effect — a locked wallet — is the same.
  */
 export async function armAutoLock(minutes: number = DEFAULT_AUTO_LOCK_MINUTES): Promise<void> {

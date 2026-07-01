@@ -1,6 +1,6 @@
 /**
  * window.postMessage envelope shared by the MAIN-world provider and the ISOLATED
- * content script (PLAN.md §3). An ISOLATED content script can't set page globals,
+ * content script. An ISOLATED content script can't set page globals,
  * so the provider runs in MAIN and these two halves talk over postMessage with a
  * namespaced, per-call id. The content script is the only thing that touches
  * `browser.runtime`.

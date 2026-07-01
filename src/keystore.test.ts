@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 /**
- * Keystore handler-logic round-trip (team-lead brief #2 — the message handlers are
- * thin wrappers over these functions). Proves the M1 boundary end-to-end against an
- * in-memory `browser.storage`/`alarms`:
+ * Keystore handler-logic round-trip (the message handlers are thin wrappers over
+ * these functions). Proves the boundary end-to-end against an in-memory
+ * `browser.storage`/`alarms`:
  *   create → unlocked + vault persisted + seed NEVER in session
  *   lock   → locked + session cleared
  *   getMnemonicForBackup re-auths from the vault (wrong password rejected)
@@ -43,7 +43,7 @@ const crypto = await import('./crypto');
 
 const PASSWORD = 'correct horse battery staple';
 
-describe('keystore handler round-trip (M1 boundary)', () => {
+describe('keystore handler round-trip (boundary)', () => {
   beforeEach(async () => {
     local.clear();
     session.clear();
@@ -60,7 +60,7 @@ describe('keystore handler round-trip (M1 boundary)', () => {
     expect(await keystore.getLockState()).toEqual({ hasVault: true, unlocked: true });
     expect(local.get('vault')).toBeTruthy();
 
-    // M1: the only thing in session is the unlock flag — never the seed/mnemonic.
+    // The only thing in session is the unlock flag — never the seed/mnemonic.
     const sessionDump = JSON.stringify([...session.entries()]);
     expect(sessionDump).not.toContain(mnemonic);
     expect(sessionDump).not.toContain(mnemonic.split(/\s+/)[0]);

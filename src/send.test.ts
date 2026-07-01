@@ -9,7 +9,7 @@ import {
 } from './wallet';
 
 /**
- * Track E — off-chain send validation (the protocol-critical core).
+ * Off-chain send validation (the protocol-critical core).
  *
  * `validateArkadeAddress` / `validateAmount` are the SW-side guards that run BEFORE
  * any signing. They are pure (no wallet/operator), so we exercise every reject path

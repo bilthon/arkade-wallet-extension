@@ -2,12 +2,12 @@ import type { NetworkName } from '@arkade-os/sdk';
 import type { VaultBlob } from './crypto';
 
 /**
- * Typed `chrome.storage` I/O (Track B, PLAN.md §10). Two areas, strict separation:
+ * Typed `chrome.storage` I/O. Two areas, strict separation:
  *
  *  • local  — persistent: the encrypted vault + the active network. Survives restarts.
  *  • session — in-memory, trusted-context only: the unlock FLAG only. Under the Strict
- *              lock posture (PLAN.md §7) NOTHING secret lives here — no seed, no
- *              password, no key. After the SW dies the flag is gone and we re-prompt.
+ *              lock posture NOTHING secret lives here — no seed, no password, no key.
+ *              After the SW dies the flag is gone and we re-prompt.
  *
  * The decrypted seed lives ONLY in SW module memory (see `keystore.ts`), never here.
  * We use `browser.storage.*` directly (not WXT's `storage` helper) to keep the
@@ -18,7 +18,7 @@ const VAULT_KEY = 'vault';
 const NETWORK_KEY = 'network';
 const UNLOCK_FLAG_KEY = 'unlocked';
 
-/** Default dev network (PLAN.md §4: nigiri regtest is the inner-loop default). */
+/** Default dev network: nigiri regtest is the inner-loop default. */
 export const DEFAULT_NETWORK: NetworkName = 'regtest';
 
 // ─── local (persistent) ──────────────────────────────────────────────────────

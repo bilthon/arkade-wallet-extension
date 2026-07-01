@@ -7,13 +7,13 @@ import {
 import { decodeProviderError, type ProviderEvent } from '@/src/provider-api';
 
 /**
- * MAIN-world provider (PLAN.md §3/§8). An ISOLATED content script can't set
- * page-visible globals, so `window.arkadeWallet` must run in the page's MAIN world.
+ * MAIN-world provider. An ISOLATED content script can't set page-visible globals,
+ * so `window.arkadeWallet` must run in the page's MAIN world.
  *
  * WXT builds `world:'MAIN'` content scripts as web-accessible scripts for runtime
  * injection rather than static manifest content_scripts, so this is an unlisted
  * script the ISOLATED content bridge injects at document_start via
- * `wxt/utils/inject-script`. Same mechanism the PLAN names for the Firefox port.
+ * `wxt/utils/inject-script`. Same mechanism intended for the Firefox port.
  *
  * It talks to the ISOLATED content bridge over window.postMessage (per-call id); the
  * content bridge is the only half that touches `browser.runtime`. The provider is a

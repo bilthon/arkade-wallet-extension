@@ -1,5 +1,5 @@
 /**
- * Per-origin scoped grants (PLAN.md §7, BUILD_PLAN Phase 3 Track E; `src/permissions.ts`).
+ * Per-origin scoped grants.
  *
  * A grant records what a single, SW-verified origin (see `origin.ts`) is allowed to do:
  *   { origin, accounts, grantedMethods, grantedAt }
@@ -14,8 +14,7 @@
 
 /**
  * The READ method set a `connect` grant authorizes. Intentionally narrow: addresses,
- * pubkey, balance, network, accounts. NO send/sign — those are out of E2a entirely and
- * will require a per-call approval when they land (E2b).
+ * pubkey, balance, network, accounts. NO send/sign — those require a per-call approval.
  */
 export const READ_METHODS = [
   'getAccounts',

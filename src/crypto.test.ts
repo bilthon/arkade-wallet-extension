@@ -9,7 +9,7 @@ import {
 } from './crypto';
 
 /**
- * The one runnable Track-B check (PLAN.md §7). Proves the at-rest vault is sound:
+ * Proves the at-rest vault is sound:
  * round-trips a mnemonic, rejects a wrong password, rejects tampered
  * ciphertext / IV / auth-tag (GCM fails closed → never returns plaintext), rejects
  * a network mismatch (AAD binding), and uses a fresh IV per encrypt.

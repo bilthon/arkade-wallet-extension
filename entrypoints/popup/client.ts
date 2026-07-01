@@ -31,7 +31,7 @@ export const client = {
   onboardNow: () => sendMessage('onboardNow', undefined),
   getRenewalWarning: () => sendMessage('getRenewalWarning', undefined),
   getTransactionHistory: () => sendMessage('getTransactionHistory', undefined),
-  // Connected sites (Track E2a): list + revoke per-origin web app grants.
+  // Connected sites: list + revoke per-origin web app grants.
   listConnectedSites: () => sendMessage('listConnectedSites', undefined),
   revokeConnectedSite: (origin: string) =>
     sendMessage('revokeConnectedSite', { origin }),

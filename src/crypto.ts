@@ -4,7 +4,7 @@ import { base64 } from '@scure/base';
 import type { NetworkName } from '@arkade-os/sdk';
 
 /**
- * At-rest keystore crypto (Track B, PLAN.md §7). Pure crypto + encoding only — NO
+ * At-rest keystore crypto. Pure crypto + encoding only — NO
  * `chrome.*` here so it round-trips under plain WebCrypto in vitest. The lock model
  * (SW-memory seed, auto-lock) lives in `keystore.ts`; the typed storage I/O in
  * `storage.ts`.
@@ -55,10 +55,10 @@ export interface VaultBlob {
 }
 
 // ponytail: KDF = PBKDF2-HMAC-SHA-256 @ 600k iters (pure WebCrypto, runs under
-// `script-src 'self'`). The §7-preferred Argon2id needs a WASM lib, which won't
+// `script-src 'self'`). The preferred Argon2id needs a WASM lib, which won't
 // instantiate under the current MV3 CSP (no 'wasm-unsafe-eval') — that's the open
-// FLAG (BUILD_PLAN §C/Phase-1). Upgrade path: add `kdf:'argon2id'` + its params to
-// the union and a branch in `deriveKey`; this PBKDF2 path stays for old vaults.
+// FLAG. Upgrade path: add `kdf:'argon2id'` + its params to the union and a branch
+// in `deriveKey`; this PBKDF2 path stays for old vaults.
 export const PBKDF2_ITERATIONS = 600_000;
 
 const SALT_BYTES = 16;
@@ -180,7 +180,7 @@ export async function decryptVault(
   return mnemonic;
 }
 
-/** BIP39 mnemonic -> 64-byte seed. Used by `buildWallet` (Track C); kept here beside derivation. */
+/** BIP39 mnemonic -> 64-byte seed. Used by `buildWallet`; kept here beside derivation. */
 export function mnemonicToSeed(mnemonic: string): Uint8Array {
   return mnemonicToSeedSync(mnemonic);
 }

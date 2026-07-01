@@ -9,9 +9,9 @@ import { WalletHome } from './screens/WalletHome';
 import { Settings } from './screens/Settings';
 
 /**
- * Popup router (Track D). No router library — a small route union keyed off the
- * lock state (PLAN.md §5 entrypoint layout). On mount we ask the SW for
- * `{ hasVault, unlocked }` and pick the landing screen:
+ * Popup router. No router library — a small route union keyed off the lock
+ * state. On mount we ask the SW for `{ hasVault, unlocked }` and pick the
+ * landing screen:
  *   no vault            → welcome (→ create / import)
  *   vault + locked      → unlock
  *   vault + unlocked    → wallet-home

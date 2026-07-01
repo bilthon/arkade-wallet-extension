@@ -5,8 +5,8 @@ import { networkLabel } from '../format';
 import { NETWORK_CONFIG } from '@/src/wallet';
 
 /**
- * Settings-lite (team-lead brief, ponytail trims): network picker (re-encrypts vault
- * on switch — asks for the password), manual lock, and backup re-reveal behind re-auth.
+ * Settings-lite: network picker (re-encrypts vault on switch — asks for the password),
+ * manual lock, and backup re-reveal behind re-auth.
  */
 export function Settings({ onBack, onLocked }: { onBack: () => void; onLocked: () => void }) {
   const [network, setNetwork] = useState<NetworkName | null>(null);
@@ -198,7 +198,7 @@ function SwitchNetwork({
 }
 
 /**
- * Backup re-reveal behind re-auth (team-lead brief #4). Asks for the password, and
+ * Backup re-reveal behind re-auth. Asks for the password, and
  * the SW re-decrypts the vault to return the mnemonic — the only post-creation path
  * that crosses the boundary, and only on this explicit request. No clipboard copy.
  */
@@ -278,7 +278,7 @@ function RevealBackup({ onClose }: { onClose: () => void }) {
 }
 
 /**
- * Connected sites (Track E2a). Lists per-origin web app grants and revokes them. Revoke
+ * Connected sites. Lists per-origin web app grants and revokes them. Revoke
  * is immediate: the background drops the grant, rejects any pending request from that
  * origin, and pushes a `disconnect` event so the web app's session ends right away.
  */
