@@ -25,6 +25,7 @@ import {
   renewExpiringVtxos,
   recoverExpiredVtxos,
   onboardBoarding,
+  getTransactionHistory,
 } from '@/src/wallet';
 import { getSnapshot, setSnapshot, type WalletSnapshot } from '@/src/wallet-cache';
 import {
@@ -195,6 +196,8 @@ export default defineBackground(() => {
   onMessage('getRenewalWarning', async () => {
     return { warning: await getRenewalWarning() };
   });
+
+  onMessage('getTransactionHistory', async () => getTransactionHistory(await requireWallet()));
 
   // ── Provider surface (Track E2a) ───────────────────────────────────────────
   //

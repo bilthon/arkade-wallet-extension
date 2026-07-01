@@ -13,6 +13,7 @@
   --warn-border: #fed7aa;
   --warn-text: #9a3412;
   --skeleton: #e7eaee;
+  --skeleton-sheen: rgba(255, 255, 255, 0.65);
 
   font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
   font-synthesis: none;
@@ -36,6 +37,7 @@
     --warn-border: #5a3a1a;
     --warn-text: #fbbf24;
     --skeleton: #2a2f37;
+    --skeleton-sheen: rgba(255, 255, 255, 0.09);
   }
 }
 
@@ -182,6 +184,27 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 /* Skeletons */
 .skeleton { background: var(--skeleton); border-radius: 6px; animation: pulse 1.3s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+
+/* Shimmer skeleton — a light sweep across the base, for content-shaped loaders. */
+.skeleton-shimmer {
+  position: relative;
+  overflow: hidden;
+  background: var(--skeleton);
+  border-radius: 6px;
+}
+.skeleton-shimmer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--skeleton-sheen), transparent);
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+@keyframes shimmer { 100% { transform: translateX(100%); } }
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-shimmer::after { animation: none; }
+  .skeleton-shimmer { animation: pulse 1.3s ease-in-out infinite; }
+}
 
 /* Backup words */
 .word-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 12px 0; }

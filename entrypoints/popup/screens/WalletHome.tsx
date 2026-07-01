@@ -6,6 +6,7 @@ import { client, isLockedError, errorMessage } from '../client';
 import { formatSats, networkLabel, relativeTime, untilRelative } from '../format';
 import { Receive } from './Receive';
 import { Send } from './Send';
+import { History } from './History';
 
 /**
  * Wallet home (Track D + the UX review, team-lead brief #5; Track F renewal UI).
@@ -35,6 +36,7 @@ export function WalletHome({
   const [offline, setOffline] = useState(false);
   const [showReceive, setShowReceive] = useState(false);
   const [showSend, setShowSend] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [renewalWarning, setRenewalWarning] = useState<RenewalWarning | null>(null);
   const [recoverBusy, setRecoverBusy] = useState(false);
@@ -161,6 +163,10 @@ export function WalletHome({
     );
   }
 
+  if (showHistory) {
+    return <History onClose={() => setShowHistory(false)} onLocked={onLocked} />;
+  }
+
   // First-ever open with no cache yet and a live read still in flight → skeletons.
   const showSkeleton = balance === null && loadingLive;
   const isEmpty = balance !== null && balance.total === 0;
@@ -284,6 +290,13 @@ export function WalletHome({
               Receive
             </button>
           </div>
+          <button
+            className="link-btn btn-block"
+            style={{ textAlign: 'center', marginTop: 4 }}
+            onClick={() => setShowHistory(true)}
+          >
+            Activity
+          </button>
         </>
       )}
 
