@@ -6,6 +6,18 @@ import { formatSats, relativeTime, truncateMiddle } from '../format';
 export function History({ onClose, onLocked }: { onClose: () => void; onLocked: () => void }) {
   const [items, setItems] = useState<TxHistoryItem[] | null>(null);
   const [error, setError] = useState('');
+  // Index of the row whose txid was just copied → shows a brief "Copied ✓" acknowledgement.
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+
+  async function copyTxid(txid: string, idx: number) {
+    try {
+      await navigator.clipboard.writeText(txid);
+      setCopiedIdx(idx);
+      setTimeout(() => setCopiedIdx((c) => (c === idx ? null : c)), 1500);
+    } catch {
+      /* clipboard unavailable (rare in a focused popup) — nothing to show */
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -55,9 +67,13 @@ export function History({ onClose, onLocked }: { onClose: () => void; onLocked: 
               <button
                 className="link-btn"
                 style={{ padding: 0, fontSize: 11 }}
-                onClick={() => void navigator.clipboard.writeText(item.txid)}
+                onClick={() => void copyTxid(item.txid, i)}
+                title="Copy transaction ID"
+                aria-label="Copy transaction ID"
               >
-                <span className="addr-mono">{truncateMiddle(item.txid)}</span>
+                <span className="addr-mono">
+                  {copiedIdx === i ? 'Copied ✓' : truncateMiddle(item.txid)}
+                </span>
               </button>
             )}
           </div>
