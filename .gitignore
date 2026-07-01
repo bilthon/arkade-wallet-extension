@@ -1,8 +1,8 @@
 # Local-only planning & notes (never committed)
 .local/
 
-# Agent worktrees (standing convention)
-.claude/worktrees/
+# Agent
+.claude
 
 # Logs
 logs
