@@ -31,7 +31,13 @@ export function History({ onClose, onLocked }: { onClose: () => void; onLocked: 
         <button className="icon-btn" onClick={onClose} aria-label="Close">✕</button>
       </div>
 
-      {items === null && !error && <p className="subtitle">Loading…</p>}
+      {items === null && !error && (
+        <div aria-busy="true" aria-label="Loading transactions">
+          {Array.from({ length: 6 }, (_, i) => (
+            <SkeletonRow key={i} />
+          ))}
+        </div>
+      )}
       {error && <p className="error">{error}</p>}
       {items !== null && items.length === 0 && <p className="subtitle">No transactions yet.</p>}
 
@@ -61,6 +67,20 @@ export function History({ onClose, onLocked }: { onClose: () => void; onLocked: 
         </div>
       ))}
     </main>
+  );
+}
+
+/** A shimmering placeholder row that mirrors the real transaction row's shape. */
+function SkeletonRow() {
+  return (
+    <div className="row" aria-hidden="true">
+      <div>
+        <div className="skeleton-shimmer" style={{ width: 88, height: 14, marginBottom: 7 }} />
+        <div className="skeleton-shimmer" style={{ width: 54, height: 10, marginBottom: 7 }} />
+        <div className="skeleton-shimmer" style={{ width: 128, height: 10 }} />
+      </div>
+      <div className="skeleton-shimmer" style={{ width: 76, height: 14 }} />
+    </div>
   );
 }
 
