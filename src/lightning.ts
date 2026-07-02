@@ -35,41 +35,102 @@ import { buildWallet, networkConfig } from './wallet';
 
 // ─── Singleton, scoped to (unlocked, network) ────────────────────────────────
 
-let swaps: ArkadeSwaps | null = null;
+let swaps: ArkadeSwaps | null = null; // the RESOLVED instance, for dispose
+let swapsPromise: Promise<ArkadeSwaps> | null = null; // the in-flight/settled build, memoized
 let swapsNetwork: NetworkName | null = null;
+// Bumped by disposeSwaps. Lets a build that was already in flight when a
+// lock/switchNetwork happened detect it landed too late and self-destruct
+// instead of leaking a live SwapManager (WebSocket + auto-claimer) past the
+// seed it was built from. See createRuntime's post-create check.
+let generation = 0;
 
 /** Per-network swap repository name, matching the wallet's own per-network DBs. */
 const repoName = (network: NetworkName) => `arkade-swaps-${network}`;
 
-/** Build (or reuse) the `ArkadeSwaps` runtime. Caller guarantees the wallet is unlocked. */
-export async function getSwaps(seed: Uint8Array): Promise<ArkadeSwaps> {
+/**
+ * Build (or reuse) the `ArkadeSwaps` runtime. Caller guarantees the wallet is
+ * unlocked.
+ *
+ * Memoizes the IN-FLIGHT promise, not just the resolved instance, via a
+ * synchronous check-and-assign (no `await` before `swapsPromise` is set) —
+ * two callers racing this (e.g. the unlock handler's fire-and-forget
+ * `reconcilePendingSwaps` racing a user's `createLightningInvoice`) always
+ * observe the same in-flight build and get the same instance, rather than
+ * both calling `ArkadeSwaps.create` and leaking the loser's SwapManager.
+ */
+export function getSwaps(seed: Uint8Array): Promise<ArkadeSwaps> {
+  if (!swapsPromise) {
+    const mine = createRuntime(seed, generation);
+    swapsPromise = mine;
+    // A failed build must not poison the memo forever — clear it so the next
+    // getSwaps retries. Guarded so we never clobber a NEWER promise that a
+    // dispose + rebuild (or another failed-then-retried build) may have
+    // already installed by the time this settles.
+    mine.catch(() => {
+      if (swapsPromise === mine) swapsPromise = null;
+    });
+  }
+  return swapsPromise;
+}
+
+/**
+ * Does the actual build for `getSwaps`. Split out so the memoization above
+ * stays synchronous — `createRuntime` is where all the `await`s live.
+ *
+ * Deliberately does NOT re-read/compare the active network per call the way
+ * the old version did: the only code path that ever changes the stored
+ * network is the switchNetwork message handler, and it always calls
+ * `disposeSwaps()` in the same handler — so a network change is always
+ * paired with a generation bump + memo clear, never silently observed by a
+ * stale in-flight build. (Confirmed: `setNetwork`/`setVaultAndNetwork` has no
+ * other production caller.)
+ */
+async function createRuntime(seed: Uint8Array, gen: number): Promise<ArkadeSwaps> {
   const network = await getStoredNetwork();
-  if (swaps && swapsNetwork === network) return swaps;
-  await disposeSwaps(); // network changed under us (or nothing built yet) → tear down the old one
   const cfg = networkConfig(network);
   if (!cfg.boltzApiUrl) throw new Error('LIGHTNING_UNAVAILABLE');
   const wallet = await buildWallet(seed);
-  swaps = await ArkadeSwaps.create({
+  const instance = await ArkadeSwaps.create({
     wallet,
     swapProvider: new BoltzSwapProvider({ apiUrl: cfg.boltzApiUrl, network }),
     swapRepository: new IndexedDbSwapRepository(repoName(network)),
     // SwapManager stays on its default (enabled): it auto-claims the moment
     // Boltz funds the VHTLC — no separate wire-up needed here.
   });
+
+  if (gen !== generation) {
+    // A lock (or switchNetwork) landed while `ArkadeSwaps.create` was in
+    // flight — this instance may have just been built from a now-zeroed seed
+    // or a now-stale network. Self-destruct rather than leak its SwapManager.
+    // 'LOCKED' is slightly imprecise for the switchNetwork case, but harmless:
+    // the popup routes to unlock, and a network switch requires the password
+    // anyway.
+    await instance.dispose();
+    throw new Error('LOCKED');
+  }
+
+  swaps = instance;
   swapsNetwork = network;
-  return swaps;
+  return instance;
 }
 
 /**
  * Called from onLock and switchNetwork. Safe to call when nothing is up.
+ *
+ * Bumps `generation` FIRST, before touching any other state — this is what
+ * lets an in-flight `createRuntime` build (started before this call) detect,
+ * once it resolves, that it's now stale and dispose itself instead of
+ * outliving the seed it was built from.
  *
  * `ArkadeSwaps.dispose()` only stops the SwapManager (WebSocket + timers) — it
  * does NOT close the swap repository's IndexedDB connection, and neither do
  * we. See {@link hasPendingSwaps} for why that's deliberate.
  */
 export async function disposeSwaps(): Promise<void> {
+  generation++;
   const s = swaps;
   swaps = null;
+  swapsPromise = null;
   swapsNetwork = null;
   if (s) await s.dispose();
 }
@@ -94,10 +155,22 @@ export async function hasPendingSwaps(network: NetworkName): Promise<boolean> {
   return all.some((s) => isPendingReverseSwap(s) && isReversePendingStatus(s.status));
 }
 
-/** Unlock-time reconciliation: refresh statuses; the manager auto-claims anything claimable. */
+/**
+ * Unlock-time reconciliation: refresh statuses; the manager auto-claims anything claimable.
+ *
+ * Called fire-and-forget (`void reconcilePendingSwaps(seed)`) from the unlock
+ * handler, so a rejection here has no caller watching for it. A lock racing
+ * this call is an expected, harmless case now (see `disposeSwaps`'s
+ * generation bump: `getSwaps` rejects with 'LOCKED' when that happens) — swallow
+ * it here rather than let it surface as an unhandled promise rejection.
+ */
 export async function reconcilePendingSwaps(seed: Uint8Array): Promise<void> {
-  const s = await getSwaps(seed); // starting the manager already loads pending swaps
-  await s.refreshSwapsStatus(); // catch swaps that settled while we were closed
+  try {
+    const s = await getSwaps(seed); // starting the manager already loads pending swaps
+    await s.refreshSwapsStatus(); // catch swaps that settled while we were closed
+  } catch {
+    /* best-effort recovery — nothing is watching this fire-and-forget call */
+  }
 }
 
 // ─── Popup-facing operations ──────────────────────────────────────────────────

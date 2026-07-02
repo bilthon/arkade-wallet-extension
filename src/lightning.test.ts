@@ -94,6 +94,17 @@ import {
 
 const seed = new Uint8Array(32).fill(7);
 
+/** A promise plus its resolve/reject, for controlling exactly when a mocked build settles. */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 /** A fake `ArkadeSwaps` instance — only the surface `lightning.ts` calls. */
 function fakeSwapInstance(overrides: Record<string, unknown> = {}) {
   return {
@@ -251,18 +262,28 @@ describe('getSwaps — singleton lifecycle', () => {
     expect(b).not.toBe(a);
   });
 
-  it('rebuilds when the active network changes underneath it', async () => {
+  it('rebuilds against the new network after a network change + disposeSwaps (the real switchNetwork flow)', async () => {
+    // getSwaps no longer re-checks the network per call — a network change is
+    // only ever observed via the switchNetwork handler's disposeSwaps() call.
     const first = fakeSwapInstance();
     const second = fakeSwapInstance();
     state.createArkadeSwaps.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
 
     state.network = 'regtest';
     await getSwaps(seed);
-    state.network = 'mutinynet';
-    const b = await getSwaps(seed);
+    expect(state.createArkadeSwaps.mock.calls[0][0].swapRepository.dbName).toBe(
+      'arkade-swaps-regtest',
+    );
 
+    state.network = 'mutinynet';
+    await disposeSwaps();
     expect(first.dispose).toHaveBeenCalledOnce();
+
+    const b = await getSwaps(seed);
     expect(b).toBe(second);
+    expect(state.createArkadeSwaps.mock.calls[1][0].swapRepository.dbName).toBe(
+      'arkade-swaps-mutinynet',
+    );
   });
 
   it('throws LIGHTNING_UNAVAILABLE for a network with no Boltz endpoint, without building anything', async () => {
@@ -270,6 +291,50 @@ describe('getSwaps — singleton lifecycle', () => {
 
     await expect(getSwaps(seed)).rejects.toThrow('LIGHTNING_UNAVAILABLE');
     expect(state.createArkadeSwaps).not.toHaveBeenCalled();
+  });
+
+  it('memoizes concurrent calls — ArkadeSwaps.create runs exactly once, both callers get the same instance', async () => {
+    const instance = fakeSwapInstance();
+    state.createArkadeSwaps.mockResolvedValue(instance);
+
+    const [a, b] = await Promise.all([getSwaps(seed), getSwaps(seed)]);
+
+    expect(a).toBe(instance);
+    expect(b).toBe(instance);
+    expect(state.createArkadeSwaps).toHaveBeenCalledOnce();
+  });
+
+  it('self-destructs a build that finishes after a concurrent disposeSwaps, instead of leaking it', async () => {
+    const first = fakeSwapInstance();
+    const second = fakeSwapInstance();
+    const gate = deferred<ReturnType<typeof fakeSwapInstance>>();
+    state.createArkadeSwaps.mockReturnValueOnce(gate.promise).mockResolvedValueOnce(second);
+
+    const building = getSwaps(seed); // ArkadeSwaps.create is still pending (gate)
+
+    await disposeSwaps(); // a lock (or switchNetwork) races the in-flight build
+
+    gate.resolve(first); // the build finishes AFTER the dispose already landed
+    await expect(building).rejects.toThrow('LOCKED');
+    expect(first.dispose).toHaveBeenCalledOnce(); // self-destructed, not leaked
+
+    // The memo was cleared by disposeSwaps, so the next call rebuilds cleanly.
+    const b = await getSwaps(seed);
+    expect(b).toBe(second);
+    expect(state.createArkadeSwaps).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not poison the memo on a failed build — the next getSwaps retries', async () => {
+    state.createArkadeSwaps.mockRejectedValueOnce(new Error('boltz unreachable'));
+    const instance = fakeSwapInstance();
+    state.createArkadeSwaps.mockResolvedValueOnce(instance);
+
+    await expect(getSwaps(seed)).rejects.toThrow('boltz unreachable');
+    await Promise.resolve(); // let the internal failure-handler clear the memo
+
+    const b = await getSwaps(seed);
+    expect(b).toBe(instance);
+    expect(state.createArkadeSwaps).toHaveBeenCalledTimes(2);
   });
 });
 
