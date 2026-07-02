@@ -115,7 +115,9 @@ function fakeSwapInstance(overrides: Record<string, unknown> = {}) {
       paymentHash: 'deadbeef',
       preimage: 'super-secret-preimage',
       amount: amount - 100, // "after Boltz fees"
-      expiry: 1_700_000_000, // Unix seconds
+      // RELATIVE seconds (the raw BOLT11 expiry tag) — NOT an absolute Unix
+      // timestamp, despite the library docstring. See createInvoice's comment.
+      expiry: 3600,
       pendingSwap: { id: 'swap-1' },
     })),
     refreshSwapsStatus: vi.fn(async () => {}),
@@ -205,19 +207,26 @@ describe('createInvoice', () => {
     );
   });
 
-  it('converts expiry to epoch ms, maps the swap id/receive amount, and never returns the preimage', async () => {
+  it('anchors the relative expiry to now as epoch ms, maps the swap id/receive amount, and never returns the preimage', async () => {
     const instance = fakeSwapInstance();
     state.createArkadeSwaps.mockResolvedValue(instance);
 
+    const before = Date.now();
     const result = await createInvoice(seed, { amount: 25_000 });
+    const after = Date.now();
 
-    expect(result).toEqual({
+    const { expiresAt, ...rest } = result;
+    expect(rest).toEqual({
       invoice: 'lnbc1invoice',
       paymentHash: 'deadbeef',
       swapId: 'swap-1',
       receiveAmount: 24_900,
-      expiresAt: 1_700_000_000_000,
     });
+    // The library's `expiry` is a relative BOLT11 duration (3600s here); the
+    // deadline must land ~an hour in the FUTURE, not at epoch 3600s (the bug
+    // this pins down: a 1970 deadline made every invoice render as expired).
+    expect(expiresAt).toBeGreaterThanOrEqual(before + 3_600_000);
+    expect(expiresAt).toBeLessThanOrEqual(after + 3_600_000);
     expect(result).not.toHaveProperty('preimage');
     expect(JSON.stringify(result)).not.toContain('super-secret-preimage');
   });

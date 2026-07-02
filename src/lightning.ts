@@ -232,7 +232,13 @@ export async function createInvoice(
     paymentHash: r.paymentHash,
     swapId: r.pendingSwap.id,
     receiveAmount: r.amount, // sats after Boltz fees
-    expiresAt: r.expiry * 1000, // Unix seconds → epoch ms for the countdown UI
+    // `r.expiry` is a RELATIVE duration in seconds (the raw BOLT11 expiry tag,
+    // typically 3600), despite the library docstring calling it a "Unix seconds"
+    // timestamp — verified against the compiled 0.3.44 source, where it's the
+    // light-bolt11-decoder expiry section passed through untranslated. Anchor it
+    // to now (the invoice was created milliseconds ago; the skew is immaterial
+    // for a countdown) to get the absolute epoch-ms deadline the UI expects.
+    expiresAt: Date.now() + r.expiry * 1000,
     // NOTE: r.preimage deliberately NOT returned — it stays SW-side (it's the claiming secret).
   };
 }
