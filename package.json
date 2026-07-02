@@ -17,6 +17,7 @@
     "test:webapp": "vite --config dev/vite.config.ts"
   },
   "dependencies": {
+    "@arkade-os/boltz-swap": "0.3.44",
     "@arkade-os/sdk": "0.4.39",
     "@scure/base": "2.2.0",
     "@scure/bip39": "2.2.0",

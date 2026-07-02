@@ -8,6 +8,7 @@ import type { Grant } from './permissions';
 import type { PendingRequest } from './approvals';
 import type { NetworkInfo, PublicKeyInfo } from './provider-api';
 import type { TxHistoryItem } from './wallet';
+import type { LnReceiveStatus } from './lightning';
 
 /**
  * Typed content <-> background protocol over the `browser.runtime` hop.
@@ -108,6 +109,30 @@ export interface ProtocolMap {
   getRenewalWarning(): { warning: RenewalWarning | null };
   /** Full transaction history, newest-first, normalised for display. Unlock-gated. */
   getTransactionHistory(): TxHistoryItem[];
+
+  // ─── Lightning receive (reverse swap via Boltz) ─────────────────────────────
+  /** Availability + form bounds. Safe while locked (no wallet, no signing). */
+  getLightningInfo(): {
+    available: boolean;
+    limits?: { min: number; max: number };
+    /** Reverse-swap fees for the pre-creation ESTIMATE: Boltz percentage (e.g.
+     *  0.25 = 0.25%) + fixed miner fees (lockup + claim, already summed). */
+    fees?: { percentage: number; minerFeesTotal: number };
+  };
+  /**
+   * Create an LN invoice for `amount` sats. `amount` is the INVOICE
+   * (sender-side) amount, mirroring the library — the popup derives it from
+   * the user's desired receive amount. Unlock-gated (the claim key is needed).
+   */
+  createLightningInvoice(data: { amount: number }): {
+    invoice: string;
+    paymentHash: string;
+    swapId: string;
+    receiveAmount: number;
+    expiresAt: number;
+  };
+  /** Poll one pending deposit. Read-only. */
+  getLightningReceiveStatus(data: { swapId: string }): { status: LnReceiveStatus };
 
   // ─── Provider surface (origin + grant gated) ───────────────────────────────
   //
