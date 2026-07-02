@@ -4,6 +4,7 @@ import {
   IndexedDbSwapRepository,
   isPendingReverseSwap,
   isReverseClaimableStatus,
+  isReverseFailedStatus,
   isReversePendingStatus,
   isReverseSuccessStatus,
   type BoltzReverseSwap,
@@ -258,17 +259,28 @@ export function invoiceAmountForTarget(
 export type LnReceiveStatus = 'waiting' | 'claiming' | 'done' | 'expired' | 'failed';
 
 /**
- * Map a raw Boltz reverse-swap status to the popup's UI state. Order matters:
- * `isReverseClaimableStatus` (mempool/confirmed) is a SUBSET of
- * `isReversePendingStatus`, so claimable must be checked first or it would
- * never be reached.
+ * Map a raw Boltz reverse-swap status to the popup's UI state.
+ *
+ * Two things this must get right:
+ *  - `transaction.claimed` is a SUCCESS for us. Boltz's canonical reverse terminal
+ *    is `invoice.settled`, but `claimVHTLC` persists `transaction.claimed` when it
+ *    claims a recoverable VHTLC via `joinBatch` (its off-chain claim path instead
+ *    reports the Boltz status). Both mean the funds reached us — map to 'done'.
+ *  - Unknown statuses must NOT default to 'failed'. Every way the reverse flow can
+ *    actually fail is covered by `isReverseFailedStatus` (+ the expired pair); any
+ *    other status is a non-reverse/unexpected one, so it falls through to the
+ *    non-terminal 'waiting' (which self-heals via invoice expiry) rather than
+ *    telling the user "no funds were taken" on a deposit that may well have landed.
+ *
+ * Order matters: the expired pair is checked before `isReverseFailedStatus` (which
+ * also contains them) so they surface as 'expired', not 'failed'.
  */
 export function mapReverseStatus(status: BoltzSwapStatus): LnReceiveStatus {
-  if (isReverseSuccessStatus(status)) return 'done';
+  if (isReverseSuccessStatus(status) || status === 'transaction.claimed') return 'done';
   if (status === 'invoice.expired' || status === 'swap.expired') return 'expired';
-  if (isReverseClaimableStatus(status)) return 'claiming'; // paid; claim in flight
-  if (isReversePendingStatus(status)) return 'waiting';
-  return 'failed';
+  if (isReverseFailedStatus(status)) return 'failed'; // transaction.failed / transaction.refunded
+  if (isReverseClaimableStatus(status)) return 'claiming'; // Boltz funded the lockup; claim in flight
+  return 'waiting';
 }
 
 /**

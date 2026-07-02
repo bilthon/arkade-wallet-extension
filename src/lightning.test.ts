@@ -137,26 +137,27 @@ beforeEach(async () => {
 });
 
 describe('mapReverseStatus — full status table', () => {
-  // isReverseClaimableStatus (mempool/confirmed) is a SUBSET of
-  // isReversePendingStatus, so 'claiming' must win over 'waiting' for those two.
   const cases: Array<[BoltzSwapStatus, LnReceiveStatus]> = [
     ['swap.created', 'waiting'],
     ['transaction.mempool', 'claiming'],
     ['transaction.confirmed', 'claiming'],
     ['invoice.settled', 'done'],
+    // claimVHTLC's recoverable/joinBatch path persists this — a SUCCESS, not a failure.
+    ['transaction.claimed', 'done'],
     ['invoice.expired', 'expired'],
     ['swap.expired', 'expired'],
     ['transaction.failed', 'failed'],
     ['transaction.refunded', 'failed'],
-    ['invoice.failedToPay', 'failed'],
-    ['invoice.paid', 'failed'],
-    ['invoice.pending', 'failed'],
-    ['invoice.set', 'failed'],
-    ['transaction.claim.pending', 'failed'],
-    ['transaction.claimed', 'failed'],
-    ['transaction.lockupFailed', 'failed'],
-    ['transaction.server.mempool', 'failed'],
-    ['transaction.server.confirmed', 'failed'],
+    // Statuses that never apply to a reverse swap default to the non-terminal
+    // 'waiting' (self-heals via invoice expiry), NOT a misleading 'failed'.
+    ['invoice.failedToPay', 'waiting'],
+    ['invoice.paid', 'waiting'],
+    ['invoice.pending', 'waiting'],
+    ['invoice.set', 'waiting'],
+    ['transaction.claim.pending', 'waiting'],
+    ['transaction.lockupFailed', 'waiting'],
+    ['transaction.server.mempool', 'waiting'],
+    ['transaction.server.confirmed', 'waiting'],
   ];
 
   it.each(cases)('%s -> %s', (status, expected) => {
