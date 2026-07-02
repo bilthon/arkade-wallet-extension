@@ -39,7 +39,6 @@ import type { LnReceiveStatus } from './lightning-utils';
 
 let swaps: ArkadeSwaps | null = null; // the RESOLVED instance, for dispose
 let swapsPromise: Promise<ArkadeSwaps> | null = null; // the in-flight/settled build, memoized
-let swapsNetwork: NetworkName | null = null;
 // Bumped by disposeSwaps. Lets a build that was already in flight when a
 // lock/switchNetwork happened detect it landed too late and self-destruct
 // instead of leaking a live SwapManager (WebSocket + auto-claimer) past the
@@ -112,7 +111,6 @@ async function createRuntime(seed: Uint8Array, gen: number): Promise<ArkadeSwaps
   }
 
   swaps = instance;
-  swapsNetwork = network;
   return instance;
 }
 
@@ -133,7 +131,6 @@ export async function disposeSwaps(): Promise<void> {
   const s = swaps;
   swaps = null;
   swapsPromise = null;
-  swapsNetwork = null;
   if (s) await s.dispose();
 }
 
