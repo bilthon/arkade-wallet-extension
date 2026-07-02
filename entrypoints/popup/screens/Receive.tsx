@@ -5,9 +5,12 @@ import { invoiceAmountForTarget, type LnReceiveStatus } from '@/src/lightning';
 
 /**
  * Receive view. Arkade / On-chain / Lightning tabs (Arkade default), each with a
- * one-line "what/when" caption + a Copy button. The Lightning tab only appears once
- * `getLightningInfo()` (fetched once on mount) confirms the active network supports
- * it; while that's pending or false, the popup behaves exactly like before — two tabs.
+ * one-line "what/when" caption + a Copy button. The Lightning tab shows as soon as the
+ * active network has a Boltz endpoint; the fee/limit info the form needs is fetched by
+ * `getLightningInfo()` (once on mount), so the tab renders a "Loading fees…" spinner
+ * until that resolves, then the form. Only a network with no Boltz endpoint
+ * (`unsupported`) hides the tab entirely; a fetch failure (`error`) keeps the tab and
+ * offers a Retry rather than vanishing on a transient blip.
  * Lightning itself is a single stateful subcomponent (`LightningReceive`) since it
  * talks to the SW (form → create invoice → poll for the deposit landing), unlike the
  * two address tabs which just render already-known strings. Once available, it stays
@@ -33,29 +36,37 @@ export function Receive({
   const [tab, setTab] = useState<'arkade' | 'onchain' | 'lightning'>('arkade');
   const [copied, setCopied] = useState(false);
   const [lnInfo, setLnInfo] = useState<LnAvailability>({ status: 'loading' });
+  const [reloadKey, setReloadKey] = useState(0);
 
-  // Fetched once, up front, so we know whether to show the Lightning tab button at
-  // all — safe while locked (getLightningInfo needs no wallet). A Boltz-reachability
-  // failure is treated the same as "not available": fail closed, hide the tab.
+  // Fetched once on mount (re-run on Retry via `reloadKey`) — safe while locked
+  // (getLightningInfo needs no wallet). Three outcomes:
+  //   • available   → the tab shows the form.
+  //   • unsupported → this network has no Boltz endpoint; hide the tab entirely (and
+  //                   bounce off it back to Arkade if it was somehow already selected).
+  //   • error       → had an endpoint but the fee/limit fetch failed; keep the tab
+  //                   (with a Retry) rather than hiding it on a transient blip.
+  // While the fetch is pending the tab is already shown, with a "Loading fees…" spinner.
   useEffect(() => {
     let cancelled = false;
+    setLnInfo({ status: 'loading' });
     client
       .getLightningInfo()
       .then((info) => {
         if (cancelled) return;
-        setLnInfo(
-          info.available && info.limits && info.fees
-            ? { status: 'available', limits: info.limits, fees: info.fees }
-            : { status: 'unavailable' },
-        );
+        if (info.available && info.limits && info.fees) {
+          setLnInfo({ status: 'available', limits: info.limits, fees: info.fees });
+        } else {
+          setLnInfo({ status: 'unsupported' });
+          setTab((prev) => (prev === 'lightning' ? 'arkade' : prev));
+        }
       })
       .catch(() => {
-        if (!cancelled) setLnInfo({ status: 'unavailable' });
+        if (!cancelled) setLnInfo({ status: 'error' });
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reloadKey]);
 
   const isArkade = tab === 'arkade';
   const isLightning = tab === 'lightning';
@@ -100,7 +111,7 @@ export function Receive({
         >
           On-chain
         </button>
-        {lnInfo.status === 'available' && (
+        {lnInfo.status !== 'unsupported' && (
           <button
             className={isLightning ? 'active' : ''}
             role="tab"
@@ -119,6 +130,26 @@ export function Receive({
         <div hidden={!isLightning}>
           <LightningReceive limits={lnInfo.limits} fees={lnInfo.fees} onLocked={onLocked} />
         </div>
+      )}
+
+      {isLightning && lnInfo.status === 'loading' && (
+        <div className="ln-loading">
+          <span className="spinner" aria-hidden="true" />
+          <span>Loading fees…</span>
+        </div>
+      )}
+
+      {isLightning && lnInfo.status === 'error' && (
+        <>
+          <div className="error">
+            Couldn't load Lightning fees. Check your connection and try again.
+          </div>
+          <div className="btn-row">
+            <button className="btn-primary" onClick={() => setReloadKey((k) => k + 1)}>
+              Retry
+            </button>
+          </div>
+        </>
       )}
 
       {!isLightning && (
@@ -143,7 +174,8 @@ type LnLimits = { min: number; max: number };
 type LnFees = { percentage: number; minerFeesTotal: number };
 type LnAvailability =
   | { status: 'loading' }
-  | { status: 'unavailable' }
+  | { status: 'unsupported' }
+  | { status: 'error' }
   | { status: 'available'; limits: LnLimits; fees: LnFees };
 
 type LnInvoice = {
