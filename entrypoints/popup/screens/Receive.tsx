@@ -10,7 +10,10 @@ import { invoiceAmountForTarget, type LnReceiveStatus } from '@/src/lightning';
  * it; while that's pending or false, the popup behaves exactly like before — two tabs.
  * Lightning itself is a single stateful subcomponent (`LightningReceive`) since it
  * talks to the SW (form → create invoice → poll for the deposit landing), unlike the
- * two address tabs which just render already-known strings.
+ * two address tabs which just render already-known strings. Once available, it stays
+ * MOUNTED (hidden via the `hidden` attribute, not conditionally rendered) so a pending
+ * invoice survives the user switching to Arkade/On-chain and back — see the comment
+ * at its render site.
  *
  * ponytail: QR is a fast-follow — Copy ships now (no QR yet). Copy here is an explicit
  * user action on a receive address (public), distinct from the no-auto-clipboard rule
@@ -109,9 +112,16 @@ export function Receive({
         )}
       </div>
 
-      {isLightning && lnInfo.status === 'available' ? (
-        <LightningReceive limits={lnInfo.limits} fees={lnInfo.fees} onLocked={onLocked} />
-      ) : (
+      {/* Kept mounted (hidden, not unmounted) once Lightning is available: a pending
+          invoice's state — swapId, countdown, status poll — must survive the user
+          flipping to the other tabs and back, not get discarded and re-created. */}
+      {lnInfo.status === 'available' && (
+        <div hidden={!isLightning}>
+          <LightningReceive limits={lnInfo.limits} fees={lnInfo.fees} onLocked={onLocked} />
+        </div>
+      )}
+
+      {!isLightning && (
         <>
           <div className="addr-box">
             <div className="addr-caption">{caption}</div>
@@ -164,8 +174,12 @@ const LN_STATUS_TEXT: Record<LnReceiveStatus, string> = {
  * re-render and the ~2.5s status poll. Local expiry (countdown hits 0) only changes
  * what's SHOWN — polling keeps going until Boltz's own status turns terminal
  * (done/expired/failed), since that's the source of truth a late payment could still
- * land against. Both effects tear down on unmount (tab switch away, or Receive
- * closing), so nothing polls in the background once this screen isn't visible.
+ * land against. The parent keeps this component mounted (hidden, not unmounted) while
+ * the user is on another Receive tab, so these effects — and the countdown/poll state
+ * they drive — deliberately keep running in the background; that's the point, both to
+ * preserve the pending invoice and because the polling is what keeps the SW alive to
+ * auto-claim. Closing the whole Receive screen still unmounts everything (accepted for
+ * v1 — the SW-side swap and reconcile-on-unlock cover the rest).
  */
 function LightningReceive({
   limits,
