@@ -13,6 +13,7 @@ import {
 import type { NetworkName } from '@arkade-os/sdk';
 import { getNetwork as getStoredNetwork } from './storage';
 import { buildWallet, networkConfig } from './wallet';
+import type { LnReceiveStatus } from './lightning-utils';
 
 /**
  * Lightning deposits (Lightning → Arkade) via Boltz reverse swaps.
@@ -243,20 +244,6 @@ export async function createInvoice(
     // NOTE: r.preimage deliberately NOT returned — it stays SW-side (it's the claiming secret).
   };
 }
-
-/**
- * Pure helper for the popup's fee preview: the invoice (sender-side) amount
- * needed for ~`target` sats to land after Boltz fees. Lives here (not in the
- * popup) so it's unit-testable alongside the other pure functions.
- */
-export function invoiceAmountForTarget(
-  target: number,
-  fees: { percentage: number; minerFeesTotal: number },
-): number {
-  return Math.ceil((target + fees.minerFeesTotal) / (1 - fees.percentage / 100));
-}
-
-export type LnReceiveStatus = 'waiting' | 'claiming' | 'done' | 'expired' | 'failed';
 
 /**
  * Map a raw Boltz reverse-swap status to the popup's UI state.

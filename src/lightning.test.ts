@@ -85,12 +85,11 @@ import {
   hasPendingSwaps,
   reconcilePendingSwaps,
   createInvoice,
-  invoiceAmountForTarget,
   mapReverseStatus,
   getReceiveStatus,
   getLightningInfo,
-  type LnReceiveStatus,
 } from './lightning';
+import { invoiceAmountForTarget, type LnReceiveStatus } from './lightning-utils';
 
 const seed = new Uint8Array(32).fill(7);
 

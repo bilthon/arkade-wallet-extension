@@ -8,7 +8,7 @@ import type { Grant } from './permissions';
 import type { PendingRequest } from './approvals';
 import type { NetworkInfo, PublicKeyInfo } from './provider-api';
 import type { TxHistoryItem } from './wallet';
-import type { LnReceiveStatus } from './lightning';
+import type { LnReceiveStatus } from './lightning-utils';
 
 /**
  * Typed content <-> background protocol over the `browser.runtime` hop.

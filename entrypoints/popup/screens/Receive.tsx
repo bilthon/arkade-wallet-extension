@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { client, isLockedError, errorMessage } from '../client';
 import { formatSats, untilRelative } from '../format';
-import { invoiceAmountForTarget, type LnReceiveStatus } from '@/src/lightning';
+import { invoiceAmountForTarget, type LnReceiveStatus } from '@/src/lightning-utils';
 
 /**
  * Receive view. Arkade / On-chain / Lightning tabs (Arkade default), each with a
