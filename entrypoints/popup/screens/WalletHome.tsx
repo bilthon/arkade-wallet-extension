@@ -144,7 +144,14 @@ export function WalletHome({
       <Receive
         arkAddress={address}
         boardingAddress={boardingAddress}
-        onClose={() => setShowReceive(false)}
+        onClose={() => {
+          setShowReceive(false);
+          // A Lightning deposit may have landed while Receive was open — refetch so
+          // the home balance reflects it (the SW snapshot is already fresh; this is
+          // the same reloadKey pattern the recover/onboard/renew actions use).
+          setReloadKey((k) => k + 1);
+        }}
+        onLocked={onLocked}
       />
     );
   }
