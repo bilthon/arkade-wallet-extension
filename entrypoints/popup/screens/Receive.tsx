@@ -328,7 +328,23 @@ function LightningReceive({
         )}
 
         {shown === 'done' ? (
-          <LightningSuccess sats={invoice.receiveAmount} />
+          <>
+            <LightningSuccess sats={invoice.receiveAmount} />
+            <div className="btn-row">
+              {/* The deposit is finished — return to a FRESH form (amount cleared),
+                  unlike the expired/failed retry buttons, which keep the amount
+                  because there the user still wants that same deposit. */}
+              <button
+                className="btn-primary"
+                onClick={() => {
+                  setAmount('');
+                  resetToForm();
+                }}
+              >
+                Done
+              </button>
+            </div>
+          </>
         ) : (
           <div
             className={shown === 'claiming' ? 'row-sub ln-pending' : 'row-sub'}
