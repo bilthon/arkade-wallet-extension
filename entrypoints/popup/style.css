@@ -181,6 +181,35 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .addr-caption { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
 .addr-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
 
+/* Lightning receive — 'claiming' pending line (reuses the .skeleton pulse below) and
+   the 'done' success checkmark (pure CSS, stroke-draw, runs once via forwards fill). */
+.ln-pending { animation: pulse 1.3s ease-in-out infinite; }
+
+.ln-success { text-align: center; padding: 16px 0; }
+.ln-success-check { display: block; margin: 0 auto 10px; }
+.ln-success-circle {
+  stroke: var(--accent);
+  stroke-width: 3;
+  stroke-dasharray: 151;
+  stroke-dashoffset: 151;
+  animation: ln-success-circle 0.5s ease-out forwards;
+}
+.ln-success-mark {
+  stroke: var(--accent);
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 36;
+  stroke-dashoffset: 36;
+  animation: ln-success-mark 0.35s 0.4s ease-out forwards;
+}
+.ln-success-text { font-size: 15px; font-weight: 600; }
+@keyframes ln-success-circle { to { stroke-dashoffset: 0; } }
+@keyframes ln-success-mark { to { stroke-dashoffset: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .ln-success-circle, .ln-success-mark { animation: none; stroke-dashoffset: 0; }
+}
+
 /* Skeletons */
 .skeleton { background: var(--skeleton); border-radius: 6px; animation: pulse 1.3s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }

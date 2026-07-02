@@ -174,7 +174,13 @@ const LN_STATUS_TEXT: Record<LnReceiveStatus, string> = {
  * re-render and the ~2.5s status poll. Local expiry (countdown hits 0) only changes
  * what's SHOWN — polling keeps going until Boltz's own status turns terminal
  * (done/expired/failed), since that's the source of truth a late payment could still
- * land against. The parent keeps this component mounted (hidden, not unmounted) while
+ * land against. The invoice-stage render branches on that derived `shown` status:
+ * 'waiting' is the only state where the invoice is still payable, so it's the only one
+ * showing the invoice box/Copy button/countdown; 'claiming' drops those (the invoice is
+ * spent) and shows a pending status line; 'done' replaces the status line with
+ * `LightningSuccess`, a one-shot checkmark animation, and drops the keep-window-open
+ * caption; 'expired'/'failed' also drop the now-dead invoice and offer a reset button.
+ * The parent keeps this component mounted (hidden, not unmounted) while
  * the user is on another Receive tab, so these effects — and the countdown/poll state
  * they drive — deliberately keep running in the background; that's the point, both to
  * preserve the pending invoice and because the polling is what keeps the SW alive to
@@ -294,30 +300,43 @@ function LightningReceive({
     const locallyExpired = invoice.expiresAt - Date.now() <= 0;
     const shown: LnReceiveStatus = status === 'waiting' && locallyExpired ? 'expired' : status;
 
+    // The invoice itself is only relevant while it's still payable. Once the sender
+    // has paid (claiming) or the swap has reached a terminal state, it's spent/dead —
+    // showing it is clutter, so the box, Copy button, and countdown drop away.
     return (
       <>
-        <div className="addr-box">
-          <div className="addr-caption">
-            Invoice for {formatSats(invoice.invoiceAmount)} sats — you'll receive{' '}
-            {formatSats(invoice.receiveAmount)} sats
-          </div>
-          <div className="addr-mono">{invoice.invoice}</div>
-        </div>
-
-        <div className="btn-row">
-          <button className="btn-primary" onClick={copyInvoice}>
-            {copied ? 'Copied' : 'Copy invoice'}
-          </button>
-        </div>
-
         {shown === 'waiting' && (
-          <div className="row-sub" style={{ marginTop: 8 }}>
-            Expires in {untilRelative(invoice.expiresAt)}
+          <>
+            <div className="addr-box">
+              <div className="addr-caption">
+                Invoice for {formatSats(invoice.invoiceAmount)} sats — you'll receive{' '}
+                {formatSats(invoice.receiveAmount)} sats
+              </div>
+              <div className="addr-mono">{invoice.invoice}</div>
+            </div>
+
+            <div className="btn-row">
+              <button className="btn-primary" onClick={copyInvoice}>
+                {copied ? 'Copied' : 'Copy invoice'}
+              </button>
+            </div>
+
+            <div className="row-sub" style={{ marginTop: 8 }}>
+              Expires in {untilRelative(invoice.expiresAt)}
+            </div>
+          </>
+        )}
+
+        {shown === 'done' ? (
+          <LightningSuccess sats={invoice.receiveAmount} />
+        ) : (
+          <div
+            className={shown === 'claiming' ? 'row-sub ln-pending' : 'row-sub'}
+            style={{ marginTop: shown === 'waiting' ? 4 : 0 }}
+          >
+            {LN_STATUS_TEXT[shown]}
           </div>
         )}
-        <div className="row-sub" style={{ marginTop: 4 }}>
-          {LN_STATUS_TEXT[shown]}
-        </div>
 
         {(shown === 'expired' || shown === 'failed') && (
           <div className="btn-row">
@@ -327,10 +346,14 @@ function LightningReceive({
           </div>
         )}
 
-        <p className="renewal-note" style={{ marginTop: 8 }}>
-          Keep this window open until the payment arrives. If you close it, the deposit
-          completes the next time you unlock.
-        </p>
+        {/* Only while a payment can still arrive — on expired/failed nothing is
+            coming, so telling the user to keep waiting would be wrong. */}
+        {(shown === 'waiting' || shown === 'claiming') && (
+          <p className="renewal-note" style={{ marginTop: 8 }}>
+            Keep this window open until the payment arrives. If you close it, the
+            deposit completes the next time you unlock.
+          </p>
+        )}
       </>
     );
   }
@@ -362,5 +385,31 @@ function LightningReceive({
         </button>
       </div>
     </>
+  );
+}
+
+/**
+ * Success state for a completed Lightning deposit — a pure-CSS checkmark draw (styles
+ * in style.css under `.ln-success*`; reduced-motion shows the final frame statically).
+ * Plays once: it only enters the tree the first render `shown` becomes 'done', and
+ * since `LightningReceive` stays mounted while the user tabs away and back (see the
+ * doc comment above), toggling the parent's `hidden` attribute later doesn't remount
+ * it or replay the animation.
+ */
+function LightningSuccess({ sats }: { sats: number }) {
+  return (
+    <div className="ln-success">
+      <svg
+        className="ln-success-check"
+        viewBox="0 0 52 52"
+        width="56"
+        height="56"
+        aria-hidden="true"
+      >
+        <circle className="ln-success-circle" cx="26" cy="26" r="24" fill="none" />
+        <path className="ln-success-mark" fill="none" d="M14 27l7 7 16-16" />
+      </svg>
+      <div className="ln-success-text">Received {formatSats(sats)} sats</div>
+    </div>
   );
 }
