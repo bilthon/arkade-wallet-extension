@@ -322,16 +322,21 @@ export async function getReceiveStatus(swapId: string): Promise<LnReceiveStatus>
 // ─── Lightning payments (submarine swap: Arkade → Lightning) ─────────────────
 
 /**
- * Decode + price a BOLT11 invoice for the pay-confirm screen. Safe to call
- * while LOCKED (bare provider, no wallet — parity with `getLightningInfo`).
+ * Decode and price a BOLT11 invoice for the pay-confirm screen.
+ * Safe to call while LOCKED, since it only needs the bare provider
+ * (same as getLightningInfo).
  *
- * Rejections here are the user-facing gate: amountless invoices (Boltz can't
- * take them — the invoice amount is the only thing binding what Boltz pays on
- * Lightning to what it may claim from the lockup) and Boltz's min/max, which
- * `BoltzSwapProvider.getLimits` reads from the SUBMARINE pair, apply to the
- * invoice amount. `totalSats` is the estimated debit (invoice + Boltz fee);
- * `payInvoice` re-checks Boltz's actual `expectedAmount` against it before
- * funding, so the user never pays meaningfully more than this quote.
+ * We reject two kinds of invoices here, before the user ever sees a price:
+ *   1. Amountless invoices. Boltz can't accept these because the invoice
+ *      amount is what ties what Boltz pays out on Lightning to what it's
+ *      allowed to claim from the lockup.
+ *   2. Invoices outside Boltz's min/max limits (from BoltzSwapProvider.getLimits,
+ *      based on the SUBMARINE pair).
+ *
+ * totalSats is our estimate of what the user will be debited (invoice amount
+ * + Boltz fee). It's just an estimate: payInvoice double-checks Boltz's real
+ * expectedAmount against it before actually funding, so the user can't end up
+ * paying more than this quote said.
  */
 export async function getPayQuote({ invoice }: { invoice: string }): Promise<{
   amountSats: number;
@@ -373,10 +378,14 @@ export async function getPayQuote({ invoice }: { invoice: string }): Promise<{
 }
 
 /**
- * Slack allowed between the quoted total the user confirmed and Boltz's actual
- * `expectedAmount`: absorbs rounding differences in Boltz's fee arithmetic
- * without letting a real fee change (or a misbehaving Boltz) silently inflate
- * the debit. Checked BEFORE any funds move.
+ * How many extra sats we'll silently accept when Boltz's actual `expectedAmount`
+ * comes in above the total the user confirmed.
+ *
+ * We do not want to absorb a genuine overcharge, though. The allowance is the
+ * larger of two bounds:
+ * 1. A flat 10 sats, so tiny invoices still tolerate a few sats of rounding.
+ * 2. 0.1% of the invoice, so a large payment can't be inflated by a meaningful
+ *    amount before we reject it.
  */
 export function payTotalSlack(amountSats: number): number {
   return Math.max(10, Math.ceil(amountSats * 0.001));
@@ -429,9 +438,9 @@ export async function payInvoice(
   // Persisted by the library before we see it, and registered with the running
   // SwapManager — so even if everything after this line dies, reconciliation
   // knows about the swap (an unfunded one is harmless: it just expires).
-  const pending = await s.createSubmarineSwap({ invoice });
-  const totalSats = pending.response.expectedAmount;
-  if (!pending.response.address || !totalSats) {
+  const pendingSwap = await s.createSubmarineSwap({ invoice });
+  const totalSats = pendingSwap.response.expectedAmount;
+  if (!pendingSwap.response.address || !totalSats) {
     throw new Error('The swap service returned an unusable swap. No funds were taken.');
   }
   if (totalSats > maxTotalSats + payTotalSlack(decoded.amountSats)) {
@@ -444,7 +453,7 @@ export async function payInvoice(
   const wallet = await buildWallet(seed);
   let txid: string;
   try {
-    txid = await wallet.send({ address: pending.response.address, amount: totalSats });
+    txid = await wallet.send({ address: pendingSwap.response.address, amount: totalSats });
   } catch (err) {
     // Same opaque-message translation as wallet.ts's send path. The unfunded
     // swap left behind expires harmlessly.
@@ -456,7 +465,7 @@ export async function payInvoice(
     throw err;
   }
 
-  return { swapId: pending.id, txid, amountSats: decoded.amountSats, totalSats };
+  return { swapId: pendingSwap.id, txid, amountSats: decoded.amountSats, totalSats };
 }
 
 /**
