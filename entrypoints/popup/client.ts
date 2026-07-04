@@ -38,6 +38,15 @@ export const client = {
     sendMessage('createLightningInvoice', { amount }),
   getLightningReceiveStatus: (swapId: string) =>
     sendMessage('getLightningReceiveStatus', { swapId }),
+  // Lightning pay (submarine swap via Boltz): quote (amount + fees from the
+  // invoice), pay (maxTotalSats = the quoted total the user confirmed), and
+  // status polling.
+  getLightningPayQuote: (invoice: string) =>
+    sendMessage('getLightningPayQuote', { invoice }),
+  payLightningInvoice: (invoice: string, maxTotalSats: number) =>
+    sendMessage('payLightningInvoice', { invoice, maxTotalSats }),
+  getLightningPayStatus: (swapId: string) =>
+    sendMessage('getLightningPayStatus', { swapId }),
   // Connected sites: list + revoke per-origin web app grants.
   listConnectedSites: () => sendMessage('listConnectedSites', undefined),
   revokeConnectedSite: (origin: string) =>
