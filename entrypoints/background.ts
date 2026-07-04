@@ -33,6 +33,14 @@ import {
   getRenewalWarning,
   RENEW_MARGIN_MS,
 } from '@/src/renewal';
+import {
+  disposeSwaps,
+  hasPendingSwaps,
+  reconcilePendingSwaps,
+  createInvoice,
+  getLightningInfo,
+  getReceiveStatus,
+} from '@/src/lightning';
 import { listGrants } from '@/src/permissions';
 import { getPendingRequest } from '@/src/approvals';
 import {
@@ -68,6 +76,8 @@ export default defineBackground(() => {
   // Reads need the wallet unlocked, so a lock effectively disconnects them.
   onLock(() => {
     void emitToAllConnected('disconnect');
+    // The Lightning swap runtime must not outlive the seed it was built from.
+    void disposeSwaps();
   });
 
   // ── Messaging smoke-test (proves the provider→content→background chain) ──────
@@ -91,6 +101,19 @@ export default defineBackground(() => {
 
   onMessage('unlock', async ({ data }) => {
     await unlock(data.password);
+    // Lightning reconcile is best-effort recovery, not part of unlocking itself —
+    // a swap-repo read failure must never stop a correct password from unlocking.
+    try {
+      const network = await getStoredNetwork();
+      if (await hasPendingSwaps(network)) {
+        const seed = getUnlockedSeed();
+        // Fire-and-forget: refreshing statuses (WebSocket + manager start) must not
+        // delay the unlock response.
+        if (seed) void reconcilePendingSwaps(seed);
+      }
+    } catch {
+      /* best-effort — an unlock must still report success */
+    }
     return { ok: true as const };
   });
 
@@ -106,6 +129,8 @@ export default defineBackground(() => {
 
   onMessage('switchNetwork', async ({ data }) => {
     await switchNetwork(data.network, data.password);
+    // The old network's swap repo + Boltz endpoint are now stale.
+    void disposeSwaps();
     // Operator network changed → notify connected sites so they don't keep acting on the
     // old network (cached address/PSBTs would target the wrong operator).
     await emitToAllConnected('networkChanged', { network: data.network });
@@ -199,6 +224,21 @@ export default defineBackground(() => {
 
   onMessage('getTransactionHistory', async () => getTransactionHistory(await requireWallet()));
 
+  // ── Lightning receive (reverse swap via Boltz) ─────────────────────────────
+  // Safe while locked — reads Boltz's public fee/limit endpoints directly.
+  onMessage('getLightningInfo', async () => getLightningInfo());
+
+  // Unlock-gated: creating the swap runtime needs the wallet's claim key.
+  onMessage('createLightningInvoice', async ({ data }) => {
+    const seed = await requireSeed();
+    return createInvoice(seed, data);
+  });
+
+  // Read-only poll; no unlock gate — works even before the singleton exists.
+  onMessage('getLightningReceiveStatus', async ({ data }) => {
+    return { status: await getReceiveStatus(data.swapId) };
+  });
+
   // ── Provider surface ───────────────────────────────────────────────────────
   //
   // The ONLY handlers that take an untrusted origin. Each derives the origin from
@@ -269,13 +309,18 @@ export default defineBackground(() => {
 });
 
 /**
- * Build a `Wallet` from the in-memory seed, or throw if locked. Re-arms auto-lock
- * on each sensitive read so an active session keeps the idle window fresh. Throwing
- * 'LOCKED' lets the popup route to the unlock screen rather than show a broken read.
+ * The in-memory seed, or throw if locked. Re-arms auto-lock on each sensitive
+ * read so an active session keeps the idle window fresh. Throwing 'LOCKED' lets
+ * the popup route to the unlock screen rather than show a broken read.
  */
-async function requireWallet() {
+async function requireSeed(): Promise<Uint8Array> {
   const seed = getUnlockedSeed();
   if (!seed || !isUnlocked()) throw new Error('LOCKED');
   await armAutoLock();
-  return buildWallet(seed);
+  return seed;
+}
+
+/** Build a `Wallet` from the in-memory seed, or throw if locked (see {@link requireSeed}). */
+async function requireWallet() {
+  return buildWallet(await requireSeed());
 }

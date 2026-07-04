@@ -31,6 +31,13 @@ export const client = {
   onboardNow: () => sendMessage('onboardNow', undefined),
   getRenewalWarning: () => sendMessage('getRenewalWarning', undefined),
   getTransactionHistory: () => sendMessage('getTransactionHistory', undefined),
+  // Lightning receive (reverse swap via Boltz): availability/limits, invoice
+  // creation (amount = invoice/sender-side sats), and status polling.
+  getLightningInfo: () => sendMessage('getLightningInfo', undefined),
+  createLightningInvoice: (amount: number) =>
+    sendMessage('createLightningInvoice', { amount }),
+  getLightningReceiveStatus: (swapId: string) =>
+    sendMessage('getLightningReceiveStatus', { swapId }),
   // Connected sites: list + revoke per-origin web app grants.
   listConnectedSites: () => sendMessage('listConnectedSites', undefined),
   revokeConnectedSite: (origin: string) =>

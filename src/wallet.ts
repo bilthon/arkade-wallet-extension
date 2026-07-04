@@ -46,11 +46,13 @@ export interface NetworkConfig {
   esploraUrl: string;
   /** BIP86 coin type: mainnet (0') vs everything else (1'). Drives derivation. */
   isMainnet: boolean;
+  /** Boltz swap API for this network; absent → Lightning UI hidden. */
+  boltzApiUrl?: string;
 }
 
 /**
- * Endpoints per network. Switched together — operator + esplora.
- * Boltz/delegate URLs are intentionally absent here; this is read-only.
+ * Endpoints per network. Switched together — operator + esplora (+ Boltz where available).
+ * Delegate URLs are intentionally absent here; this is read-only.
  *
  * ponytail: regtest points at nigiri's local services. arkd on :7070, electrs REST
  * on :30000 — verified reachable from the SW (NOT chopsticks :3000, which is not the REST base).
@@ -60,26 +62,31 @@ export const NETWORK_CONFIG: Record<NetworkName, NetworkConfig> = {
     arkServerUrl: 'http://localhost:7070',
     esploraUrl: 'http://localhost:30000',
     isMainnet: false,
+    boltzApiUrl: 'http://localhost:9069',
   },
   mutinynet: {
     arkServerUrl: 'https://mutinynet.arkade.sh',
     esploraUrl: 'https://mutinynet.com/api',
     isMainnet: false,
+    boltzApiUrl: 'https://api.boltz.mutinynet.arkade.sh',
   },
   signet: {
     arkServerUrl: 'https://signet.arkade.sh',
     esploraUrl: 'https://mempool.space/signet/api',
     isMainnet: false,
+    boltzApiUrl: 'https://api.boltz.signet.arkade.sh',
   },
   testnet: {
     arkServerUrl: 'https://testnet.arkade.sh',
     esploraUrl: 'https://mempool.space/testnet/api',
     isMainnet: false,
+    // No known Boltz deployment for this network — Lightning tab stays hidden.
   },
   bitcoin: {
     arkServerUrl: 'https://arkade.computer',
     esploraUrl: 'https://mempool.space/api',
     isMainnet: true,
+    boltzApiUrl: 'https://api.ark.boltz.exchange',
   },
 };
 
