@@ -47,7 +47,13 @@ vi.mock('./wallet', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./wallet')>();
   return {
     ...actual,
-    buildWallet: vi.fn(async () => ({ fakeWallet: true, send: state.walletSend })),
+    buildWallet: vi.fn(async () => ({
+      fakeWallet: true,
+      send: state.walletSend,
+      arkProvider: {
+        getInfo: async () => ({ network: 'regtest', signerPubkey: '02'.padEnd(66, 'a') }),
+      },
+    })),
   };
 });
 
@@ -153,8 +159,22 @@ function fakeSwapInstance(overrides: Record<string, unknown> = {}) {
       id: 'sub-1',
       type: 'submarine',
       status: 'invoice.set',
-      response: { address: 'tark1lockup', expectedAmount: 250_350 },
+      request: { invoice: INVOICE_250K, refundPublicKey: '03'.padEnd(66, 'b') },
+      response: {
+        address: 'tark1lockup',
+        expectedAmount: 250_350,
+        claimPublicKey: '02'.padEnd(66, 'c'),
+        timeoutBlockHeights: {
+          refund: 0,
+          unilateralClaim: 0,
+          unilateralRefund: 0,
+          unilateralRefundWithoutReceiver: 0,
+        },
+      },
     })),
+    // The reconstructed VHTLC matches Boltz's lockup address on the happy path,
+    // so the address guard passes. Tests that want a mismatch override this.
+    createVHTLCScript: vi.fn(() => ({ vhtlcAddress: 'tark1lockup' })),
     recoverAllSubmarineFunds: vi.fn(async () => []),
     refreshSwapsStatus: vi.fn(async () => {}),
     ...overrides,
@@ -627,7 +647,18 @@ describe('payInvoice', () => {
         id: 'sub-1',
         type: 'submarine',
         status: 'invoice.set',
-        response: { address: 'tark1lockup', expectedAmount: 300_000 },
+        request: { invoice: INVOICE_250K, refundPublicKey: '03'.padEnd(66, 'b') },
+        response: {
+          address: 'tark1lockup',
+          expectedAmount: 300_000,
+          claimPublicKey: '02'.padEnd(66, 'c'),
+          timeoutBlockHeights: {
+            refund: 0,
+            unilateralClaim: 0,
+            unilateralRefund: 0,
+            unilateralRefundWithoutReceiver: 0,
+          },
+        },
       })),
     });
     state.createArkadeSwaps.mockResolvedValue(instance);
@@ -637,6 +668,19 @@ describe('payInvoice', () => {
     await expect(
       payInvoice(seed, { invoice: INVOICE_250K, maxTotalSats: 250_350 }),
     ).rejects.toThrow(/more than the quoted total/i);
+    expect(state.walletSend).not.toHaveBeenCalled();
+  });
+
+  it('aborts BEFORE funding when the reconstructed VHTLC address does not match', async () => {
+    const instance = fakeSwapInstance({
+      // Boltz returns a lockup address that does not match the VHTLC we reconstruct.
+      createVHTLCScript: vi.fn(() => ({ vhtlcAddress: 'tark1DIFFERENT' })),
+    });
+    state.createArkadeSwaps.mockResolvedValue(instance);
+
+    await expect(
+      payInvoice(seed, { invoice: INVOICE_250K, maxTotalSats: 250_350 }),
+    ).rejects.toThrow(/could not verify/i);
     expect(state.walletSend).not.toHaveBeenCalled();
   });
 
@@ -650,6 +694,16 @@ describe('payInvoice', () => {
       address: 'tark1lockup',
       amount: 250_350,
     });
+    // The reconstruction must get each pubkey in its correct VHTLC role. The mock ignores its
+    // arguments, so without this a transposed receiver/sender/server key would still pass every
+    // test while quietly bricking the pay path.
+    expect(instance.createVHTLCScript).toHaveBeenCalledWith(
+      expect.objectContaining({
+        receiverPubkey: '02'.padEnd(66, 'c'), // Boltz's claim key
+        senderPubkey: '03'.padEnd(66, 'b'), // our refund key
+        serverPubkey: '02'.padEnd(66, 'a'), // Arkade signer
+      }),
+    );
     expect(result).toEqual({
       swapId: 'sub-1',
       txid: 'ark-funding-txid',
@@ -664,7 +718,18 @@ describe('payInvoice', () => {
         id: 'sub-1',
         type: 'submarine',
         status: 'invoice.set',
-        response: { address: 'tark1lockup', expectedAmount: 250_352 },
+        request: { invoice: INVOICE_250K, refundPublicKey: '03'.padEnd(66, 'b') },
+        response: {
+          address: 'tark1lockup',
+          expectedAmount: 250_352,
+          claimPublicKey: '02'.padEnd(66, 'c'),
+          timeoutBlockHeights: {
+            refund: 0,
+            unilateralClaim: 0,
+            unilateralRefund: 0,
+            unilateralRefundWithoutReceiver: 0,
+          },
+        },
       })),
     });
     state.createArkadeSwaps.mockResolvedValue(instance);

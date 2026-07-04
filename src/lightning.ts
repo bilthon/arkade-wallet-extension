@@ -19,6 +19,7 @@ import {
   type BoltzSwapStatus,
 } from '@arkade-os/boltz-swap';
 import type { NetworkName } from '@arkade-os/sdk';
+import { hex } from '@scure/base';
 import { getNetwork as getStoredNetwork } from './storage';
 import { buildWallet, networkConfig } from './wallet';
 import { submarineFeeForAmount, type LnPayStatus, type LnReceiveStatus } from './lightning-utils';
@@ -451,6 +452,32 @@ export async function payInvoice(
   }
 
   const wallet = await buildWallet(seed);
+
+  // Verify the lockup address before we fund it. Boltz returns a VHTLC address for us to send
+  // to, but nothing so far proves that address commits to OUR refund key. If it does not, the
+  // send is a total loss: the refund path only exists because the VHTLC's refund leaf carries
+  // our key, so a wrong address has no way back. We reconstruct the VHTLC from the swap fields
+  // and require the address to match, the same pre-funding check the library already runs for
+  // chain swaps (verifyChainSwap). This aborts before any funds move.
+  const arkInfo = await wallet.arkProvider.getInfo();
+  const { claimPublicKey, timeoutBlockHeights } = pendingSwap.response;
+  if (!claimPublicKey || !timeoutBlockHeights) {
+    throw new Error('The swap service returned an unusable swap. No funds were taken.');
+  }
+  const { vhtlcAddress } = s.createVHTLCScript({
+    network: arkInfo.network,
+    preimageHash: hex.decode(decoded.paymentHash),
+    receiverPubkey: claimPublicKey, // Boltz's claim key
+    senderPubkey: pendingSwap.request.refundPublicKey, // our refund key, the only way back
+    serverPubkey: arkInfo.signerPubkey, // current Arkade signer, fresh swap so no rotation
+    timeoutBlockHeights,
+  });
+  if (vhtlcAddress !== pendingSwap.response.address) {
+    throw new Error(
+      'The swap service returned a lockup address we could not verify. No funds were taken.',
+    );
+  }
+
   let txid: string;
   try {
     txid = await wallet.send({ address: pendingSwap.response.address, amount: totalSats });
