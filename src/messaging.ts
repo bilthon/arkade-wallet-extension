@@ -8,7 +8,7 @@ import type { Grant } from './permissions';
 import type { PendingRequest } from './approvals';
 import type { NetworkInfo, PublicKeyInfo } from './provider-api';
 import type { TxHistoryItem } from './wallet';
-import type { LnReceiveStatus } from './lightning-utils';
+import type { LnPayStatus, LnReceiveStatus } from './lightning-utils';
 
 /**
  * Typed content <-> background protocol over the `browser.runtime` hop.
@@ -133,6 +133,34 @@ export interface ProtocolMap {
   };
   /** Poll one pending deposit. Read-only. */
   getLightningReceiveStatus(data: { swapId: string }): { status: LnReceiveStatus };
+
+  // ─── Lightning pay (submarine swap via Boltz) ───────────────────────────────
+  /**
+   * Decode + price a BOLT11 invoice for the confirm screen. Safe while locked
+   * (public Boltz endpoints only). Rejects amountless/malformed/out-of-limits
+   * invoices with the user-facing message.
+   */
+  getLightningPayQuote(data: { invoice: string }): {
+    amountSats: number;
+    feeSats: number;
+    totalSats: number;
+    description: string;
+  };
+  /**
+   * Pay a BOLT11 invoice. Unlock-gated (funds the swap's VHTLC with a signed
+   * Arkade send). `maxTotalSats` echoes the quoted total the user confirmed —
+   * the SW aborts BEFORE funding if Boltz asks for more. Resolves once the
+   * funding tx is accepted; the payment's outcome is then polled via
+   * `getLightningPayStatus`.
+   */
+  payLightningInvoice(data: { invoice: string; maxTotalSats: number }): {
+    swapId: string;
+    txid: string;
+    amountSats: number;
+    totalSats: number;
+  };
+  /** Poll one pending payment. Read-only. */
+  getLightningPayStatus(data: { swapId: string }): { status: LnPayStatus };
 
   // ─── Provider surface (origin + grant gated) ───────────────────────────────
   //

@@ -14,6 +14,14 @@
 export type LnReceiveStatus = 'waiting' | 'claiming' | 'done' | 'expired' | 'failed';
 
 /**
+ * UI-facing status for a Lightning (submarine-swap) payment. No 'failed' state:
+ * every real failure after funding becomes refundable, so it surfaces as
+ * 'refund-pending' (auto-refund in flight) and then 'refunded' (funds back).
+ * Failures BEFORE funding throw straight back to the popup — nothing to poll.
+ */
+export type LnPayStatus = 'sending' | 'paid' | 'refund-pending' | 'refunded';
+
+/**
  * Fee preview helper: the invoice (sender-side) amount needed for ~`target` sats to
  * land after Boltz fees. Unit-tested in `lightning.test.ts`.
  */
@@ -22,4 +30,18 @@ export function invoiceAmountForTarget(
   fees: { percentage: number; minerFeesTotal: number },
 ): number {
   return Math.ceil((target + fees.minerFeesTotal) / (1 - fees.percentage / 100));
+}
+
+/**
+ * Submarine-swap fee estimate for paying an `amountSats` invoice: Boltz's
+ * percentage is charged on the INVOICE amount, plus the flat miner fee for
+ * their claim tx. What actually gets debited is Boltz's `expectedAmount`
+ * (amount + this fee); the SW re-checks that against the user-confirmed total
+ * before funding. Unit-tested in `lightning.test.ts`.
+ */
+export function submarineFeeForAmount(
+  amountSats: number,
+  fees: { percentage: number; minerFees: number },
+): number {
+  return Math.ceil((amountSats * fees.percentage) / 100) + fees.minerFees;
 }

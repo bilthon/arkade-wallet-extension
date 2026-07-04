@@ -40,6 +40,9 @@ import {
   createInvoice,
   getLightningInfo,
   getReceiveStatus,
+  getPayQuote,
+  payInvoice,
+  getPayStatus,
 } from '@/src/lightning';
 import { listGrants } from '@/src/permissions';
 import { getPendingRequest } from '@/src/approvals';
@@ -237,6 +240,21 @@ export default defineBackground(() => {
   // Read-only poll; no unlock gate — works even before the singleton exists.
   onMessage('getLightningReceiveStatus', async ({ data }) => {
     return { status: await getReceiveStatus(data.swapId) };
+  });
+
+  // ── Lightning pay (submarine swap via Boltz) ───────────────────────────────
+  // Safe while locked — decodes the invoice and reads Boltz's public fee/limit endpoints.
+  onMessage('getLightningPayQuote', async ({ data }) => getPayQuote(data));
+
+  // Unlock-gated: funding the swap's VHTLC signs an Arkade send.
+  onMessage('payLightningInvoice', async ({ data }) => {
+    const seed = await requireSeed();
+    return payInvoice(seed, data);
+  });
+
+  // Read-only poll; no unlock gate — works even before the singleton exists.
+  onMessage('getLightningPayStatus', async ({ data }) => {
+    return { status: await getPayStatus(data.swapId) };
   });
 
   // ── Provider surface ───────────────────────────────────────────────────────

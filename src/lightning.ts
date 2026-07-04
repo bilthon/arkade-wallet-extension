@@ -2,21 +2,30 @@ import {
   ArkadeSwaps,
   BoltzSwapProvider,
   IndexedDbSwapRepository,
+  decodeInvoice,
+  hasSubmarineStatusReached,
   isPendingReverseSwap,
+  isPendingSubmarineSwap,
   isReverseClaimableStatus,
   isReverseFailedStatus,
   isReversePendingStatus,
   isReverseSuccessStatus,
+  isSubmarineFinalStatus,
+  isSubmarinePendingStatus,
+  isSubmarineRefundableStatus,
+  isSubmarineSwapRefundable,
   type BoltzReverseSwap,
+  type BoltzSubmarineSwap,
   type BoltzSwapStatus,
 } from '@arkade-os/boltz-swap';
 import type { NetworkName } from '@arkade-os/sdk';
 import { getNetwork as getStoredNetwork } from './storage';
 import { buildWallet, networkConfig } from './wallet';
-import type { LnReceiveStatus } from './lightning-utils';
+import { submarineFeeForAmount, type LnPayStatus, type LnReceiveStatus } from './lightning-utils';
 
 /**
- * Lightning deposits (Lightning → Arkade) via Boltz reverse swaps.
+ * Lightning deposits (Lightning → Arkade) via Boltz reverse swaps, and
+ * Lightning payments (Arkade → Lightning) via Boltz submarine swaps.
  *
  * `ArkadeSwaps` starts a `SwapManager` (WebSocket + failsafe polling) that
  * auto-claims a reverse swap's VHTLC the moment Boltz funds it, so — unlike
@@ -135,8 +144,12 @@ export async function disposeSwaps(): Promise<void> {
 }
 
 /**
- * Cheap unlock-time probe: any pending reverse swaps in the repo? (No wallet,
- * no WebSocket — just an IndexedDB read.)
+ * Cheap unlock-time probe: any swaps in the repo still needing work? (No
+ * wallet, no WebSocket — just an IndexedDB read.) Pending reverse swaps need
+ * claiming; pending submarine swaps need monitoring; failed-but-unrefunded
+ * submarine swaps (`isSubmarineSwapRefundable`) need the refund sweep in
+ * `reconcilePendingSwaps` — without them here, a payment that failed right
+ * before the SW died would never get its funds back.
  *
  * Deliberately does NOT dispose the `IndexedDbSwapRepository` it creates.
  * `@arkade-os/sdk`'s `openDatabase`/`closeDatabase` cache IDBDatabase
@@ -151,11 +164,29 @@ export async function disposeSwaps(): Promise<void> {
 export async function hasPendingSwaps(network: NetworkName): Promise<boolean> {
   const repo = new IndexedDbSwapRepository(repoName(network));
   const all = await repo.getAllSwaps();
-  return all.some((s) => isPendingReverseSwap(s) && isReversePendingStatus(s.status));
+  return all.some(
+    (s) =>
+      (isPendingReverseSwap(s) && isReversePendingStatus(s.status)) ||
+      (isPendingSubmarineSwap(s) &&
+        (isSubmarinePendingStatus(s.status) || isSubmarineSwapRefundable(s))),
+  );
 }
 
 /**
- * Unlock-time reconciliation: refresh statuses; the manager auto-claims anything claimable.
+ * Unlock-time reconciliation: refresh statuses; the manager auto-claims anything
+ * claimable and auto-refunds anything that FAILS while it's running.
+ *
+ * The one case the manager can't cover is a submarine swap whose failure status
+ * is already FINAL at startup (`invoice.failedToPay` / `swap.expired` persisted,
+ * refund not yet done — e.g. the SW died mid-refund): `SwapManager.start` drops
+ * final-status swaps from monitoring, so `resumeActionableSwaps` never sees
+ * them. Sweep exactly those here via `recoverAllSubmarineFunds` (per-swap error
+ * isolation built in). The snapshot is read BEFORE `refreshSwapsStatus` on
+ * purpose: a swap whose failure only ARRIVES with the refresh is still
+ * monitored, and refunding it is the manager's job — the pre-refresh snapshot
+ * keeps the two paths from racing over the same swap. Non-final refundable
+ * statuses (`transaction.lockupFailed`) stay with the manager too, hence the
+ * `isSubmarineFinalStatus` filter.
  *
  * Called fire-and-forget (`void reconcilePendingSwaps(seed)`) from the unlock
  * handler, so a rejection here has no caller watching for it. A lock racing
@@ -165,7 +196,14 @@ export async function hasPendingSwaps(network: NetworkName): Promise<boolean> {
  */
 export async function reconcilePendingSwaps(seed: Uint8Array): Promise<void> {
   try {
+    const network = await getStoredNetwork();
+    const repo = new IndexedDbSwapRepository(repoName(network)); // never disposed — see hasPendingSwaps
+    const stranded = (await repo.getAllSwaps()).filter(
+      (s): s is BoltzSubmarineSwap =>
+        isSubmarineSwapRefundable(s) && isSubmarineFinalStatus(s.status),
+    );
     const s = await getSwaps(seed); // starting the manager already loads pending swaps
+    if (stranded.length > 0) await s.recoverAllSubmarineFunds(stranded);
     await s.refreshSwapsStatus(); // catch swaps that settled while we were closed
   } catch {
     /* best-effort recovery — nothing is watching this fire-and-forget call */
@@ -279,4 +317,180 @@ export async function getReceiveStatus(swapId: string): Promise<LnReceiveStatus>
   const [swap] = await repo.getAllSwaps<BoltzReverseSwap>({ id: swapId, type: 'reverse' });
   if (!swap) throw new Error('That Lightning deposit could not be found.');
   return mapReverseStatus(swap.status);
+}
+
+// ─── Lightning payments (submarine swap: Arkade → Lightning) ─────────────────
+
+/**
+ * Decode + price a BOLT11 invoice for the pay-confirm screen. Safe to call
+ * while LOCKED (bare provider, no wallet — parity with `getLightningInfo`).
+ *
+ * Rejections here are the user-facing gate: amountless invoices (Boltz can't
+ * take them — the invoice amount is the only thing binding what Boltz pays on
+ * Lightning to what it may claim from the lockup) and Boltz's min/max, which
+ * `BoltzSwapProvider.getLimits` reads from the SUBMARINE pair, apply to the
+ * invoice amount. `totalSats` is the estimated debit (invoice + Boltz fee);
+ * `payInvoice` re-checks Boltz's actual `expectedAmount` against it before
+ * funding, so the user never pays meaningfully more than this quote.
+ */
+export async function getPayQuote({ invoice }: { invoice: string }): Promise<{
+  amountSats: number;
+  feeSats: number;
+  totalSats: number;
+  description: string;
+}> {
+  const network = await getStoredNetwork();
+  const cfg = networkConfig(network);
+  if (!cfg.boltzApiUrl) throw new Error('Lightning is not available on this network.');
+
+  let decoded: ReturnType<typeof decodeInvoice>;
+  try {
+    decoded = decodeInvoice(invoice);
+  } catch {
+    throw new Error("That doesn't look like a valid Lightning invoice.");
+  }
+  if (decoded.amountSats <= 0) {
+    throw new Error(
+      'This invoice has no amount. Ask the recipient for an invoice with a fixed amount.',
+    );
+  }
+
+  const provider = new BoltzSwapProvider({ apiUrl: cfg.boltzApiUrl, network });
+  const [limits, fees] = await Promise.all([provider.getLimits(), provider.getFees()]);
+  if (decoded.amountSats < limits.min || decoded.amountSats > limits.max) {
+    throw new Error(
+      `Invoice amount must be between ${limits.min} and ${limits.max} sats.`,
+    );
+  }
+
+  const feeSats = submarineFeeForAmount(decoded.amountSats, fees.submarine);
+  return {
+    amountSats: decoded.amountSats,
+    feeSats,
+    totalSats: decoded.amountSats + feeSats,
+    description: decoded.description,
+  };
+}
+
+/**
+ * Slack allowed between the quoted total the user confirmed and Boltz's actual
+ * `expectedAmount`: absorbs rounding differences in Boltz's fee arithmetic
+ * without letting a real fee change (or a misbehaving Boltz) silently inflate
+ * the debit. Checked BEFORE any funds move.
+ */
+export function payTotalSlack(amountSats: number): number {
+  return Math.max(10, Math.ceil(amountSats * 0.001));
+}
+
+/**
+ * Pay a BOLT11 invoice: create the submarine swap, verify Boltz's asking
+ * price against the user-confirmed total, then fund the VHTLC with an Arkade
+ * send. Unlock-gated (funding signs).
+ *
+ * Deliberately NOT `ArkadeSwaps.sendLightningPayment`: that helper funds
+ * whatever `expectedAmount` Boltz returns with no way to check it first. This
+ * is the same do-not-trust-before-signing posture as `wallet.ts`'s `send` —
+ * the guard runs between swap creation and funding, when aborting is free (an
+ * unfunded swap just expires; no coins have moved).
+ *
+ * Returns as soon as the funding tx is accepted ("funded" semantics): the
+ * Arkade send is preconfirmed, funds are committed, and from here every
+ * outcome is observable via `getPayStatus` polling — Boltz pays the invoice
+ * (→ 'paid') or the always-on SwapManager auto-refunds a failure
+ * (→ 'refund-pending' → 'refunded'), with `reconcilePendingSwaps` covering
+ * swaps the SW didn't live to see through. No preimage crosses back — the
+ * popup only ever needs the status.
+ */
+export async function payInvoice(
+  seed: Uint8Array,
+  { invoice, maxTotalSats }: { invoice: string; maxTotalSats: number },
+): Promise<{ swapId: string; txid: string; amountSats: number; totalSats: number }> {
+  let decoded: ReturnType<typeof decodeInvoice>;
+  try {
+    decoded = decodeInvoice(invoice);
+  } catch {
+    throw new Error("That doesn't look like a valid Lightning invoice.");
+  }
+  // Defense in depth — the quote already rejected these, but this is the spend path.
+  if (decoded.amountSats <= 0) {
+    throw new Error(
+      'This invoice has no amount. Ask the recipient for an invoice with a fixed amount.',
+    );
+  }
+
+  const s = await getSwaps(seed);
+  const limits = await s.getLimits();
+  if (decoded.amountSats < limits.min || decoded.amountSats > limits.max) {
+    throw new Error(
+      `Invoice amount must be between ${limits.min} and ${limits.max} sats.`,
+    );
+  }
+
+  // Persisted by the library before we see it, and registered with the running
+  // SwapManager — so even if everything after this line dies, reconciliation
+  // knows about the swap (an unfunded one is harmless: it just expires).
+  const pending = await s.createSubmarineSwap({ invoice });
+  const totalSats = pending.response.expectedAmount;
+  if (!pending.response.address || !totalSats) {
+    throw new Error('The swap service returned an unusable swap. No funds were taken.');
+  }
+  if (totalSats > maxTotalSats + payTotalSlack(decoded.amountSats)) {
+    throw new Error(
+      `The swap service now asks for ${totalSats} sats, more than the quoted total. ` +
+        'No funds were taken — review the payment again to get a fresh quote.',
+    );
+  }
+
+  const wallet = await buildWallet(seed);
+  let txid: string;
+  try {
+    txid = await wallet.send({ address: pending.response.address, amount: totalSats });
+  } catch (err) {
+    // Same opaque-message translation as wallet.ts's send path. The unfunded
+    // swap left behind expires harmlessly.
+    if (err instanceof Error && /insufficient funds/i.test(err.message)) {
+      throw new Error(
+        `Not enough spendable balance to cover the ${totalSats}-sat total (invoice + fees).`,
+      );
+    }
+    throw err;
+  }
+
+  return { swapId: pending.id, txid, amountSats: decoded.amountSats, totalSats };
+}
+
+/**
+ * Map a submarine swap record to the popup's UI state.
+ *
+ * Needs the record, not just the status: after the manager (or reconcile)
+ * refunds a failed swap, the terminal Boltz status STAYS `invoice.failedToPay`
+ * / `swap.expired` — "the money came back" only exists as the persisted
+ * `refunded` flag, so that's checked first. `hasSubmarineStatusReached` treats
+ * any status at/past `invoice.paid` as paid — the recipient has the money from
+ * `invoice.paid` on; Boltz sweeping its side (`transaction.claimed`) is not the
+ * user's concern. Unknown/non-submarine statuses fall through to the
+ * non-terminal 'sending' (the manager/reconcile drive every real failure to a
+ * refund), mirroring `mapReverseStatus`'s never-default-to-failed rule.
+ */
+export function mapSubmarineStatus(
+  swap: Pick<BoltzSubmarineSwap, 'status' | 'refunded'>,
+): LnPayStatus {
+  if (swap.refunded || swap.status === 'transaction.refunded') return 'refunded';
+  if (isSubmarineRefundableStatus(swap.status)) return 'refund-pending';
+  if (hasSubmarineStatusReached(swap.status, 'invoice.paid')) return 'paid';
+  return 'sending';
+}
+
+/**
+ * Read one payment's UI status from the repository (the manager, when running,
+ * keeps it fresh). Works even before/without the singleton — no wallet, no
+ * unlock needed. See {@link hasPendingSwaps} for why the repo here is never
+ * explicitly disposed.
+ */
+export async function getPayStatus(swapId: string): Promise<LnPayStatus> {
+  const network = await getStoredNetwork();
+  const repo = new IndexedDbSwapRepository(repoName(network));
+  const [swap] = await repo.getAllSwaps<BoltzSubmarineSwap>({ id: swapId, type: 'submarine' });
+  if (!swap) throw new Error('That Lightning payment could not be found.');
+  return mapSubmarineStatus(swap);
 }
