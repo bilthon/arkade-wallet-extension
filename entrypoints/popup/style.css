@@ -263,6 +263,24 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .copied { color: var(--accent); font-size: 12px; }
 
 /* Coin control */
+/* Sort control: a Value/Maturity segmented toggle plus a separate direction arrow.
+   One control picks WHAT to sort by, the other WHICH WAY — direction persists across
+   criterion switches. `align-items: stretch` makes the arrow match the toggle height. */
+.sort-bar { display: flex; gap: 8px; align-items: stretch; margin-bottom: 12px; }
+.sort-bar .toggle { flex: 1; margin-bottom: 0; }
+.sort-dir {
+  flex: none;
+  width: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+.sort-arrow { display: inline-block; font-size: 16px; line-height: 1; transition: transform 0.2s ease; }
+.sort-arrow.desc { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) { .sort-arrow { transition: none; } }
+
 /* Horizontal padding + matching negative margin keeps rows edge-aligned with the rest
    of the screen while leaving room for the selected ring — no layout shift on select. */
 .coin-row { padding: 12px 8px; margin: 0 -8px; border-radius: 8px; }

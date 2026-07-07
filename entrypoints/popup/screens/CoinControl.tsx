@@ -14,7 +14,10 @@ import { Send } from './Send';
  * Send screen locked to exactly those inputs.
  */
 
-type Sort = 'time' | 'size';
+/** What to sort by. "value" = coin size in sats; "maturity" = how much life is left. */
+type Criterion = 'value' | 'maturity';
+/** Ascending puts the smallest value / soonest expiry on top; descending flips it. */
+type Direction = 'asc' | 'desc';
 
 export function CoinControl({
   onClose,
@@ -25,7 +28,10 @@ export function CoinControl({
 }) {
   const [coins, setCoins] = useState<CoinInfo[] | null>(null);
   const [error, setError] = useState('');
-  const [sort, setSort] = useState<Sort>('time');
+  // Sort is split into two independent controls: WHAT to sort by (criterion) and which
+  // WAY (direction). Direction persists when you switch criterion — one control, one job.
+  const [criterion, setCriterion] = useState<Criterion>('maturity');
+  const [direction, setDirection] = useState<Direction>('asc');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [showSend, setShowSend] = useState(false);
   // Bumped after a send to re-list the coins (spent ones gone, change coin appears).
@@ -52,23 +58,20 @@ export function CoinControl({
     };
   }, [onLocked, reloadKey]);
 
-  // Sorted view. "Time left" is ascending (most urgent first) with unknown-expiry coins
-  // last; "Size" is descending. We never mutate the source array.
+  // Sorted view. Ascending means smallest value / soonest expiry on top; descending
+  // flips it. Coins with an unknown expiry have no maturity to compare, so they always
+  // sink to the bottom regardless of direction. We never mutate the source array.
   const sortedCoins = useMemo(() => {
     if (!coins) return null;
-    const copy = [...coins];
-    if (sort === 'size') {
-      copy.sort((a, b) => b.value - a.value);
-    } else {
-      copy.sort((a, b) => {
-        if (a.expiresAtMs === null && b.expiresAtMs === null) return 0;
-        if (a.expiresAtMs === null) return 1;
-        if (b.expiresAtMs === null) return -1;
-        return a.expiresAtMs - b.expiresAtMs;
-      });
-    }
-    return copy;
-  }, [coins, sort]);
+    const sign = direction === 'asc' ? 1 : -1;
+    return [...coins].sort((a, b) => {
+      if (criterion === 'value') return sign * (a.value - b.value);
+      if (a.expiresAtMs === null && b.expiresAtMs === null) return 0;
+      if (a.expiresAtMs === null) return 1;
+      if (b.expiresAtMs === null) return -1;
+      return sign * (a.expiresAtMs - b.expiresAtMs);
+    });
+  }, [coins, criterion, direction]);
 
   function toggle(outpoint: string) {
     setSelected((prev) => {
@@ -112,12 +115,33 @@ export function CoinControl({
         </button>
       </div>
 
-      <div className="toggle" role="tablist">
-        <button className={sort === 'time' ? 'active' : ''} onClick={() => setSort('time')}>
-          Time left
-        </button>
-        <button className={sort === 'size' ? 'active' : ''} onClick={() => setSort('size')}>
-          Size
+      <div className="sort-bar">
+        <div className="toggle" role="tablist">
+          <button
+            className={criterion === 'value' ? 'active' : ''}
+            onClick={() => setCriterion('value')}
+          >
+            Value
+          </button>
+          <button
+            className={criterion === 'maturity' ? 'active' : ''}
+            onClick={() => setCriterion('maturity')}
+          >
+            Maturity
+          </button>
+        </div>
+        <button
+          className="sort-dir"
+          onClick={() => setDirection((d) => (d === 'asc' ? 'desc' : 'asc'))}
+          aria-label={
+            direction === 'asc' ? 'Sorted ascending — tap to reverse' : 'Sorted descending — tap to reverse'
+          }
+          title="Reverse order"
+        >
+          {/* One glyph, rotated on flip, so the change reads as a small animation. */}
+          <span className={`sort-arrow ${direction}`} aria-hidden="true">
+            ↑
+          </span>
         </button>
       </div>
 
