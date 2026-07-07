@@ -261,3 +261,21 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .center { text-align: center; }
 .copied { color: var(--accent); font-size: 12px; }
+
+/* Coin control */
+/* Horizontal padding + matching negative margin keeps rows edge-aligned with the rest
+   of the screen while leaving room for the selected ring — no layout shift on select. */
+.coin-row { padding: 12px 8px; margin: 0 -8px; border-radius: 8px; }
+.coin-row.selectable { cursor: pointer; }
+.coin-row.disabled { opacity: 0.55; }
+.coin-row.selected { background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--accent); }
+.coin-right { display: flex; align-items: center; gap: 8px; }
+.coin-check { width: 16px; text-align: center; color: var(--accent); font-weight: 700; }
+
+/* Energy bar — fraction of a coin's lifetime left. Colors reuse the strength-meter palette. */
+.energy { width: 48px; height: 6px; background: var(--surface-2); border-radius: 999px; overflow: hidden; }
+.energy-fill { height: 100%; border-radius: 999px; }
+.energy-fill.on-1 { background: #dc2626; }
+.energy-fill.on-2 { background: #f59e0b; }
+.energy-fill.on-3 { background: #eab308; }
+.energy-fill.on-4 { background: #16a34a; }

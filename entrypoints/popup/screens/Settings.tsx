@@ -3,6 +3,7 @@ import type { NetworkName } from '@arkade-os/sdk';
 import { client } from '../client';
 import { networkLabel } from '../format';
 import { NETWORK_CONFIG } from '@/src/wallet';
+import { CoinControl } from './CoinControl';
 
 /**
  * Settings-lite: network picker (re-encrypts vault on switch — asks for the password),
@@ -13,6 +14,7 @@ export function Settings({ onBack, onLocked }: { onBack: () => void; onLocked: (
   const [revealing, setRevealing] = useState(false);
   const [sites, setSites] = useState(false);
   const [switching, setSwitching] = useState(false);
+  const [coins, setCoins] = useState(false);
 
   useEffect(() => {
     void client.getNetwork().then(({ network }) => setNetwork(network));
@@ -29,6 +31,10 @@ export function Settings({ onBack, onLocked }: { onBack: () => void; onLocked: (
 
   if (sites) {
     return <ConnectedSites onClose={() => setSites(false)} />;
+  }
+
+  if (coins) {
+    return <CoinControl onClose={() => setCoins(false)} onLocked={onLocked} />;
   }
 
   if (switching) {
@@ -74,6 +80,14 @@ export function Settings({ onBack, onLocked }: { onBack: () => void; onLocked: (
             renewal via delegation is coming.)
           </div>
         </div>
+      </div>
+
+      <div className="row">
+        <div>
+          <div className="row-label">Coin control</div>
+          <div className="row-sub">View and spend individual coins.</div>
+        </div>
+        <button onClick={() => setCoins(true)}>Open</button>
       </div>
 
       <div className="row">
