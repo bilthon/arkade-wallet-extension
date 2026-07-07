@@ -20,6 +20,7 @@ import {
   getBoardingAddress,
   getBalance,
   getPublicKey,
+  listCoins,
   send,
   sendOnchain,
   renewExpiringVtxos,
@@ -187,10 +188,15 @@ export default defineBackground(() => {
     return { snapshot };
   });
 
+  // Unlock-gated: lists every VTXO (spendable + needs-renewal + needs-recovery) for the
+  // coin-control screen. Read-only; only public DTOs cross back.
+  onMessage('listCoins', async () => listCoins(await requireWallet()));
+
   // ── Off-chain send ─────────────────────────────────────────────────────────
   // Gated on unlock via requireWallet (re-arms auto-lock). The SW validates
   // address + amount and signs; only the txid crosses back. A thrown
   // SendValidationError / 'LOCKED' / operator error reaches the popup as its message.
+  // `data.outpoints` (coin control) restricts the send to an exact coin selection.
   onMessage('send', async ({ data }) => {
     const wallet = await requireWallet();
     return send(wallet, data);

@@ -95,6 +95,40 @@ export function partitionVtxos(vtxos: ExtendedVirtualCoin[]): VtxoPartition {
 }
 
 /**
+ * The message shown when a coin the user picked can no longer be found among the live
+ * spendable set. The popup only ever sends outpoints it just listed, so a miss means the
+ * coin changed state in the background (renewed, spent, or swept) between listing and
+ * spending. One source of truth so the deterministic (pick) and raced (send) cases read
+ * the same.
+ */
+export const COIN_GONE_MESSAGE =
+  'A selected coin is no longer spendable (it may have been renewed). Go back, reselect, and try again.';
+
+/** The "txid:vout" outpoint string that identifies a coin across the popup boundary. */
+export function outpointOf(vtxo: VirtualCoin): string {
+  return `${vtxo.txid}:${vtxo.vout}`;
+}
+
+/**
+ * Resolve "txid:vout" outpoint strings back to live coins, in the order given.
+ *
+ * Callers pass only the spendable bucket, so a coin that has since expired or been swept
+ * simply won't be found and reads as a miss. Any miss throws {@link COIN_GONE_MESSAGE} —
+ * we never spend a partial selection.
+ */
+export function pickByOutpoints(
+  vtxos: ExtendedVirtualCoin[],
+  outpoints: string[],
+): ExtendedVirtualCoin[] {
+  const byOutpoint = new Map(vtxos.map((v) => [outpointOf(v), v]));
+  return outpoints.map((op) => {
+    const coin = byOutpoint.get(op);
+    if (!coin) throw new Error(COIN_GONE_MESSAGE);
+    return coin;
+  });
+}
+
+/**
  * Balance breakdown with the expired funds pulled out of the spendable buckets.
  * Extends the SDK shape (so existing consumers keep working) with one honest field:
  * `expired` — sats that exist but need renewal before they can be spent.

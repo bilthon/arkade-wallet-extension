@@ -5,6 +5,9 @@ import {
   adjustBalanceForExpiry,
   soonestExpiry,
   expiresAtMs,
+  outpointOf,
+  pickByOutpoints,
+  COIN_GONE_MESSAGE,
 } from './vtxo-state';
 
 /**
@@ -225,5 +228,32 @@ describe('soonestExpiry', () => {
 
   it('returns null when no coin has a wall-clock expiry', () => {
     expect(soonestExpiry([vtxo({ value: 1 })])).toBeNull();
+  });
+});
+
+describe('pickByOutpoints — coin-control input resolution', () => {
+  it('resolves outpoints to their coins, preserving the requested order', () => {
+    const a = vtxo({ value: 10_000, txid: 'aa' });
+    const b = vtxo({ value: 20_000, txid: 'bb' });
+    const c = vtxo({ value: 30_000, txid: 'cc' });
+    // Ask for c then a — the result order must follow the outpoints, not the input list.
+    const picked = pickByOutpoints([a, b, c], [outpointOf(c), outpointOf(a)]);
+    expect(picked).toEqual([c, a]);
+  });
+
+  it('throws the reselect message when an outpoint is missing (renewed/spent since)', () => {
+    const a = vtxo({ value: 10_000, txid: 'aa' });
+    expect(() => pickByOutpoints([a], ['bb:0'])).toThrowError(COIN_GONE_MESSAGE);
+  });
+
+  it('treats a non-spendable coin as a miss (callers pass only the spendable bucket)', () => {
+    // The send path resolves against partitionVtxos().spendable, so an expired coin the
+    // popup listed is simply absent here and reads as gone.
+    const spendable = vtxo({ value: 10_000, txid: 'live' });
+    const expired = vtxo({ value: 40_000, txid: 'old', expiryMs: NOW - HOUR });
+    const { spendable: onlySpendable } = partitionVtxos([spendable, expired]);
+    expect(() => pickByOutpoints(onlySpendable, [outpointOf(expired)])).toThrowError(
+      COIN_GONE_MESSAGE,
+    );
   });
 });

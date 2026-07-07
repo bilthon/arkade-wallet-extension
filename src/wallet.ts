@@ -21,6 +21,10 @@ import {
   adjustBalanceForExpiry,
   partitionVtxos,
   soonestExpiry,
+  expiresAtMs,
+  outpointOf,
+  pickByOutpoints,
+  COIN_GONE_MESSAGE,
   type AdjustedBalance,
 } from './vtxo-state';
 
@@ -173,6 +177,51 @@ export async function getBalance(wallet: Wallet): Promise<AdjustedBalance> {
     wallet.getVtxos({ withRecoverable: true }),
   ]);
   return adjustBalanceForExpiry(balance, vtxos);
+}
+
+/**
+ * One VTXO, flattened for the coin-control screen. Plain JSON only (numbers/strings, no
+ * `Date`) so it survives the SW->popup message boundary, the same rule as
+ * {@link TxHistoryItem}.
+ */
+export interface CoinInfo {
+  /** "txid:vout" — the popup sends these back to spend an exact selection. */
+  outpoint: string;
+  /** Coin size in sats. */
+  value: number;
+  /** When the coin was created (epoch ms) — the start point of its lifetime bar. */
+  createdAtMs: number;
+  /** Batch expiry (epoch ms), or null when it's unknown (a regtest block height). */
+  expiresAtMs: number | null;
+  /** Spendable now, expired-and-needs-renewal, or swept-and-needs-recovery. */
+  state: 'spendable' | 'expired' | 'recoverable';
+}
+
+/**
+ * List every VTXO for the coin-control screen: spendable first, then the
+ * expired-but-unswept coins that need renewal, then the swept coins that need recovery.
+ * Only spendable coins can be spent; the other two are listed so the user can SEE the
+ * coins that need attention. The popup does its own sorting on top of this order.
+ */
+export async function listCoins(wallet: Wallet): Promise<{ coins: CoinInfo[] }> {
+  const vtxos = await wallet.getVtxos({ withRecoverable: true });
+  const { spendable, expired, recoverable } = partitionVtxos(vtxos);
+  const toInfo =
+    (state: CoinInfo['state']) =>
+    (v: ExtendedVirtualCoin): CoinInfo => ({
+      outpoint: outpointOf(v),
+      value: v.value,
+      createdAtMs: v.createdAt.getTime(),
+      expiresAtMs: expiresAtMs(v),
+      state,
+    });
+  return {
+    coins: [
+      ...spendable.map(toInfo('spendable')),
+      ...expired.map(toInfo('expired')),
+      ...recoverable.map(toInfo('recoverable')),
+    ],
+  };
 }
 
 /** The active network name (from storage; addresses are operator-bound to it). */
@@ -374,10 +423,17 @@ export function validateAmount(amount: number, available: number): void {
  */
 export async function send(
   wallet: Wallet,
-  { address, amount }: { address: string; amount: number },
+  { address, amount, outpoints }: { address: string; amount: number; outpoints?: string[] },
 ): Promise<{ txid: string }> {
   const network = await getStoredNetwork();
   validateArkadeAddress(address, network);
+
+  // Coin-control path: the caller picked exact inputs. Those coins are the only inputs
+  // and their sum is the spend ceiling (classic coin control — no auto-top-up from
+  // unselected coins). Handled separately below.
+  if (outpoints && outpoints.length > 0) {
+    return sendSelected(wallet, address.trim(), amount, outpoints);
+  }
 
   // Validate the amount against the LIVE *expiry-adjusted* available balance (not the
   // raw SDK balance, which over-counts expired coins). This is the pre-check that now
@@ -400,6 +456,42 @@ export async function send(
           ? 'Some of your coins have expired and need renewal before they can be spent. Unlock and renew, then try again.'
           : 'Not enough spendable balance to cover this send.',
       );
+    }
+    throw err;
+  }
+}
+
+/**
+ * Off-chain Arkade->Arkade send from an EXACT set of coins (coin control). The selected
+ * coins are the only inputs; the amount is capped at their sum, not the wallet-wide
+ * balance. Change returns as a new preconfirmed VTXO, same as a normal send.
+ *
+ * We call the @deprecated `wallet.sendBitcoin` on purpose: in SDK 0.4.39 it is the only
+ * address-send that accepts an explicit input set (`selectedVtxos`). `wallet.send` runs
+ * its own coin selection and can't be constrained to a chosen set.
+ */
+async function sendSelected(
+  wallet: Wallet,
+  address: string,
+  amount: number,
+  outpoints: string[],
+): Promise<{ txid: string }> {
+  // Re-fetch and resolve the outpoints against the LIVE spendable set. A coin renewed or
+  // swept in the background since the popup listed it won't be found -> COIN_GONE_MESSAGE.
+  const vtxos = await wallet.getVtxos({ withRecoverable: true });
+  const selected = pickByOutpoints(partitionVtxos(vtxos).spendable, outpoints);
+  const selectedSats = selected.reduce((sum, v) => sum + v.value, 0);
+  validateAmount(amount, selectedSats);
+
+  try {
+    const txid = await wallet.sendBitcoin({ address, amount, selectedVtxos: selected });
+    return { txid };
+  } catch (err) {
+    // A coin can still be swept in the race window between our fetch and the send — the
+    // SDK then throws "insufficient funds". Show the same reselect message as a stale pick
+    // rather than leaking raw SDK text on the spend path.
+    if (err instanceof Error && /insufficient funds/i.test(err.message)) {
+      throw new Error(COIN_GONE_MESSAGE);
     }
     throw err;
   }
