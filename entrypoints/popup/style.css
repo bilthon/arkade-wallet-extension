@@ -261,3 +261,45 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .center { text-align: center; }
 .copied { color: var(--accent); font-size: 12px; }
+
+/* Coin control */
+/* Sort control: a Value/Maturity segmented toggle plus a separate direction arrow.
+   One control picks WHAT to sort by, the other WHICH WAY — direction persists across
+   criterion switches. `align-items: stretch` makes the arrow match the toggle height. */
+.sort-bar { display: flex; gap: 8px; align-items: stretch; margin-bottom: 12px; }
+.sort-bar .toggle { flex: 1; margin-bottom: 0; }
+.sort-dir {
+  flex: none;
+  width: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+.sort-arrow { display: inline-block; font-size: 16px; line-height: 1; transition: transform 0.2s ease; }
+.sort-arrow.desc { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) { .sort-arrow { transition: none; } }
+
+/* Horizontal padding + matching negative margin keeps rows edge-aligned with the rest
+   of the screen while leaving room for the selected ring — no layout shift on select. */
+.coin-row { padding: 15px 8px; margin: 0 -8px; border-radius: 8px; }
+.coin-row.selectable { cursor: pointer; }
+.coin-row.disabled { opacity: 0.55; }
+.coin-row.selected { background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--accent); }
+/* Amount is the primary value: larger and semibold, with a quiet unit. */
+.coin-row .row-label { font-size: 15px; font-weight: 600; }
+.coin-unit { font-size: 12px; font-weight: 400; color: var(--muted); }
+.coin-right { display: flex; align-items: center; gap: 10px; }
+/* Energy bar stacked over the time-left caption, both right-aligned. */
+.coin-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; }
+.coin-time { font-size: 12px; color: var(--muted); line-height: 1; white-space: nowrap; }
+.coin-check { width: 16px; text-align: center; color: var(--accent); font-weight: 700; }
+
+/* Energy bar — fraction of a coin's lifetime left. Colors reuse the strength-meter palette. */
+.energy { width: 56px; height: 7px; background: var(--surface-2); border-radius: 999px; overflow: hidden; }
+.energy-fill { height: 100%; border-radius: 999px; }
+.energy-fill.on-1 { background: #dc2626; }
+.energy-fill.on-2 { background: #f59e0b; }
+.energy-fill.on-3 { background: #eab308; }
+.energy-fill.on-4 { background: #16a34a; }

@@ -40,7 +40,8 @@ export function relativeTime(epochMs: number): string {
   return `${hrs}h ago`;
 }
 
-/** Compact "time until" string for an expiry countdown. e.g. "12 min", "1 h 5 min", "soon". */
+/** Compact "time until" string for an expiry countdown. e.g. "12 min", "1 h 5 min",
+ *  "7 days 5 h", "soon". */
 export function untilRelative(futureMs: number): string {
   const secs = Math.round((futureMs - Date.now()) / 1000);
   if (secs <= 0) return 'soon';
@@ -48,6 +49,12 @@ export function untilRelative(futureMs: number): string {
   const mins = Math.round(secs / 60);
   if (mins < 60) return `${mins} min`;
   const hrs = Math.floor(mins / 60);
+  // Past two days, hours alone ("170 h") stop being readable — switch to a days tier.
+  if (hrs >= 48) {
+    const days = Math.floor(hrs / 24);
+    const remHrs = hrs % 24;
+    return remHrs > 0 ? `${days} days ${remHrs} h` : `${days} days`;
+  }
   const remMins = mins % 60;
   return remMins > 0 ? `${hrs} h ${remMins} min` : `${hrs} h`;
 }

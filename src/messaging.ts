@@ -7,7 +7,7 @@ import type { RenewalWarning } from './renewal';
 import type { Grant } from './permissions';
 import type { PendingRequest } from './approvals';
 import type { NetworkInfo, PublicKeyInfo } from './provider-api';
-import type { TxHistoryItem } from './wallet';
+import type { CoinInfo, TxHistoryItem } from './wallet';
 import type { LnPayStatus, LnReceiveStatus } from './lightning-utils';
 
 /**
@@ -59,6 +59,12 @@ export interface ProtocolMap {
    * is unreachable (popup keeps showing the cached snapshot + an offline banner).
    */
   refreshWalletSnapshot(): { snapshot: WalletSnapshot };
+  /**
+   * Every VTXO for the coin-control screen — spendable, expired (needs renewal), and
+   * swept (needs recovery). Unlock-gated. Plain-JSON DTOs only (no `Date`). Read-only:
+   * the popup selects coins here, then spends them via `send` with their outpoints.
+   */
+  listCoins(): { coins: CoinInfo[] };
 
   // ─── Off-chain send (the first write/spend path) ───────────────────────────
   /**
@@ -70,8 +76,11 @@ export interface ProtocolMap {
    * Validation failures surface as an Error whose serialized `.message` is the
    * user-facing string the popup renders (the `SendValidationError` class/`code`
    * live SW-side; only the message survives the message boundary).
+   *
+   * `outpoints` (coin control): when present, those exact coins are the only inputs
+   * and the amount is capped at their sum instead of the wallet-wide balance.
    */
-  send(data: { address: string; amount: number }): { txid: string };
+  send(data: { address: string; amount: number; outpoints?: string[] }): { txid: string };
   /**
    * On-chain collaborative exit (offboard) via `Ramps.offboard`. Gated on unlock.
    * When `amount` is omitted, offboards ALL virtual outputs (send-all / "Max"). The

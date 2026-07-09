@@ -22,8 +22,10 @@ export const client = {
   getNetwork: () => sendMessage('getNetwork', undefined),
   getWalletSnapshot: () => sendMessage('getWalletSnapshot', undefined),
   refreshWalletSnapshot: () => sendMessage('refreshWalletSnapshot', undefined),
-  send: (address: string, amount: number) =>
-    sendMessage('send', { address, amount }),
+  listCoins: () => sendMessage('listCoins', undefined),
+  // `outpoints` (coin control): restrict the send to an exact coin selection.
+  send: (address: string, amount: number, outpoints?: string[]) =>
+    sendMessage('send', { address, amount, outpoints }),
   sendOnchain: (address: string, amount?: number) =>
     sendMessage('sendOnchain', { address, amount }),
   renewNow: () => sendMessage('renewNow', undefined),

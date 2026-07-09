@@ -48,11 +48,15 @@ type Stage = 'entry' | 'confirm' | 'lnwait' | 'done';
 
 export function Send({
   availableSats,
+  coinSelection,
   onClose,
   onLocked,
   onSent,
 }: {
   availableSats: number;
+  /** Coin control: when present, the send is locked to exactly these coins (Arkade-only)
+   *  and the caller sets `availableSats` to their total. */
+  coinSelection?: { outpoints: string[]; totalSats: number };
   onClose: () => void;
   onLocked: () => void;
   onSent: () => void;
@@ -100,11 +104,17 @@ export function Send({
   const lnInvoice = parseLightningInvoice(address);
   const lnMode = lnInvoice !== null;
   const onchainMode = !lnMode && isOnchainAddress(address);
+  // Coin control: this send is locked to a chosen coin set, which only Arkade→Arkade
+  // sends support. A Lightning invoice or on-chain address in this mode is rejected up
+  // front (they run their own input-selection flows).
+  const coinLocked = coinSelection != null;
+  const unsupportedForSelection = coinLocked && (lnMode || onchainMode);
   // sendAll bypasses the amount bounds check (on-chain Max → SDK handles fee deduction).
   // Lightning bypasses it entirely — the invoice fixes the amount; the balance check
   // happens against the quote's fee-inclusive total on Review.
   const entryValid =
     address.trim().length > 0 &&
+    !unsupportedForSelection &&
     (lnMode ||
       sendAll ||
       (Number.isInteger(amountNum) && amountNum >= DUST_SATS && amountNum <= availableSats));
@@ -183,7 +193,8 @@ export function Send({
           sendAll ? undefined : amountNum,
         ));
       } else {
-        ({ txid: id } = await client.send(address.trim(), amountNum));
+        // Coin control passes the exact outpoints so the SW spends only those inputs.
+        ({ txid: id } = await client.send(address.trim(), amountNum, coinSelection?.outpoints));
       }
       setTxid(id);
       setStage('done');
@@ -350,7 +361,13 @@ export function Send({
               On-chain · the recipient receives this minus the network fee · exits Arkade · not instant
             </div>
           ) : (
-            <div className="addr-caption">Instant · ~zero fee · stays within Arkade</div>
+            <div className="addr-caption">
+              Instant · ~zero fee · stays within Arkade
+              {coinLocked &&
+                ` · from ${coinSelection.outpoints.length} selected coin${
+                  coinSelection.outpoints.length !== 1 ? 's' : ''
+                }`}
+            </div>
           )}
         </div>
 
@@ -433,12 +450,26 @@ export function Send({
             </button>
           </div>
           <div className="row-sub" style={{ marginTop: 4 }}>
-            Available: {formatSats(availableSats)} sats
-            {onchainMode && ' · use Max to withdraw everything (the network fee is taken from it)'}
+            {coinLocked ? (
+              <>
+                Spending {coinSelection.outpoints.length} selected coin
+                {coinSelection.outpoints.length !== 1 ? 's' : ''} · {formatSats(availableSats)} sats
+                available
+              </>
+            ) : (
+              <>
+                Available: {formatSats(availableSats)} sats
+                {onchainMode &&
+                  ' · use Max to withdraw everything (the network fee is taken from it)'}
+              </>
+            )}
           </div>
         </>
       )}
 
+      {unsupportedForSelection && (
+        <div className="error">Selected-coin spends only support Arkade addresses.</div>
+      )}
       {error && <div className="error">{error}</div>}
 
       <div className="spacer" />
