@@ -212,29 +212,36 @@ function CoinRow({
     >
       <div>
         <div className="row-label">{formatSats(coin.value)} sats</div>
-        <div className="row-sub">
-          {coin.state === 'spendable' ? (
-            coin.expiresAtMs === null ? (
-              'expiry unknown'
-            ) : (
-              `${untilRelative(coin.expiresAtMs)} left`
-            )
-          ) : coin.state === 'expired' ? (
+        {/* State badges stay on the left; the lifetime caption moves next to the bar. */}
+        {coin.state === 'expired' && (
+          <div className="row-sub">
             <span className="pill">needs renewal</span>
-          ) : (
-            <span className="pill">needs recovery</span>
-          )}
-        </div>
-      </div>
-      <div className="coin-right">
-        {ratio !== null && (
-          <div className="energy" aria-hidden="true">
-            <div
-              className={`energy-fill ${energyClass(ratio)}`}
-              style={{ width: `${ratio * 100}%` }}
-            />
           </div>
         )}
+        {coin.state === 'recoverable' && (
+          <div className="row-sub">
+            <span className="pill">needs recovery</span>
+          </div>
+        )}
+      </div>
+      <div className="coin-right">
+        <div className="coin-meta">
+          {ratio !== null && (
+            <div className="energy" aria-hidden="true">
+              <div
+                className={`energy-fill ${energyClass(ratio)}`}
+                style={{ width: `${ratio * 100}%` }}
+              />
+            </div>
+          )}
+          {coin.state === 'spendable' && (
+            <div className="coin-time">
+              {coin.expiresAtMs === null
+                ? 'expiry unknown'
+                : `${untilRelative(coin.expiresAtMs)} left`}
+            </div>
+          )}
+        </div>
         {selectable && (
           <span className={`coin-check ${selected ? 'on' : ''}`} aria-hidden="true">
             {selected ? '✓' : ''}

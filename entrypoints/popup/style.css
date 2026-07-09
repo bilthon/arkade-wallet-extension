@@ -288,6 +288,9 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .coin-row.disabled { opacity: 0.55; }
 .coin-row.selected { background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--accent); }
 .coin-right { display: flex; align-items: center; gap: 8px; }
+/* Energy bar stacked over the time-left caption, both right-aligned. */
+.coin-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.coin-time { font-size: 11px; color: var(--muted); line-height: 1; white-space: nowrap; }
 .coin-check { width: 16px; text-align: center; color: var(--accent); font-weight: 700; }
 
 /* Energy bar — fraction of a coin's lifetime left. Colors reuse the strength-meter palette. */
