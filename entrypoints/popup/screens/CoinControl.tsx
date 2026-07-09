@@ -211,7 +211,9 @@ function CoinRow({
       aria-pressed={selectable ? selected : undefined}
     >
       <div>
-        <div className="row-label">{formatSats(coin.value)} sats</div>
+        <div className="row-label">
+          {formatSats(coin.value)} <span className="coin-unit">sats</span>
+        </div>
         {/* State badges stay on the left; the lifetime caption moves next to the bar. */}
         {coin.state === 'expired' && (
           <div className="row-sub">
