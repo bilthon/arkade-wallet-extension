@@ -8,6 +8,10 @@ import { Receive } from './Receive';
 import { Send } from './Send';
 import { History } from './History';
 
+/** How often to re-read the balance while the home view is open, so a deposit (like an
+ *  on-chain boarding UTXO) shows up on its own instead of only after reopening the popup. */
+const BALANCE_POLL_MS = 15_000;
+
 /**
  * Wallet home.
  *
@@ -97,6 +101,44 @@ export function WalletHome({
       cancelled = true;
     };
   }, [onLocked, reloadKey]);
+
+  // Keep the balance fresh while the home view is open. Without this, a deposit that lands
+  // while the popup stays open (an on-chain boarding UTXO, an incoming payment) only shows
+  // after closing and reopening, since the balance is otherwise read once on mount. We poll
+  // only on the home view — sub-screens read their own data — and stop when it closes. The
+  // next poll is scheduled after the previous one finishes so slow reads never stack up.
+  useEffect(() => {
+    if (showReceive || showSend || showHistory) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+
+    const poll = async () => {
+      try {
+        const { snapshot } = await client.refreshWalletSnapshot();
+        if (cancelled) return;
+        setAddress(snapshot.address);
+        setBoardingAddress(snapshot.boardingAddress);
+        setBalance(snapshot.balance as AdjustedBalance);
+        setFetchedAt(snapshot.fetchedAt);
+        setOffline(false);
+      } catch (err) {
+        if (cancelled) return;
+        if (isLockedError(err)) {
+          onLocked();
+          return; // stop polling; the app routes to the unlock screen
+        }
+        // Operator unreachable — flag offline; keep polling so it recovers when back.
+        setOffline(true);
+      }
+      if (!cancelled) timer = setTimeout(poll, BALANCE_POLL_MS);
+    };
+
+    timer = setTimeout(poll, BALANCE_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [onLocked, showReceive, showSend, showHistory]);
 
   async function lock() {
     await client.lock();
