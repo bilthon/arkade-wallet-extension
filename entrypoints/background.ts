@@ -169,23 +169,32 @@ export default defineBackground(() => {
 
   // Live reconciliation: build wallet, read operator, persist + return fresh snapshot.
   onMessage('refreshWalletSnapshot', async () => {
-    const wallet = await requireWallet();
-    const network = await getStoredNetwork();
-    // Addresses are deterministic from the identity; balance is the live operator read.
-    const [address, boardingAddress, balance] = await Promise.all([
-      getAddress(wallet),
-      getBoardingAddress(wallet),
-      getBalance(wallet),
-    ]);
-    const snapshot: WalletSnapshot = {
-      network,
-      address,
-      boardingAddress,
-      balance,
-      fetchedAt: Date.now(),
-    };
-    await setSnapshot(snapshot);
-    return { snapshot };
+    // Bound the build so a hung operator getInfo can't block for tens of seconds. A build
+    // that times out never called getVtxos, so it started no watcher to dispose.
+    const wallet = await withTimeout(requireWallet(), REFRESH_STEP_TIMEOUT_MS, 'wallet build');
+    try {
+      const network = await getStoredNetwork();
+      // getBalance() calls wallet.getVtxos(), which spins up a ContractWatcher. Bound the
+      // reads so a hung indexer can't hold it open, and always dispose in the finally.
+      const [address, boardingAddress, balance] = await withTimeout(
+        Promise.all([getAddress(wallet), getBoardingAddress(wallet), getBalance(wallet)]),
+        REFRESH_STEP_TIMEOUT_MS,
+        'balance read',
+      );
+      const snapshot: WalletSnapshot = {
+        network,
+        address,
+        boardingAddress,
+        balance,
+        fetchedAt: Date.now(),
+      };
+      await setSnapshot(snapshot);
+      return { snapshot };
+    } finally {
+      // Tear down the ContractWatcher this wallet started so it can't reconnect-loop or
+      // accumulate across polls. Only disposes the watcher, not the shared IndexedDB.
+      await wallet.dispose().catch(() => {});
+    }
   });
 
   // Unlock-gated: lists every VTXO (spendable + needs-renewal + needs-recovery) for the
@@ -331,6 +340,21 @@ export default defineBackground(() => {
 
   console.log('[arkade] background ready');
 });
+
+/** Timeout (ms) for a single wallet build or balance read in the SW, so a hung operator
+ *  or indexer can't block the refresh. On timeout we fail fast and dispose the wallet. */
+const REFRESH_STEP_TIMEOUT_MS = 8000;
+
+/** Reject after `ms` with a labelled error so a hung SDK network call can't stall a handler.
+ *  The underlying promise keeps running; callers dispose the wallet regardless. */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`refresh timed out (${label})`)), ms),
+    ),
+  ]);
+}
 
 /**
  * The in-memory seed, or throw if locked. Re-arms auto-lock on each sensitive
