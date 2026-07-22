@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { NetworkName } from '@arkade-os/sdk';
 import type { AdjustedBalance } from '@/src/vtxo-state';
+import { withTimeout } from '@/src/async';
 import { type RenewalWarning, isWarningStale } from '@/src/renewal';
 import { client, isLockedError, errorMessage } from '../client';
 import { formatSats, networkLabel, relativeTime, untilRelative } from '../format';
@@ -21,14 +22,6 @@ const OFFLINE_POLL_MS = 60_000;
  *  leave the refresh button spinning forever. Kept under the poll interval so a stuck read
  *  clears before the next one is due. */
 const REFRESH_TIMEOUT_MS = 10_000;
-
-/** Reject after `ms` so a read that never settles can't wedge the UI. */
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
-  ]);
-}
 
 /**
  * Wallet home.

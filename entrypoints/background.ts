@@ -1,4 +1,5 @@
 import { onMessage } from '@/src/messaging';
+import { withTimeout } from '@/src/async';
 import {
   registerAutoLock,
   armAutoLock,
@@ -344,17 +345,6 @@ export default defineBackground(() => {
 /** Timeout (ms) for a single wallet build or balance read in the SW, so a hung operator
  *  or indexer can't block the refresh. On timeout we fail fast and dispose the wallet. */
 const REFRESH_STEP_TIMEOUT_MS = 8000;
-
-/** Reject after `ms` with a labelled error so a hung SDK network call can't stall a handler.
- *  The underlying promise keeps running; callers dispose the wallet regardless. */
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) =>
-      setTimeout(() => reject(new Error(`refresh timed out (${label})`)), ms),
-    ),
-  ]);
-}
 
 /**
  * The in-memory seed, or throw if locked. Re-arms auto-lock on each sensitive
