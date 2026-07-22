@@ -197,6 +197,12 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 /* A frozen spinner reads as broken, so slow it rather than stop it for reduced motion. */
 @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 1.6s; } }
 
+/* Balance refresh button: a static refresh icon that spins while a live read is in flight. */
+.refresh-glyph { display: inline-block; line-height: 1; }
+.refresh-glyph.spinning { animation: spin 0.7s linear infinite; }
+/* A frozen icon reads as broken, so slow the spin rather than stop it for reduced motion. */
+@media (prefers-reduced-motion: reduce) { .refresh-glyph.spinning { animation-duration: 1.6s; } }
+
 .ln-success { text-align: center; padding: 16px 0; }
 .ln-success-check { display: block; margin: 0 auto 10px; }
 .ln-success-circle {

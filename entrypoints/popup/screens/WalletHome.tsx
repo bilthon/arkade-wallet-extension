@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { NetworkName } from '@arkade-os/sdk';
 import type { AdjustedBalance } from '@/src/vtxo-state';
 import { type RenewalWarning, isWarningStale } from '@/src/renewal';
@@ -11,6 +11,24 @@ import { History } from './History';
 /** How often to re-read the balance while the home view is open, so a deposit (like an
  *  on-chain boarding UTXO) shows up on its own instead of only after reopening the popup. */
 const BALANCE_POLL_MS = 15_000;
+
+/** After a failed read (operator unreachable), back off to this slower cadence so we don't
+ *  rebuild the wallet every 15s during an outage — which piles up failing indexer watchers
+ *  and keeps the service worker from idling out to clean them up. */
+const OFFLINE_POLL_MS = 60_000;
+
+/** Give up on a single balance read after this long so a hung operator/network read can't
+ *  leave the refresh button spinning forever. Kept under the poll interval so a stuck read
+ *  clears before the next one is due. */
+const REFRESH_TIMEOUT_MS = 10_000;
+
+/** Reject after `ms` so a read that never settles can't wedge the UI. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
+  ]);
+}
 
 /**
  * Wallet home.
@@ -47,6 +65,52 @@ export function WalletHome({
   const [recoverError, setRecoverError] = useState('');
   const [onboardBusy, setOnboardBusy] = useState(false);
   const [onboardError, setOnboardError] = useState('');
+  // Auto-refresh state: `refreshing` spins the refresh button during a live read;
+  // `pollResetKey` restarts the poll schedule after a manual refresh.
+  const [refreshing, setRefreshing] = useState(false);
+  const [pollResetKey, setPollResetKey] = useState(0);
+  // Guards against a second read stacking on an in-flight one (e.g. tapping refresh during
+  // the initial load), which could wedge on concurrent wallet/IndexedDB access.
+  const inFlight = useRef(false);
+
+  // Fetch the live balance and apply it. Shared by the initial load, the auto-poll, and the
+  // manual refresh button; `refreshing` drives the refresh control's spinner. Bounded by a
+  // timeout so a read that never settles can't leave the button spinning forever.
+  const doRefresh = useCallback(async (): Promise<boolean> => {
+    if (inFlight.current) return false; // a refresh is already running — don't stack another
+    inFlight.current = true;
+    setRefreshing(true);
+    try {
+      const { snapshot } = await withTimeout(
+        client.refreshWalletSnapshot(),
+        REFRESH_TIMEOUT_MS,
+      );
+      setAddress(snapshot.address);
+      setBoardingAddress(snapshot.boardingAddress);
+      setBalance(snapshot.balance as AdjustedBalance);
+      setFetchedAt(snapshot.fetchedAt);
+      setOffline(false);
+      return true;
+    } catch (err) {
+      if (isLockedError(err)) {
+        onLocked();
+        return false;
+      }
+      // Timed out or operator unreachable — flag offline; keep the last known balance.
+      setOffline(true);
+      return false;
+    } finally {
+      inFlight.current = false;
+      setRefreshing(false);
+    }
+  }, [onLocked]);
+
+  // Manual refresh: read now, then restart the countdown so the next auto-poll is a full
+  // interval away rather than firing right on top of this one.
+  const refreshNow = useCallback(async () => {
+    await doRefresh();
+    setPollResetKey((k) => k + 1);
+  }, [doRefresh]);
 
   useEffect(() => {
     let cancelled = false;
@@ -75,70 +139,42 @@ export function WalletHome({
         // Cached read should not fail; ignore and let the live read drive state.
       }
 
-      // 2) Best-effort live reconciliation.
-      try {
-        const { snapshot } = await client.refreshWalletSnapshot();
-        if (cancelled) return;
-        setAddress(snapshot.address);
-        setBoardingAddress(snapshot.boardingAddress);
-        setBalance(snapshot.balance as AdjustedBalance);
-        setFetchedAt(snapshot.fetchedAt);
-        setOffline(false);
-      } catch (err) {
-        if (cancelled) return;
-        if (isLockedError(err)) {
-          onLocked();
-          return;
-        }
-        // Operator unreachable — keep cached values, flag offline.
-        setOffline(true);
-      } finally {
-        if (!cancelled) setLoadingLive(false);
-      }
+      // 2) Best-effort live reconciliation. Shares doRefresh so the initial load, the poll,
+      //    and the manual button all use the same timeout + in-flight guard.
+      await doRefresh();
+      if (!cancelled) setLoadingLive(false);
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [onLocked, reloadKey]);
+  }, [onLocked, reloadKey, doRefresh]);
 
   // Keep the balance fresh while the home view is open. Without this, a deposit that lands
   // while the popup stays open (an on-chain boarding UTXO, an incoming payment) only shows
   // after closing and reopening, since the balance is otherwise read once on mount. We poll
-  // only on the home view — sub-screens read their own data — and stop when it closes. The
-  // next poll is scheduled after the previous one finishes so slow reads never stack up.
+  // only on the home view — sub-screens read their own data — and stop when it closes. Each
+  // wait is scheduled after the previous read finishes so slow reads never stack up.
   useEffect(() => {
     if (showReceive || showSend || showHistory) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
 
-    const poll = async () => {
-      try {
-        const { snapshot } = await client.refreshWalletSnapshot();
+    const scheduleNext = (delay: number) => {
+      timer = setTimeout(async () => {
         if (cancelled) return;
-        setAddress(snapshot.address);
-        setBoardingAddress(snapshot.boardingAddress);
-        setBalance(snapshot.balance as AdjustedBalance);
-        setFetchedAt(snapshot.fetchedAt);
-        setOffline(false);
-      } catch (err) {
-        if (cancelled) return;
-        if (isLockedError(err)) {
-          onLocked();
-          return; // stop polling; the app routes to the unlock screen
-        }
-        // Operator unreachable — flag offline; keep polling so it recovers when back.
-        setOffline(true);
-      }
-      if (!cancelled) timer = setTimeout(poll, BALANCE_POLL_MS);
+        const ok = await doRefresh();
+        // On failure, back off so an outage doesn't rebuild the wallet every 15s.
+        if (!cancelled) scheduleNext(ok ? BALANCE_POLL_MS : OFFLINE_POLL_MS);
+      }, delay);
     };
 
-    timer = setTimeout(poll, BALANCE_POLL_MS);
+    scheduleNext(BALANCE_POLL_MS);
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [onLocked, showReceive, showSend, showHistory]);
+  }, [doRefresh, showReceive, showSend, showHistory, pollResetKey]);
 
   async function lock() {
     await client.lock();
@@ -250,6 +286,15 @@ export function WalletHome({
       <div className="home-top">
         <span className="pill">{network ? networkLabel(network) : '…'}</span>
         <div>
+          <button
+            className="icon-btn"
+            onClick={() => void refreshNow()}
+            disabled={refreshing}
+            aria-label="Refresh balance now"
+            title={refreshing ? 'Refreshing…' : 'Refresh now'}
+          >
+            <span className={refreshing ? 'refresh-glyph spinning' : 'refresh-glyph'}>🔄</span>
+          </button>
           <button className="icon-btn" onClick={onSettings} aria-label="Settings" title="Settings">
             ⚙
           </button>
