@@ -18,10 +18,15 @@ const BALANCE_POLL_MS = 15_000;
  *  and keeps the service worker from idling out to clean them up. */
 const OFFLINE_POLL_MS = 60_000;
 
-/** Give up on a single balance read after this long so a hung operator/network read can't
- *  leave the refresh button spinning forever. Kept under the poll interval so a stuck read
- *  clears before the next one is due. */
-const REFRESH_TIMEOUT_MS = 10_000;
+/** Cap a single refresh round-trip so a response that never arrives can't leave the refresh
+ *  button spinning forever. Two ways that happens: the service worker is killed mid-request,
+ *  or the background's own dispose hangs and the handler never settles.
+ *
+ *  This must stay ABOVE the background's worst case, which is two sequential 8s steps (wallet
+ *  build then balance read) plus the snapshot write and dispose. If it drops below that, a
+ *  slow-but-successful refresh loses the race here and shows a false "offline" while the fresh
+ *  snapshot the background just wrote sits unused until the next poll. */
+const REFRESH_TIMEOUT_MS = 20_000;
 
 /**
  * Wallet home.
