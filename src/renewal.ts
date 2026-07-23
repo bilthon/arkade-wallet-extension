@@ -1,4 +1,4 @@
-import { isUnlocked, getUnlockedSeed, armAutoLock } from './keystore';
+import { isUnlocked, getUnlockedSeed } from './keystore';
 import {
   buildWallet,
   renewExpiringVtxos,
@@ -117,37 +117,43 @@ export async function runRenewalTick(): Promise<
   // (`renewExpiringVtxos` also recovers-first internally as a standalone safety net for
   // the manual `renewNow` path; after this recover leg it re-reads fresh and finds
   // nothing to drain, so there is no double-recover.)
-  await armAutoLock(); // a renewal tick is activity — keep the session fresh
   const wallet = await buildWallet(seed);
 
-  let recovered = 0;
-  let txid: string | undefined;
   try {
-    const rec = await recoverExpiredVtxos(wallet);
-    recovered = rec.recovered;
-    txid = rec.txid;
-  } catch (err) {
-    console.warn('[arkade] recovery leg failed', err);
+    let recovered = 0;
+    let txid: string | undefined;
+    try {
+      const rec = await recoverExpiredVtxos(wallet);
+      recovered = rec.recovered;
+      txid = rec.txid;
+    } catch (err) {
+      console.warn('[arkade] recovery leg failed', err);
+    }
+
+    let renewed = 0;
+    try {
+      const r = await renewExpiringVtxos(wallet, RENEW_MARGIN_MS);
+      renewed = r.renewed;
+      txid ??= r.txid;
+    } catch (err) {
+      console.warn('[arkade] renewal leg failed', err);
+    }
+
+    // Re-read post-settle so the warning reflects the new state (ideally cleared).
+    const summary = await getExpiredVtxoSummary(wallet);
+    const hasWork =
+      summary.count > 0 ||
+      summary.recoverableCount > 0 ||
+      summary.nextExpiryAtMs !== null;
+    await setRenewalWarning(hasWork ? { ...summary, at: Date.now() } : null);
+
+    return { state: 'unlocked', renewed, recovered, txid };
+  } finally {
+    // Tear down the ContractWatcher this build started. An alarm tick is not a user
+    // gesture, so it must not keep the wallet's watcher alive between ticks. A live
+    // watcher would pin the service worker awake and stack a new watcher every minute.
+    await wallet.dispose().catch(() => {});
   }
-
-  let renewed = 0;
-  try {
-    const r = await renewExpiringVtxos(wallet, RENEW_MARGIN_MS);
-    renewed = r.renewed;
-    txid ??= r.txid;
-  } catch (err) {
-    console.warn('[arkade] renewal leg failed', err);
-  }
-
-  // Re-read post-settle so the warning reflects the new state (ideally cleared).
-  const summary = await getExpiredVtxoSummary(wallet);
-  const hasWork =
-    summary.count > 0 ||
-    summary.recoverableCount > 0 ||
-    summary.nextExpiryAtMs !== null;
-  await setRenewalWarning(hasWork ? { ...summary, at: Date.now() } : null);
-
-  return { state: 'unlocked', renewed, recovered, txid };
 }
 
 /**
