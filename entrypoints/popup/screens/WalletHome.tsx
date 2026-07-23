@@ -47,7 +47,6 @@ export function WalletHome({
   const [boardingAddress, setBoardingAddress] = useState<string | null>(null);
   const [balance, setBalance] = useState<AdjustedBalance | null>(null);
   const [fetchedAt, setFetchedAt] = useState<number | null>(null);
-  const [loadingLive, setLoadingLive] = useState(true);
   const [offline, setOffline] = useState(false);
   const [showReceive, setShowReceive] = useState(false);
   const [showSend, setShowSend] = useState(false);
@@ -135,7 +134,6 @@ export function WalletHome({
       // 2) Best-effort live reconciliation. Shares doRefresh so the initial load, the poll,
       //    and the manual button all use the same timeout + in-flight guard.
       await doRefresh();
-      if (!cancelled) setLoadingLive(false);
     })();
 
     return () => {
@@ -246,7 +244,11 @@ export function WalletHome({
   }
 
   // First-ever open with no cache yet and a live read still in flight → skeletons.
-  const showSkeleton = balance === null && loadingLive;
+  // Skeleton whenever we have no balance yet, so the breakdown (which reads
+  // balance.preconfirmed directly) never renders with a null balance. A cold first open
+  // can leave balance null after the initial read returns, so this must NOT also gate on
+  // a separate "loading" flag — null balance alone means "show skeletons".
+  const showSkeleton = balance === null;
   const isEmpty = balance !== null && balance.total === 0;
 
   const adjBalance = balance as AdjustedBalance | null;
