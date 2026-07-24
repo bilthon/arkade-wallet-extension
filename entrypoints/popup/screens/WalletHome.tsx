@@ -1,12 +1,32 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { NetworkName } from '@arkade-os/sdk';
 import type { AdjustedBalance } from '@/src/vtxo-state';
+import { withTimeout } from '@/src/async';
 import { type RenewalWarning, isWarningStale } from '@/src/renewal';
 import { client, isLockedError, errorMessage } from '../client';
 import { formatSats, networkLabel, relativeTime, untilRelative } from '../format';
 import { Receive } from './Receive';
 import { Send } from './Send';
 import { History } from './History';
+
+/** How often to re-read the balance while the home view is open, so a deposit (like an
+ *  on-chain boarding UTXO) shows up on its own instead of only after reopening the popup. */
+const BALANCE_POLL_MS = 15_000;
+
+/** After a failed read (operator unreachable), back off to this slower cadence so we don't
+ *  rebuild the wallet every 15s during an outage — which piles up failing indexer watchers
+ *  and keeps the service worker from idling out to clean them up. */
+const OFFLINE_POLL_MS = 60_000;
+
+/** Cap a single refresh round-trip so a response that never arrives can't leave the refresh
+ *  button spinning forever. Two ways that happens: the service worker is killed mid-request,
+ *  or the background's own dispose hangs and the handler never settles.
+ *
+ *  This must stay ABOVE the background's worst case, which is two sequential 8s steps (wallet
+ *  build then balance read) plus the snapshot write and dispose. If it drops below that, a
+ *  slow-but-successful refresh loses the race here and shows a false "offline" while the fresh
+ *  snapshot the background just wrote sits unused until the next poll. */
+const REFRESH_TIMEOUT_MS = 20_000;
 
 /**
  * Wallet home.
@@ -32,7 +52,6 @@ export function WalletHome({
   const [boardingAddress, setBoardingAddress] = useState<string | null>(null);
   const [balance, setBalance] = useState<AdjustedBalance | null>(null);
   const [fetchedAt, setFetchedAt] = useState<number | null>(null);
-  const [loadingLive, setLoadingLive] = useState(true);
   const [offline, setOffline] = useState(false);
   const [showReceive, setShowReceive] = useState(false);
   const [showSend, setShowSend] = useState(false);
@@ -43,6 +62,52 @@ export function WalletHome({
   const [recoverError, setRecoverError] = useState('');
   const [onboardBusy, setOnboardBusy] = useState(false);
   const [onboardError, setOnboardError] = useState('');
+  // Auto-refresh state: `refreshing` spins the refresh button during a live read;
+  // `pollResetKey` restarts the poll schedule after a manual refresh.
+  const [refreshing, setRefreshing] = useState(false);
+  const [pollResetKey, setPollResetKey] = useState(0);
+  // Guards against a second read stacking on an in-flight one (e.g. tapping refresh during
+  // the initial load), which could wedge on concurrent wallet/IndexedDB access.
+  const inFlight = useRef(false);
+
+  // Fetch the live balance and apply it. Shared by the initial load, the auto-poll, and the
+  // manual refresh button; `refreshing` drives the refresh control's spinner. Bounded by a
+  // timeout so a read that never settles can't leave the button spinning forever.
+  const doRefresh = useCallback(async (): Promise<boolean> => {
+    if (inFlight.current) return false; // a refresh is already running — don't stack another
+    inFlight.current = true;
+    setRefreshing(true);
+    try {
+      const { snapshot } = await withTimeout(
+        client.refreshWalletSnapshot(),
+        REFRESH_TIMEOUT_MS,
+      );
+      setAddress(snapshot.address);
+      setBoardingAddress(snapshot.boardingAddress);
+      setBalance(snapshot.balance as AdjustedBalance);
+      setFetchedAt(snapshot.fetchedAt);
+      setOffline(false);
+      return true;
+    } catch (err) {
+      if (isLockedError(err)) {
+        onLocked();
+        return false;
+      }
+      // Timed out or operator unreachable — flag offline; keep the last known balance.
+      setOffline(true);
+      return false;
+    } finally {
+      inFlight.current = false;
+      setRefreshing(false);
+    }
+  }, [onLocked]);
+
+  // Manual refresh: read now, then restart the countdown so the next auto-poll is a full
+  // interval away rather than firing right on top of this one.
+  const refreshNow = useCallback(async () => {
+    await doRefresh();
+    setPollResetKey((k) => k + 1);
+  }, [doRefresh]);
 
   useEffect(() => {
     let cancelled = false;
@@ -71,32 +136,41 @@ export function WalletHome({
         // Cached read should not fail; ignore and let the live read drive state.
       }
 
-      // 2) Best-effort live reconciliation.
-      try {
-        const { snapshot } = await client.refreshWalletSnapshot();
-        if (cancelled) return;
-        setAddress(snapshot.address);
-        setBoardingAddress(snapshot.boardingAddress);
-        setBalance(snapshot.balance as AdjustedBalance);
-        setFetchedAt(snapshot.fetchedAt);
-        setOffline(false);
-      } catch (err) {
-        if (cancelled) return;
-        if (isLockedError(err)) {
-          onLocked();
-          return;
-        }
-        // Operator unreachable — keep cached values, flag offline.
-        setOffline(true);
-      } finally {
-        if (!cancelled) setLoadingLive(false);
-      }
+      // 2) Best-effort live reconciliation. Shares doRefresh so the initial load, the poll,
+      //    and the manual button all use the same timeout + in-flight guard.
+      await doRefresh();
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [onLocked, reloadKey]);
+  }, [onLocked, reloadKey, doRefresh]);
+
+  // Keep the balance fresh while the home view is open. Without this, a deposit that lands
+  // while the popup stays open (an on-chain boarding UTXO, an incoming payment) only shows
+  // after closing and reopening, since the balance is otherwise read once on mount. We poll
+  // only on the home view — sub-screens read their own data — and stop when it closes. Each
+  // wait is scheduled after the previous read finishes so slow reads never stack up.
+  useEffect(() => {
+    if (showReceive || showSend || showHistory) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+
+    const scheduleNext = (delay: number) => {
+      timer = setTimeout(async () => {
+        if (cancelled) return;
+        const ok = await doRefresh();
+        // On failure, back off so an outage doesn't rebuild the wallet every 15s.
+        if (!cancelled) scheduleNext(ok ? BALANCE_POLL_MS : OFFLINE_POLL_MS);
+      }, delay);
+    };
+
+    scheduleNext(BALANCE_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [doRefresh, showReceive, showSend, showHistory, pollResetKey]);
 
   async function lock() {
     await client.lock();
@@ -175,7 +249,11 @@ export function WalletHome({
   }
 
   // First-ever open with no cache yet and a live read still in flight → skeletons.
-  const showSkeleton = balance === null && loadingLive;
+  // Skeleton whenever we have no balance yet, so the breakdown (which reads
+  // balance.preconfirmed directly) never renders with a null balance. A cold first open
+  // can leave balance null after the initial read returns, so this must NOT also gate on
+  // a separate "loading" flag — null balance alone means "show skeletons".
+  const showSkeleton = balance === null;
   const isEmpty = balance !== null && balance.total === 0;
 
   const adjBalance = balance as AdjustedBalance | null;
@@ -208,6 +286,28 @@ export function WalletHome({
       <div className="home-top">
         <span className="pill">{network ? networkLabel(network) : '…'}</span>
         <div>
+          <button
+            className="icon-btn"
+            onClick={() => void refreshNow()}
+            disabled={refreshing}
+            aria-label="Refresh balance now"
+            title={refreshing ? 'Refreshing…' : 'Refresh now'}
+          >
+            <svg
+              className={refreshing ? 'refresh-icon spinning' : 'refresh-icon'}
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <polyline points="23 4 23 10 17 10" />
+              <polyline points="1 20 1 14 7 14" />
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+            </svg>
+          </button>
           <button className="icon-btn" onClick={onSettings} aria-label="Settings" title="Settings">
             ⚙
           </button>
