@@ -31,14 +31,10 @@ import {
 /**
  * SDK wallet runtime.
  *
- * The MV3 background SW is a STATELESS router: it holds no live `Wallet` between
- * wakes. `buildWallet(seed)` re-creates one on each wake from the in-memory seed
- * (held only in `keystore.ts`) + the IndexedDB repositories (where the SDK has
- * already persisted VTXO/balance/history state). Construction is therefore cheap —
- * the durable state lives in IndexedDB and survives SW restarts.
- *
- * Read-only scope only: addresses, balances, pubkey, network. NO send/sign/settle/
- * delegation here — those come later.
+ * `wallet-runtime.ts` holds one `Wallet` for the whole unlocked session and builds
+ * it via `buildWallet(seed, network)`, backed by IndexedDB repositories (where the
+ * SDK persists VTXO/balance/history state so it survives SW restarts). The
+ * functions below all operate on that already-built wallet.
  */
 
 // ─── Network → operator/esplora config ──────────────────────────
@@ -139,10 +135,10 @@ export async function buildWallet(seed: Uint8Array, network: NetworkName): Promi
     // DEFAULT_SETTLEMENT_CONFIG (boardingUtxoSweep + 60s poll) and `Wallet.create`
     // eagerly starts a VtxoManager poll that auto-settles (onboards) new boarding
     // UTXOs into VTXOs and auto-renews on `vtxo_received` — all with NO user action.
-    // That is why the read-only wallet silently onboarded funds. A per-wake
-    // stateless SW wallet must not sign in the background, and explicit sends
-    // must be the only signing path. Deliberate renewal/delegation is a later
-    // job and will opt back in via `delegateProvider` / an explicit settlementConfig.
+    // That is why the read-only wallet silently onboarded funds. The SW wallet must
+    // not sign in the background, and explicit sends must be the only signing path.
+    // Deliberate renewal/delegation is a later job and will opt back in via
+    // `delegateProvider` / an explicit settlementConfig.
     settlementConfig: false,
     // With one shared wallet per unlocked session (instead of one per message), the
     // ContractWatcher this starts also lives for the whole session, so its backoff
@@ -676,6 +672,9 @@ export async function renewExpiringVtxos(
   // recoverable coins exist: that is exactly what triggered INVALID_INTENT_PROOF.
   if (renewable.length === 0) return { renewed: 0 };
 
+  // We never dispose this manager: it stays cached on `wallet` for reuse, and a
+  // disposed manager can't safely be reused. The session runtime owns the wallet's
+  // (and therefore the manager's) lifetime, not this function.
   const manager = await wallet.getVtxoManager();
   const thresholdSeconds = Math.max(1, Math.round(marginMs / 1000));
   try {
@@ -724,8 +723,6 @@ export async function renewExpiringVtxos(
     const human = translateSettleError(err);
     if (human) throw human;
     throw err;
-  } finally {
-    await manager.dispose();
   }
 }
 
@@ -764,6 +761,7 @@ export function hasRecoverableOrExpired(vtxos: ExtendedVirtualCoin[]): boolean {
 export async function recoverExpiredVtxos(
   wallet: Wallet,
 ): Promise<{ recovered: number; sats: number; txid?: string }> {
+  // Not disposed here — see the same note in renewExpiringVtxos.
   const manager = await wallet.getVtxoManager();
   try {
     // Cheap, no-signing probe first — avoids spinning up a batch round for nothing.
@@ -790,8 +788,6 @@ export async function recoverExpiredVtxos(
     const human = translateSettleError(err);
     if (human) throw human;
     throw err;
-  } finally {
-    await manager.dispose();
   }
 }
 

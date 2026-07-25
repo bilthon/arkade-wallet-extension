@@ -1,3 +1,4 @@
+import type { Wallet } from '@arkade-os/sdk';
 import { onMessage } from '@/src/messaging';
 import { withTimeout } from '@/src/async';
 import {
@@ -16,7 +17,6 @@ import {
 } from '@/src/keystore';
 import { hasVault, getNetwork as getStoredNetwork } from '@/src/storage';
 import {
-  buildWallet,
   getAddress,
   getBoardingAddress,
   getBalance,
@@ -29,6 +29,7 @@ import {
   onboardBoarding,
   getTransactionHistory,
 } from '@/src/wallet';
+import { getSessionWallet, invalidateSessionWallet, ensureFreshVtxos } from '@/src/wallet-runtime';
 import { getSnapshot, setSnapshot, type WalletSnapshot } from '@/src/wallet-cache';
 import {
   registerRenewal,
@@ -81,7 +82,11 @@ export default defineBackground(() => {
   // Reads need the wallet unlocked, so a lock effectively disconnects them.
   onLock(() => {
     void emitToAllConnected('disconnect');
-    // The Lightning swap runtime must not outlive the seed it was built from.
+    // Neither the session wallet nor the Lightning swap runtime may outlive the seed
+    // they were built from. `invalidateSessionWallet` disposes the wallet's contract
+    // manager/watcher; without also dropping the Lightning runtime here, a surviving
+    // `ArkadeSwaps` would silently rebuild them on its next call.
+    void invalidateSessionWallet();
     void disposeSwaps();
   });
 
@@ -133,8 +138,15 @@ export default defineBackground(() => {
   });
 
   onMessage('switchNetwork', async ({ data }) => {
+    // Both runtimes are keyed by the network baked into their operator/Boltz config,
+    // so drop them before the password check — nothing should keep building against
+    // a network storage is about to disagree with.
+    void invalidateSessionWallet();
+    void disposeSwaps();
     await switchNetwork(data.network, data.password);
-    // The old network's swap repo + Boltz endpoint are now stale.
+    // Invalidate again: anything that started building during the password check
+    // (a race, not the common case) must not survive into the new network either.
+    void invalidateSessionWallet();
     void disposeSwaps();
     // Operator network changed → notify connected sites so they don't keep acting on the
     // old network (cached address/PSBTs would target the wrong operator).
@@ -168,39 +180,36 @@ export default defineBackground(() => {
     return { snapshot: await getSnapshot(network) };
   });
 
-  // Live reconciliation: build wallet, read operator, persist + return fresh snapshot.
+  // Live reconciliation: read operator, persist + return fresh snapshot.
   onMessage('refreshWalletSnapshot', async () => {
-    // Bound the build so a hung operator getInfo can't block for tens of seconds. A build
-    // that times out never called getVtxos, so it started no watcher to dispose.
+    // Bound the build so a hung operator getInfo can't block for tens of seconds.
     const wallet = await withTimeout(requireWallet(), REFRESH_STEP_TIMEOUT_MS, 'wallet build');
-    try {
-      const network = await getStoredNetwork();
-      // getBalance() calls wallet.getVtxos(), which spins up a ContractWatcher. Bound the
-      // reads so a hung indexer can't hold it open, and always dispose in the finally.
-      const [address, boardingAddress, balance] = await withTimeout(
-        Promise.all([getAddress(wallet), getBoardingAddress(wallet), getBalance(wallet)]),
-        REFRESH_STEP_TIMEOUT_MS,
-        'balance read',
-      );
-      const snapshot: WalletSnapshot = {
-        network,
-        address,
-        boardingAddress,
-        balance,
-        fetchedAt: Date.now(),
-      };
-      await setSnapshot(snapshot);
-      return { snapshot };
-    } finally {
-      // Tear down the ContractWatcher this wallet started so it can't reconnect-loop or
-      // accumulate across polls. Only disposes the watcher, not the shared IndexedDB.
-      await wallet.dispose().catch(() => {});
-    }
+    const network = await getStoredNetwork();
+    // Bound the reads so a hung indexer can't hold this open.
+    const [address, boardingAddress, balance] = await withTimeout(
+      Promise.all([getAddress(wallet), getBoardingAddress(wallet), getBalance(wallet)]),
+      REFRESH_STEP_TIMEOUT_MS,
+      'balance read',
+    );
+    const snapshot: WalletSnapshot = {
+      network,
+      address,
+      boardingAddress,
+      balance,
+      fetchedAt: Date.now(),
+    };
+    await setSnapshot(snapshot);
+    return { snapshot };
   });
 
   // Unlock-gated: lists every VTXO (spendable + needs-renewal + needs-recovery) for the
-  // coin-control screen. Read-only; only public DTOs cross back.
-  onMessage('listCoins', async () => listCoins(await requireWallet()));
+  // coin-control screen. Read-only; only public DTOs cross back. The shared wallet no
+  // longer gets an implicit sync from construction, so ask for one before reading.
+  onMessage('listCoins', async () => {
+    const wallet = await requireWallet();
+    await ensureFreshVtxos(wallet);
+    return listCoins(wallet);
+  });
 
   // ── Off-chain send ─────────────────────────────────────────────────────────
   // Gated on unlock via requireWallet (re-arms auto-lock). The SW validates
@@ -209,11 +218,13 @@ export default defineBackground(() => {
   // `data.outpoints` (coin control) restricts the send to an exact coin selection.
   onMessage('send', async ({ data }) => {
     const wallet = await requireWallet();
+    await ensureFreshVtxos(wallet); // coin selection needs a live view of what's spendable
     return send(wallet, data);
   });
 
   onMessage('sendOnchain', async ({ data }) => {
     const wallet = await requireWallet();
+    await ensureFreshVtxos(wallet); // coin selection needs a live view of what's spendable
     return sendOnchain(wallet, data);
   });
 
@@ -342,8 +353,8 @@ export default defineBackground(() => {
   console.log('[arkade] background ready');
 });
 
-/** Timeout (ms) for a single wallet build or balance read in the SW, so a hung operator
- *  or indexer can't block the refresh. On timeout we fail fast and dispose the wallet. */
+/** Timeout (ms) for a single wallet build or balance read in the SW, so a hung
+ *  operator or indexer can't block the refresh. On timeout we fail fast. */
 const REFRESH_STEP_TIMEOUT_MS = 8000;
 
 /**
@@ -358,7 +369,15 @@ async function requireSeed(): Promise<Uint8Array> {
   return seed;
 }
 
-/** Build a `Wallet` from the in-memory seed, or throw if locked (see {@link requireSeed}). */
-async function requireWallet() {
-  return buildWallet(await requireSeed(), await getStoredNetwork());
+/**
+ * The shared session wallet, or throw if locked. Re-arms auto-lock first so an
+ * active session keeps the idle window fresh — every route through here counts
+ * as user activity. No seed or network re-derivation happens at this call site;
+ * `getSessionWallet()` owns both, so a lock or network switch racing this call
+ * is caught there rather than re-implemented here.
+ */
+async function requireWallet(): Promise<Wallet> {
+  if (!isUnlocked()) throw new Error('LOCKED');
+  await armAutoLock();
+  return getSessionWallet();
 }

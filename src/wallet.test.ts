@@ -94,7 +94,8 @@ describe('renewExpiringVtxos — recover-before-renew ordering', () => {
     expect(manager.recoverVtxos).toHaveBeenCalledOnce();
     expect(manager.renewVtxos).toHaveBeenCalledOnce();
     expect(res.renewed).toBe(1); // only the renewable coin counts
-    expect(manager.dispose).toHaveBeenCalledOnce();
+    // The manager stays cached on the wallet; the session runtime owns its lifetime.
+    expect(manager.dispose).not.toHaveBeenCalled();
   });
 
   it('skips the recover drain when nothing is poisoning (only live + expiring-soon)', async () => {
