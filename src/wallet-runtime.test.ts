@@ -344,3 +344,18 @@ describe('lifetime gaps', () => {
     }
   });
 });
+
+describe('disposed wallets stay dead', () => {
+  it('makes a post-invalidation read fail instead of resurrecting a watcher', async () => {
+    const wallet = fakeWallet();
+    buildWalletMock.mockResolvedValue(wallet);
+    const held = await getSessionWallet(); // a handler holding its wallet across awaits
+
+    await invalidateSessionWallet(); // lock lands while the handler is suspended
+
+    // Without this, `getContractManager()` would build a new manager, and with it a
+    // watcher and poll that nothing holds a reference to and nothing can stop.
+    await expect(held.getContractManager()).rejects.toThrow('LOCKED');
+    expect(wallet.dispose).toHaveBeenCalledOnce();
+  });
+});

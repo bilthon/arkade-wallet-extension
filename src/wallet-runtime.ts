@@ -88,6 +88,26 @@ async function resolveSessionWallet(): Promise<Wallet> {
   return buildSessionWallet(network);
 }
 
+/**
+ * Dispose a wallet we are finished with, and make sure it stays dead.
+ *
+ * `Wallet.dispose()` clears the wallet's contract manager but leaves the wallet
+ * usable. The next `getContractManager()` simply builds a new one, and building one
+ * starts a fresh ContractWatcher with its own subscription and its own repeating
+ * poll. That matters because handlers hold their wallet across awaits: a balance read
+ * racing a lock resumes after we disposed, calls `getVtxos()`, and resurrects exactly
+ * that watcher. Nothing holds a reference to it any more, so nothing can ever stop it.
+ *
+ * Replacing the accessor closes the hole. Reads that belong to a dead session now
+ * fail with LOCKED, which the messaging layer already routes to the unlock screen,
+ * instead of leaking a watcher for the rest of the service worker's life. We swap it
+ * before disposing so there is no window where the old accessor still works.
+ */
+async function disposeWallet(wallet: Wallet): Promise<void> {
+  wallet.getContractManager = () => Promise.reject(new Error('LOCKED'));
+  await wallet.dispose().catch(() => {});
+}
+
 /** Build a fresh session wallet for `network` and cache it on success. */
 async function buildSessionWallet(network: NetworkName): Promise<Wallet> {
   const seed = getUnlockedSeed();
@@ -102,7 +122,7 @@ async function buildSessionWallet(network: NetworkName): Promise<Wallet> {
   let timedOut = false;
   build.then(
     (late) => {
-      if (timedOut) void late.dispose().catch(() => {});
+      if (timedOut) void disposeWallet(late);
     },
     () => {},
   );
@@ -119,7 +139,7 @@ async function buildSessionWallet(network: NetworkName): Promise<Wallet> {
   // generation moved, or the unlocked seed is no longer the one we started with.
   // Either way this wallet must not become the cached one.
   if (gen !== generation || getUnlockedSeed() !== seed) {
-    await wallet.dispose().catch(() => {});
+    await disposeWallet(wallet);
     throw new Error('LOCKED');
   }
 
@@ -147,7 +167,7 @@ export async function invalidateSessionWallet(): Promise<void> {
   // next (possibly for a different network) starts with no assumed freshness.
   lastRefreshMs = 0;
   refreshPromise = null;
-  if (wallet) await wallet.dispose().catch(() => {});
+  if (wallet) await disposeWallet(wallet);
 }
 
 // ─── VTXO freshness ────────────────────────────────────────────────────────────
