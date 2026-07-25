@@ -178,6 +178,12 @@ const INVOICE_250K =
 const INVOICE_AMOUNTLESS =
   'lnbc1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdpl2pkx2ctnv5sxxmmwwd5kgetjypeh2ursdae8g6twvus8g6rfwvs8qun0dfjkxaq8rkx3yf5tcsyz3d73gafnh3cax9rn449d9p5uxz9ezhhypd0elx87sjle52x86fux2ypatgddc6k63n7erqz25le42c4u4ecky03ylcqca784w';
 
+/** Yield enough microtasks for createRuntime to reach its gated `ArkadeSwaps.create()`
+ * call (past the getStoredNetwork/getSessionWallet awaits) without resolving it. */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+}
+
 /** A promise plus its resolve/reject, for controlling exactly when a mocked build settles. */
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -378,12 +384,22 @@ describe('getSwaps — singleton lifecycle', () => {
     state.createArkadeSwaps.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
 
     const a = await getSwaps();
+    const staleWallet = state.createArkadeSwaps.mock.calls[0][0].wallet;
+
+    // The real onLock/switchNetwork handlers invalidate the wallet before disposing
+    // the swap runtime; mirror that order here.
+    await invalidateSessionWallet();
     await disposeSwaps();
     expect(first.dispose).toHaveBeenCalledOnce();
 
     const b = await getSwaps();
     expect(b).toBe(second);
     expect(b).not.toBe(a);
+    // This test owns both halves of a lock/switchNetwork rebuild: the ArkadeSwaps
+    // instance above, and the wallet it was built with here — the rebuild must not
+    // reuse the wallet the disposed session held.
+    const freshWallet = state.createArkadeSwaps.mock.calls[1][0].wallet;
+    expect(freshWallet).not.toBe(staleWallet);
   });
 
   it('rebuilds against the new network after a network change + disposeSwaps (the real switchNetwork flow)', async () => {
@@ -538,11 +554,16 @@ describe('getSwaps / payInvoice — sharing the session Arkade wallet', () => {
     const gate = deferred<ReturnType<typeof fakeSwapInstance>>();
     state.createArkadeSwaps.mockReturnValueOnce(gate.promise).mockResolvedValueOnce(second);
 
-    const building = getSwaps(); // wallet build already resolved; ArkadeSwaps.create is gated
+    const building = getSwaps();
+    await settle(); // let the wallet build resolve; ArkadeSwaps.create is left gated
 
-    // A real lock or network switch invalidates both runtimes together.
-    await disposeSwaps();
-    await invalidateSessionWallet();
+    // The real onLock/switchNetwork handlers fire both calls in the same
+    // synchronous tick, invalidating the wallet before disposing the swap
+    // runtime. Mirror that: no await between the two, so nothing can run in
+    // between them, then wait for both together.
+    const invalidated = invalidateSessionWallet();
+    const disposed = disposeSwaps();
+    await Promise.all([invalidated, disposed]);
 
     gate.resolve(first); // the build finishes AFTER both dropped
     await expect(building).rejects.toThrow('LOCKED');
@@ -552,30 +573,6 @@ describe('getSwaps / payInvoice — sharing the session Arkade wallet', () => {
     expect(b).toBe(second);
     // The wallet was invalidated too, so the rebuild gets a fresh one, not the
     // one the disposed-of first build used.
-    expect(state.walletBuildCount).toBe(2);
-  });
-
-  it('a lock landing while the swap runtime is already live disposes it and rebuilds with a fresh wallet next time', async () => {
-    const first = fakeSwapInstance();
-    const second = fakeSwapInstance();
-    state.createArkadeSwaps.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
-
-    const instance = await getSwaps(); // fully resolved, not just building
-    expect(instance).toBe(first);
-    const staleWallet = state.createArkadeSwaps.mock.calls[0][0].wallet;
-
-    // The real onLock/switchNetwork handlers call both together — a lock landing on
-    // an already-live runtime, not one still under construction.
-    await disposeSwaps();
-    await invalidateSessionWallet();
-    expect(first.dispose).toHaveBeenCalledOnce();
-
-    const rebuilt = await getSwaps();
-    expect(rebuilt).toBe(second);
-    expect(rebuilt).not.toBe(instance);
-    const freshWallet = state.createArkadeSwaps.mock.calls[1][0].wallet;
-    // The rebuild gets a real new wallet, not the one the disposed session held.
-    expect(freshWallet).not.toBe(staleWallet);
     expect(state.walletBuildCount).toBe(2);
   });
 });
