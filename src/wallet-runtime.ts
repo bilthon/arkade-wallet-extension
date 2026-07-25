@@ -13,10 +13,13 @@ import { withTimeout } from './async';
  * This module instead holds one `Wallet` for as long as the service worker stays
  * unlocked on one network, and every read/send/renewal path shares it.
  *
- * Construction is also how the SDK refreshes its VTXO cache: `Wallet.create` runs
- * the contract manager's `initialize()`, which reconciles watched contracts against
- * the operator. Removing per-message construction removes that implicit sync too,
- * so a read that needs a live view must call `ensureFreshVtxos` first.
+ * Per-message construction was also what kept the VTXO cache fresh, though not via
+ * `Wallet.create` itself. The contract manager is built lazily on the first
+ * `getContractManager()`, and building it reconciles the watched contracts against
+ * the operator. Every read went through `wallet.getVtxos()`, which calls
+ * `getContractManager()`, so each message paid one delta sync. One shared wallet
+ * builds that manager once, so a read that needs a live view now has to call
+ * `ensureFreshVtxos` first.
  */
 
 // ─── Session wallet ────────────────────────────────────────────────────────────
@@ -65,6 +68,13 @@ export function getSessionWallet(): Promise<Wallet> {
  * share this one promise instead of each starting a build.
  */
 async function resolveSessionWallet(): Promise<Wallet> {
+  // Check the lock before the cache read, not just on the build path below. `lock()`
+  // zeroes the seed and then awaits two storage writes before its listeners run
+  // `invalidateSessionWallet`, so for that window the wallet is already locked while
+  // the cached one is still here. Handing it out would let a post-lock caller sign,
+  // because the SDK identity was derived at build time and never re-reads the seed.
+  if (!getUnlockedSeed() || !isUnlocked()) throw new Error('LOCKED');
+
   const network = await getStoredNetwork();
 
   if (resolvedNetwork !== null && resolvedNetwork !== network) {
@@ -84,7 +94,26 @@ async function buildSessionWallet(network: NetworkName): Promise<Wallet> {
   if (!seed || !isUnlocked()) throw new Error('LOCKED');
 
   const gen = generation;
-  const wallet = await withTimeout(buildWallet(seed, network), BUILD_TIMEOUT_MS, 'wallet build');
+  const build = buildWallet(seed, network);
+  // `withTimeout` races, it does not cancel. When the timer wins, the build keeps
+  // running and resolves into a live wallet nobody holds a reference to. Dispose that
+  // one, or a slow operator leaks a watcher per timed-out attempt, which is the
+  // pile-up this module exists to remove.
+  let timedOut = false;
+  build.then(
+    (late) => {
+      if (timedOut) void late.dispose().catch(() => {});
+    },
+    () => {},
+  );
+
+  let wallet: Wallet;
+  try {
+    wallet = await withTimeout(build, BUILD_TIMEOUT_MS, 'wallet build');
+  } catch (err) {
+    timedOut = true;
+    throw err;
+  }
 
   // A lock or a network switch landing during the build above invalidates it: the
   // generation moved, or the unlocked seed is no longer the one we started with.
@@ -143,7 +172,12 @@ export async function ensureFreshVtxos(wallet: Wallet, maxAgeMs = 10_000): Promi
   if (refreshPromise) return refreshPromise;
   if (Date.now() - lastRefreshMs < maxAgeMs) return;
 
-  const mine = refreshVtxosNow(wallet);
+  // The bound covers the whole refresh, not just `refreshVtxos()`. The first
+  // `getContractManager()` of a session is itself an indexer round trip, and the SDK's
+  // REST provider passes no abort signal, so a black-holed request there never settles.
+  // Timing out only the second half would leave this memo set forever and every later
+  // caller would join a promise that never resolves.
+  const mine = withTimeout(refreshVtxosNow(wallet), REFRESH_TIMEOUT_MS, 'vtxo refresh');
   refreshPromise = mine;
   try {
     await mine;
@@ -153,7 +187,12 @@ export async function ensureFreshVtxos(wallet: Wallet, maxAgeMs = 10_000): Promi
 }
 
 async function refreshVtxosNow(wallet: Wallet): Promise<void> {
+  const gen = generation;
   const manager = await wallet.getContractManager();
-  await withTimeout(manager.refreshVtxos(), REFRESH_TIMEOUT_MS, 'vtxo refresh');
-  lastRefreshMs = Date.now();
+  await manager.refreshVtxos();
+  // Only stamp the freshness window if this refresh still belongs to the current
+  // wallet. A refresh that lands after a lock or a network switch reconciled the OLD
+  // wallet, so recording it would make the next wallet look fresh when nothing has
+  // reconciled it, and reads would trust an unsynced cache for the whole window.
+  if (gen === generation) lastRefreshMs = Date.now();
 }

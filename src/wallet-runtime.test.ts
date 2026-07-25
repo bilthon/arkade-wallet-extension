@@ -265,3 +265,82 @@ describe('ensureFreshVtxos', () => {
     }
   });
 });
+
+/**
+ * Regressions found reviewing the first cut of this module. Each one is a lifetime
+ * gap: work that outlives the wallet it belongs to, or a wallet that outlives the
+ * unlocked session. They are grouped because they share that shape, not because they
+ * share code.
+ */
+describe('lifetime gaps', () => {
+  it('throws LOCKED on the cache-hit path, not just when building', async () => {
+    const wallet = fakeWallet();
+    buildWalletMock.mockResolvedValue(wallet);
+    expect(await getSessionWallet()).toBe(wallet);
+
+    // `lock()` zeroes the seed and then awaits two storage writes before its listeners
+    // reach invalidateSessionWallet, so this state is reachable in production.
+    state.seed = null;
+
+    await expect(getSessionWallet()).rejects.toThrow('LOCKED');
+  });
+
+  it('bounds the whole refresh, so a hung getContractManager cannot wedge later callers', async () => {
+    vi.useFakeTimers();
+    try {
+      const hung = fakeWallet({ getContractManager: vi.fn(() => new Promise(() => {})) });
+      const first = ensureFreshVtxos(hung, 0);
+      const assertion = expect(first).rejects.toThrow(/timed out/i);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await assertion;
+
+      // The memo cleared, so a healthy wallet refreshes normally afterwards.
+      const refreshVtxos = vi.fn(async () => {});
+      const healthy = fakeWallet({ getContractManager: vi.fn(async () => ({ refreshVtxos })) });
+      await ensureFreshVtxos(healthy, 0);
+      expect(refreshVtxos).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not stamp the freshness window from a refresh that outlived its wallet', async () => {
+    const gate = deferred<void>();
+    const oldWallet = fakeWallet({
+      getContractManager: vi.fn(async () => ({ refreshVtxos: vi.fn(() => gate.promise) })),
+    });
+    const inFlight = ensureFreshVtxos(oldWallet, 0);
+    await vi.waitFor(() => expect(oldWallet.getContractManager).toHaveBeenCalled());
+
+    await invalidateSessionWallet(); // lock, or a network switch
+    gate.resolve();
+    await inFlight;
+
+    // The next wallet was never reconciled, so it must not count as fresh.
+    const refreshVtxos = vi.fn(async () => {});
+    const newWallet = fakeWallet({ getContractManager: vi.fn(async () => ({ refreshVtxos })) });
+    await ensureFreshVtxos(newWallet, 10_000);
+    expect(refreshVtxos).toHaveBeenCalledOnce();
+  });
+
+  it('disposes a build that lost the timeout race', async () => {
+    vi.useFakeTimers();
+    try {
+      const late = fakeWallet();
+      const gate = deferred<Wallet>();
+      buildWalletMock.mockReturnValueOnce(gate.promise);
+
+      const timedOut = getSessionWallet();
+      const assertion = expect(timedOut).rejects.toThrow(/timed out/i);
+      await vi.advanceTimersByTimeAsync(8_000);
+      await assertion;
+
+      gate.resolve(late); // the slow operator finally answers
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(late.dispose).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
