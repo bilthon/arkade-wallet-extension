@@ -80,6 +80,13 @@ async function resolveSessionWallet(): Promise<Wallet> {
   if (resolvedNetwork !== null && resolvedNetwork !== network) {
     // The active network moved since the last build. The cached wallet points at
     // the wrong operator now, so drop it before building fresh.
+    //
+    // Unreachable today, and deliberately so: the only writer of the stored network
+    // is the switchNetwork handler, which invalidates both this runtime and the
+    // Lightning one on either side of the write. This branch would invalidate the
+    // wallet WITHOUT disposing the Lightning runtime, which breaks the rule that the
+    // two are always torn down together. Kept as a backstop, but any future caller
+    // that can reach it has to dispose the Lightning runtime too.
     await invalidateSessionWallet();
   }
 
@@ -91,20 +98,29 @@ async function resolveSessionWallet(): Promise<Wallet> {
 /**
  * Dispose a wallet we are finished with, and make sure it stays dead.
  *
- * `Wallet.dispose()` clears the wallet's contract manager but leaves the wallet
- * usable. The next `getContractManager()` simply builds a new one, and building one
- * starts a fresh ContractWatcher with its own subscription and its own repeating
- * poll. That matters because handlers hold their wallet across awaits: a balance read
- * racing a lock resumes after we disposed, calls `getVtxos()`, and resurrects exactly
- * that watcher. Nothing holds a reference to it any more, so nothing can ever stop it.
+ * `Wallet.dispose()` clears both of the wallet's managers but leaves the wallet
+ * usable, and each accessor rebuilds when it finds its field empty. That matters
+ * because handlers hold their wallet across awaits, so a read racing a lock resumes
+ * after we disposed and rebuilds whatever it asks for, on a wallet nobody holds a
+ * reference to any more:
+ *  1. `getContractManager()` starts a fresh ContractWatcher with its own subscription
+ *     and its own repeating poll, which nothing can then stop.
+ *  2. `getVtxoManager()` constructs a VtxoManager, whose constructor schedules a
+ *     self-rescheduling boarding poll that auto-settles. That poll is inert only
+ *     because we pass `settlementConfig: false`. Automatic boarding is the planned
+ *     follow-up to this refactor, and it would turn this into a leaked poll that
+ *     signs on its own.
  *
- * Replacing the accessor closes the hole. Reads that belong to a dead session now
+ * Replacing both accessors closes the hole. Reads that belong to a dead session now
  * fail with LOCKED, which the messaging layer already routes to the unlock screen,
- * instead of leaking a watcher for the rest of the service worker's life. We swap it
- * before disposing so there is no window where the old accessor still works.
+ * instead of leaking background work for the rest of the service worker's life. We
+ * swap them before disposing so there is no window where the old ones still work.
+ * Disposal itself is unaffected: it reads the manager fields directly, never through
+ * these accessors.
  */
 async function disposeWallet(wallet: Wallet): Promise<void> {
   wallet.getContractManager = () => Promise.reject(new Error('LOCKED'));
+  wallet.getVtxoManager = () => Promise.reject(new Error('LOCKED'));
   await wallet.dispose().catch(() => {});
 }
 

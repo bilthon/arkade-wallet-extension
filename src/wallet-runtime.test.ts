@@ -49,6 +49,7 @@ function fakeWallet(overrides: Record<string, unknown> = {}) {
   return {
     dispose: vi.fn(async () => {}),
     getContractManager: vi.fn(async () => ({ refreshVtxos: vi.fn(async () => {}) })),
+    getVtxoManager: vi.fn(async () => ({})),
     ...overrides,
   } as unknown as Wallet;
 }
@@ -169,6 +170,8 @@ describe('getSessionWallet', () => {
     gate.resolve(wallet);
     await expect(building).rejects.toThrow('LOCKED');
     expect(wallet.dispose).toHaveBeenCalledOnce();
+    await expect(wallet.getContractManager()).rejects.toThrow('LOCKED');
+    await expect(wallet.getVtxoManager()).rejects.toThrow('LOCKED');
   });
 
   it('disposes the old wallet and builds against the new network on a network change', async () => {
@@ -339,6 +342,8 @@ describe('lifetime gaps', () => {
       await vi.advanceTimersByTimeAsync(0);
 
       expect(late.dispose).toHaveBeenCalledOnce();
+      await expect(late.getContractManager()).rejects.toThrow('LOCKED');
+      await expect(late.getVtxoManager()).rejects.toThrow('LOCKED');
     } finally {
       vi.useRealTimers();
     }
@@ -353,9 +358,11 @@ describe('disposed wallets stay dead', () => {
 
     await invalidateSessionWallet(); // lock lands while the handler is suspended
 
-    // Without this, `getContractManager()` would build a new manager, and with it a
-    // watcher and poll that nothing holds a reference to and nothing can stop.
+    // Without this, each accessor would rebuild its manager: a watcher and poll for
+    // the contract manager, a self-rescheduling boarding poll for the vtxo manager.
+    // Nothing holds a reference to either, so nothing could ever stop them.
     await expect(held.getContractManager()).rejects.toThrow('LOCKED');
+    await expect(held.getVtxoManager()).rejects.toThrow('LOCKED');
     expect(wallet.dispose).toHaveBeenCalledOnce();
   });
 });

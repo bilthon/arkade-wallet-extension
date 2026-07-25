@@ -10,13 +10,14 @@ import type { Wallet } from '@arkade-os/sdk';
  * the wallet never auto-locks while the service worker lives.
  *
  * Module mocking strategy:
- *  • './keystore' → controllable seed, plus an `armAutoLock` spy that must stay unused.
+ *  • './keystore' → real module, with only the seed readers overridden.
  *  • './wallet-runtime' → `getSessionWallet`/`ensureFreshVtxos` spies, no real wallet.
  *  • './wallet' → the three settle/read helpers the tick calls.
  */
 
 // The tick reads and writes the warning snapshot through `browser.storage.local`,
 // so stub the same minimal surface `keystore.test.ts` does.
+const alarmCreate = vi.hoisted(() => vi.fn(async () => {}));
 const local = new Map<string, unknown>();
 vi.stubGlobal('browser', {
   storage: {
@@ -28,15 +29,18 @@ vi.stubGlobal('browser', {
       remove: vi.fn(async (key: string) => void local.delete(key)),
     },
   },
+  alarms: { create: alarmCreate, clear: vi.fn(async () => {}), onAlarm: { addListener: vi.fn() } },
 });
 
 const state = vi.hoisted(() => ({ seed: new Uint8Array(32).fill(1) as Uint8Array | null }));
 
-const armAutoLock = vi.hoisted(() => vi.fn(async () => {}));
-vi.mock('./keystore', () => ({
+// Keep the REAL `armAutoLock` and watch the alarm it creates, rather than spying on a
+// mock of it. A spy only catches someone importing `armAutoLock` into this module by
+// name; watching the alarm catches any transitive rearm, and it survives a rename.
+vi.mock('./keystore', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./keystore')>()),
   getUnlockedSeed: vi.fn(() => state.seed),
   isUnlocked: vi.fn(() => state.seed !== null),
-  armAutoLock,
 }));
 
 const wallet = vi.hoisted(() => ({}) as Wallet);
@@ -66,7 +70,7 @@ import { runRenewalTick } from './renewal';
 
 beforeEach(() => {
   state.seed = new Uint8Array(32).fill(1);
-  vi.clearAllMocks();
+  vi.resetAllMocks(); // clearAllMocks leaves mockImplementation in place, which leaks between cases
   getSessionWallet.mockResolvedValue(wallet);
 });
 
@@ -76,8 +80,9 @@ describe('runRenewalTick', () => {
 
     expect(result.state).toBe('unlocked');
     expect(getSessionWallet).toHaveBeenCalledOnce();
-    // The whole point of the maintenance path: the idle window must not move.
-    expect(armAutoLock).not.toHaveBeenCalled();
+    // The whole point of the maintenance path: the idle window must not move. The
+    // auto-lock alarm is how it moves, so assert none was ever created.
+    expect(alarmCreate).not.toHaveBeenCalled();
   });
 
   it('does not move the deadline across repeated ticks either', async () => {
@@ -85,7 +90,7 @@ describe('runRenewalTick', () => {
     await runRenewalTick();
     await runRenewalTick();
 
-    expect(armAutoLock).not.toHaveBeenCalled();
+    expect(alarmCreate).not.toHaveBeenCalled();
   });
 
   it('refreshes VTXOs before selecting coins to recover or renew', async () => {
@@ -116,6 +121,6 @@ describe('runRenewalTick', () => {
     expect(result.state).toBe('locked');
     expect(getSessionWallet).not.toHaveBeenCalled();
     expect(ensureFreshVtxos).not.toHaveBeenCalled();
-    expect(armAutoLock).not.toHaveBeenCalled();
+    expect(alarmCreate).not.toHaveBeenCalled();
   });
 });
