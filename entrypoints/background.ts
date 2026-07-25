@@ -1,6 +1,5 @@
 import type { Wallet } from '@arkade-os/sdk';
 import { onMessage } from '@/src/messaging';
-import { withTimeout } from '@/src/async';
 import {
   registerAutoLock,
   armAutoLock,
@@ -180,17 +179,33 @@ export default defineBackground(() => {
     return { snapshot: await getSnapshot(network) };
   });
 
-  // Live reconciliation: read operator, persist + return fresh snapshot.
+  // Live reconciliation: read operator, persist + return fresh snapshot. Concurrent
+  // callers (the popup's 15s poll racing a manual refresh, or another poll tick)
+  // join the same `getSessionWallet`/`ensureFreshVtxos` calls rather than each
+  // starting their own build or reconciliation; the timeouts that bound a hung
+  // build or a hung indexer now live inside the runtime, not this handler.
   onMessage('refreshWalletSnapshot', async () => {
-    // Bound the build so a hung operator getInfo can't block for tens of seconds.
-    const wallet = await withTimeout(requireWallet(), REFRESH_STEP_TIMEOUT_MS, 'wallet build');
+    // Capture the network we're refreshing so we can tell, once the reads finish,
+    // whether it moved underneath us.
     const network = await getStoredNetwork();
-    // Bound the reads so a hung indexer can't hold this open.
-    const [address, boardingAddress, balance] = await withTimeout(
-      Promise.all([getAddress(wallet), getBoardingAddress(wallet), getBalance(wallet)]),
-      REFRESH_STEP_TIMEOUT_MS,
-      'balance read',
-    );
+    const wallet = await requireWallet();
+    // maxAgeMs 0 forces a real reconciliation: an explicit user-facing refresh must
+    // not be answered from the freshness window, though it still joins a
+    // reconciliation already in flight from another caller.
+    await ensureFreshVtxos(wallet, 0);
+    const [address, boardingAddress, balance] = await Promise.all([
+      getAddress(wallet),
+      getBoardingAddress(wallet),
+      getBalance(wallet),
+    ]);
+
+    if ((await getStoredNetwork()) !== network) {
+      // A network switch landed while this refresh was running. The wallet and
+      // reads above belong to the network we started on, not the current one, so
+      // they must never be written as the current per-network cache entry.
+      throw new Error('Network changed during refresh');
+    }
+
     const snapshot: WalletSnapshot = {
       network,
       address,
@@ -352,10 +367,6 @@ export default defineBackground(() => {
 
   console.log('[arkade] background ready');
 });
-
-/** Timeout (ms) for a single wallet build or balance read in the SW, so a hung
- *  operator or indexer can't block the refresh. On timeout we fail fast. */
-const REFRESH_STEP_TIMEOUT_MS = 8000;
 
 /**
  * The in-memory seed, or throw if locked. Re-arms auto-lock on each sensitive
