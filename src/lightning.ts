@@ -21,20 +21,25 @@ import {
 import type { NetworkName } from '@arkade-os/sdk';
 import { hex } from '@scure/base';
 import { getNetwork as getStoredNetwork } from './storage';
-import { buildWallet, networkConfig } from './wallet';
+import { networkConfig } from './wallet';
+import { getSessionWallet, ensureFreshVtxos } from './wallet-runtime';
 import { submarineFeeForAmount, type LnPayStatus, type LnReceiveStatus } from './lightning-utils';
 
 /**
  * Lightning deposits (Lightning → Arkade) via Boltz reverse swaps, and
  * Lightning payments (Arkade → Lightning) via Boltz submarine swaps.
  *
- * `ArkadeSwaps` starts a `SwapManager` (WebSocket + failsafe polling) that
- * auto-claims a reverse swap's VHTLC the moment Boltz funds it, so — unlike
- * `buildWallet`, which is cheap and rebuilt per message — we keep ONE instance
- * alive for as long as the wallet stays unlocked: a lazy, unlock-scoped
- * singleton, disposed on lock and on network switch. This mirrors how the
- * seed itself lives in `keystore.ts` module memory: SW alive + unlocked →
- * singleton alive; SW killed → gone, rebuilt on next unlock if needed.
+ * `ArkadeSwaps` is built on the same shared session wallet every other read
+ * and send uses, via `getSessionWallet()` (see `wallet-runtime.ts`). We still
+ * keep a SEPARATE Lightning singleton on top of it, though: `ArkadeSwaps`
+ * starts a `SwapManager` (WebSocket + failsafe polling) that auto-claims a
+ * reverse swap's VHTLC the moment Boltz funds it, and that WebSocket and its
+ * timers are not part of the Arkade wallet at all. They need their own
+ * lifecycle: built lazily on first use, kept alive for as long as the wallet
+ * stays unlocked, and disposed on lock and on network switch. This mirrors
+ * how the seed itself lives in `keystore.ts` module memory: SW alive +
+ * unlocked → singleton alive; SW killed → gone, rebuilt on next unlock if
+ * needed.
  *
  * Claiming needs the unlocked wallet (our strict lock posture zeroes the seed
  * with the SW), so it only happens while the wallet is unlocked and the SW is
@@ -100,7 +105,7 @@ async function createRuntime(seed: Uint8Array, gen: number): Promise<ArkadeSwaps
   const network = await getStoredNetwork();
   const cfg = networkConfig(network);
   if (!cfg.boltzApiUrl) throw new Error('LIGHTNING_UNAVAILABLE');
-  const wallet = await buildWallet(seed, network);
+  const wallet = await getSessionWallet();
   const instance = await ArkadeSwaps.create({
     wallet,
     swapProvider: new BoltzSwapProvider({ apiUrl: cfg.boltzApiUrl, network }),
@@ -451,7 +456,7 @@ export async function payInvoice(
     );
   }
 
-  const wallet = await buildWallet(seed, await getStoredNetwork());
+  const wallet = await getSessionWallet();
 
   // Verify the lockup address before we fund it. Boltz returns a VHTLC address for us to send
   // to, but nothing so far proves that address commits to OUR refund key. If it does not, the
@@ -477,6 +482,11 @@ export async function payInvoice(
       'The swap service returned a lockup address we could not verify. No funds were taken.',
     );
   }
+
+  // Coin selection needs a live view of what's spendable. Building the wallet used to
+  // give us that for free, because construction ran a delta sync. The shared session
+  // wallet does not, so we refresh explicitly right before the send that selects coins.
+  await ensureFreshVtxos(wallet);
 
   let txid: string;
   try {

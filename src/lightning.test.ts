@@ -7,10 +7,13 @@ import type { BoltzSwapStatus } from '@arkade-os/boltz-swap';
  *
  * Module mocking strategy:
  *  • './storage' → `getNetwork` reads a controllable in-test value (defaults to
- *    'regtest'); `NETWORK_CONFIG`'s real per-network `boltzApiUrl` entries are
- *    exercised as-is via `importOriginal` on './wallet'.
- *  • './wallet' → `buildWallet` is replaced with a fake IWallet stub (no real
- *    SDK/IndexedDB construction); `networkConfig`/`NETWORK_CONFIG` pass through real.
+ *    'regtest'). './wallet' itself is NOT mocked: `networkConfig`/`NETWORK_CONFIG`
+ *    are a pure lookup table, safe to run for real, and lightning.ts no longer
+ *    builds a wallet through that module.
+ *  • './wallet-runtime' → `getSessionWallet` is a fake that mirrors the real
+ *    module's memoization (one build per session, shared by concurrent callers,
+ *    cleared by `invalidateSessionWallet`), so tests can exercise the same
+ *    sharing behavior lightning.ts now relies on. `ensureFreshVtxos` is a bare mock.
  *  • '@arkade-os/boltz-swap' → `ArkadeSwaps.create`, `BoltzSwapProvider`, and
  *    `IndexedDbSwapRepository` are replaced with lightweight fakes (no WebSocket,
  *    no real IndexedDB); the pure status-predicate helpers (`isReverse*`) pass
@@ -36,26 +39,73 @@ const state = vi.hoisted(() => ({
   providerGetLimits: vi.fn(async () => ({ min: 1000, max: 4_000_000 })),
   // The fake wallet's Arkade send — payInvoice funds the swap's VHTLC with it.
   walletSend: vi.fn(async () => 'ark-funding-txid'),
+  // The fake session wallet's lifecycle, mirroring wallet-runtime.ts's own module
+  // memory: one resolved wallet, one in-flight build shared by concurrent callers,
+  // and a count so tests can assert how many times a build actually happened.
+  currentWallet: null as FakeWallet | null,
+  pendingWallet: null as Promise<FakeWallet> | null,
+  walletBuildCount: 0,
+  invalidateSessionWalletMock: vi.fn(),
+  ensureFreshVtxosMock: vi.fn(async (_wallet: unknown) => {}),
 }));
+
+/** The fake session wallet's shape — only the surface `lightning.ts` calls. Named
+ * explicitly (rather than inferred from `makeFakeWallet`'s return type) so `state`'s
+ * own type doesn't depend on a function that itself reads `state`. */
+interface FakeWallet {
+  fakeWallet: true;
+  send: (...args: unknown[]) => Promise<string>;
+  arkProvider: { getInfo: () => Promise<{ network: string; signerPubkey: string }> };
+}
 
 vi.mock('./storage', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./storage')>();
   return { ...actual, getNetwork: vi.fn(async () => state.network as NetworkName) };
 });
 
-vi.mock('./wallet', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./wallet')>();
+function makeFakeWallet(): FakeWallet {
   return {
-    ...actual,
-    buildWallet: vi.fn(async () => ({
-      fakeWallet: true,
-      send: state.walletSend,
-      arkProvider: {
-        getInfo: async () => ({ network: 'regtest', signerPubkey: '02'.padEnd(66, 'a') }),
-      },
-    })),
+    fakeWallet: true,
+    send: state.walletSend,
+    arkProvider: {
+      getInfo: async () => ({ network: 'regtest', signerPubkey: '02'.padEnd(66, 'a') }),
+    },
   };
-});
+}
+
+/**
+ * Mirrors `wallet-runtime.ts`'s own memoization: a resolved wallet is reused, and
+ * concurrent callers before that share the one in-flight build, so tests can pin
+ * "only one Arkade wallet build" the same way the real runtime guarantees it.
+ */
+function fakeGetSessionWallet() {
+  if (state.pendingWallet) return state.pendingWallet;
+  if (state.currentWallet) return Promise.resolve(state.currentWallet);
+  const mine = (async () => {
+    state.walletBuildCount++;
+    const wallet = makeFakeWallet();
+    state.currentWallet = wallet;
+    return wallet;
+  })();
+  state.pendingWallet = mine;
+  const clear = () => {
+    if (state.pendingWallet === mine) state.pendingWallet = null;
+  };
+  mine.then(clear, clear);
+  return mine;
+}
+
+async function fakeInvalidateSessionWallet() {
+  state.invalidateSessionWalletMock();
+  state.currentWallet = null;
+  state.pendingWallet = null;
+}
+
+vi.mock('./wallet-runtime', () => ({
+  getSessionWallet: () => fakeGetSessionWallet(),
+  invalidateSessionWallet: () => fakeInvalidateSessionWallet(),
+  ensureFreshVtxos: (wallet: unknown) => state.ensureFreshVtxosMock(wallet),
+}));
 
 vi.mock('@arkade-os/boltz-swap', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@arkade-os/boltz-swap')>();
@@ -117,6 +167,7 @@ import {
   type LnPayStatus,
   type LnReceiveStatus,
 } from './lightning-utils';
+import { getSessionWallet, invalidateSessionWallet } from './wallet-runtime';
 
 const seed = new Uint8Array(32).fill(7);
 
@@ -193,6 +244,12 @@ beforeEach(async () => {
   state.providerGetLimits.mockResolvedValue({ min: 1000, max: 4_000_000 });
   state.walletSend.mockReset();
   state.walletSend.mockResolvedValue('ark-funding-txid');
+  // The fake session wallet must not leak across tests either.
+  state.currentWallet = null;
+  state.pendingWallet = null;
+  state.walletBuildCount = 0;
+  state.invalidateSessionWalletMock.mockClear();
+  state.ensureFreshVtxosMock.mockClear();
 });
 
 describe('mapReverseStatus — full status table', () => {
@@ -404,6 +461,100 @@ describe('getSwaps — singleton lifecycle', () => {
     const b = await getSwaps(seed);
     expect(b).toBe(instance);
     expect(state.createArkadeSwaps).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('getSwaps / payInvoice — sharing the session Arkade wallet', () => {
+  it('builds ArkadeSwaps with the session wallet from getSessionWallet()', async () => {
+    state.createArkadeSwaps.mockResolvedValue(fakeSwapInstance());
+
+    const wallet = await getSessionWallet();
+    await getSwaps(seed);
+
+    const config = state.createArkadeSwaps.mock.calls[0][0];
+    expect(config.wallet).toBe(wallet);
+  });
+
+  it('funds the payment with the identical wallet object ArkadeSwaps was built with, after refreshing VTXOs', async () => {
+    const instance = fakeSwapInstance();
+    state.createArkadeSwaps.mockResolvedValue(instance);
+
+    await payInvoice(seed, { invoice: INVOICE_250K, maxTotalSats: 250_350 });
+
+    // One build total: the swap runtime and the funding send shared it.
+    expect(state.walletBuildCount).toBe(1);
+    const config = state.createArkadeSwaps.mock.calls[0][0];
+    const walletAfter = await getSessionWallet(); // memoized: same object payInvoice funded with
+    expect(config.wallet).toBe(walletAfter);
+    expect(state.ensureFreshVtxosMock).toHaveBeenCalledExactlyOnceWith(walletAfter);
+  });
+
+  it('concurrent Lightning and normal wallet access builds the Arkade wallet only once', async () => {
+    state.createArkadeSwaps.mockResolvedValue(fakeSwapInstance());
+
+    const [, walletA, walletB] = await Promise.all([
+      getSwaps(seed), // Lightning path
+      getSessionWallet(), // e.g. a regular send or balance read
+      getSessionWallet(),
+    ]);
+
+    expect(state.walletBuildCount).toBe(1);
+    expect(walletA).toBe(walletB);
+  });
+
+  it('disposing the Lightning runtime does not touch the Arkade wallet', async () => {
+    state.createArkadeSwaps.mockResolvedValue(fakeSwapInstance());
+
+    await getSwaps(seed);
+    const walletBefore = await getSessionWallet();
+    await disposeSwaps();
+    const walletAfter = await getSessionWallet();
+
+    expect(walletAfter).toBe(walletBefore);
+    expect(state.invalidateSessionWalletMock).not.toHaveBeenCalled();
+  });
+
+  it('a wallet invalidation without a matching disposeSwaps() leaves ArkadeSwaps on the stale wallet — why lock/switchNetwork must always pair the two', async () => {
+    const instance = fakeSwapInstance();
+    state.createArkadeSwaps.mockResolvedValue(instance);
+
+    await getSwaps(seed);
+    const staleWallet = state.createArkadeSwaps.mock.calls[0][0].wallet;
+
+    // What a lock or network switch does to the wallet side, without the paired
+    // disposeSwaps() this refactor's invariant requires.
+    await invalidateSessionWallet();
+    const freshWallet = await getSessionWallet();
+    expect(freshWallet).not.toBe(staleWallet);
+
+    // lightning.ts has no way to notice that on its own: the same ArkadeSwaps
+    // instance comes back, still holding the now-disposed wallet.
+    const s = await getSwaps(seed);
+    expect(s).toBe(instance);
+    expect(state.createArkadeSwaps).toHaveBeenCalledOnce();
+  });
+
+  it('a lock racing an in-flight build disposes the late ArkadeSwaps instance and does not leave a stale wallet cached', async () => {
+    const first = fakeSwapInstance();
+    const second = fakeSwapInstance();
+    const gate = deferred<ReturnType<typeof fakeSwapInstance>>();
+    state.createArkadeSwaps.mockReturnValueOnce(gate.promise).mockResolvedValueOnce(second);
+
+    const building = getSwaps(seed); // wallet build already resolved; ArkadeSwaps.create is gated
+
+    // A real lock or network switch invalidates both runtimes together.
+    await disposeSwaps();
+    await invalidateSessionWallet();
+
+    gate.resolve(first); // the build finishes AFTER both dropped
+    await expect(building).rejects.toThrow('LOCKED');
+    expect(first.dispose).toHaveBeenCalledOnce(); // self-destructed, not leaked
+
+    const b = await getSwaps(seed);
+    expect(b).toBe(second);
+    // The wallet was invalidated too, so the rebuild gets a fresh one, not the
+    // one the disposed-of first build used.
+    expect(state.walletBuildCount).toBe(2);
   });
 });
 
