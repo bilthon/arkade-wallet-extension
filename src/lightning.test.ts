@@ -169,8 +169,6 @@ import {
 } from './lightning-utils';
 import { getSessionWallet, invalidateSessionWallet } from './wallet-runtime';
 
-const seed = new Uint8Array(32).fill(7);
-
 // Real BOLT11 spec test vectors (decoded by the REAL `decodeInvoice`, which the
 // boltz-swap mock passes through via importOriginal):
 //  • INVOICE_250K — "1 cup coffee", 2500u = 250 000 sats.
@@ -310,7 +308,7 @@ describe('createInvoice', () => {
     state.createArkadeSwaps.mockResolvedValue(
       fakeSwapInstance({ getLimits: vi.fn(async () => ({ min: 1000, max: 1_000_000 })) }),
     );
-    await expect(createInvoice(seed, { amount: 500 })).rejects.toThrow(
+    await expect(createInvoice({ amount: 500 })).rejects.toThrow(
       /between 1000 and 1000000/i,
     );
   });
@@ -319,7 +317,7 @@ describe('createInvoice', () => {
     state.createArkadeSwaps.mockResolvedValue(
       fakeSwapInstance({ getLimits: vi.fn(async () => ({ min: 1000, max: 1_000_000 })) }),
     );
-    await expect(createInvoice(seed, { amount: 2_000_000 })).rejects.toThrow(
+    await expect(createInvoice({ amount: 2_000_000 })).rejects.toThrow(
       /between 1000 and 1000000/i,
     );
   });
@@ -329,7 +327,7 @@ describe('createInvoice', () => {
     state.createArkadeSwaps.mockResolvedValue(instance);
 
     const before = Date.now();
-    const result = await createInvoice(seed, { amount: 25_000 });
+    const result = await createInvoice({ amount: 25_000 });
     const after = Date.now();
 
     const { expiresAt, ...rest } = result;
@@ -353,8 +351,8 @@ describe('getSwaps — singleton lifecycle', () => {
   it('reuses the same instance for repeated calls on the same network', async () => {
     state.createArkadeSwaps.mockResolvedValue(fakeSwapInstance());
 
-    const a = await getSwaps(seed);
-    const b = await getSwaps(seed);
+    const a = await getSwaps();
+    const b = await getSwaps();
 
     expect(a).toBe(b);
     expect(state.createArkadeSwaps).toHaveBeenCalledOnce();
@@ -363,7 +361,7 @@ describe('getSwaps — singleton lifecycle', () => {
   it('builds the repo/wallet with the per-network name and the rebuilt wallet', async () => {
     state.createArkadeSwaps.mockResolvedValue(fakeSwapInstance());
 
-    await getSwaps(seed);
+    await getSwaps();
 
     const config = state.createArkadeSwaps.mock.calls[0][0];
     expect(config.wallet).toMatchObject({ fakeWallet: true });
@@ -379,11 +377,11 @@ describe('getSwaps — singleton lifecycle', () => {
     const second = fakeSwapInstance();
     state.createArkadeSwaps.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
 
-    const a = await getSwaps(seed);
+    const a = await getSwaps();
     await disposeSwaps();
     expect(first.dispose).toHaveBeenCalledOnce();
 
-    const b = await getSwaps(seed);
+    const b = await getSwaps();
     expect(b).toBe(second);
     expect(b).not.toBe(a);
   });
@@ -396,7 +394,7 @@ describe('getSwaps — singleton lifecycle', () => {
     state.createArkadeSwaps.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
 
     state.network = 'regtest';
-    await getSwaps(seed);
+    await getSwaps();
     expect(state.createArkadeSwaps.mock.calls[0][0].swapRepository.dbName).toBe(
       'arkade-swaps-regtest',
     );
@@ -405,7 +403,7 @@ describe('getSwaps — singleton lifecycle', () => {
     await disposeSwaps();
     expect(first.dispose).toHaveBeenCalledOnce();
 
-    const b = await getSwaps(seed);
+    const b = await getSwaps();
     expect(b).toBe(second);
     expect(state.createArkadeSwaps.mock.calls[1][0].swapRepository.dbName).toBe(
       'arkade-swaps-mutinynet',
@@ -415,7 +413,7 @@ describe('getSwaps — singleton lifecycle', () => {
   it('throws LIGHTNING_UNAVAILABLE for a network with no Boltz endpoint, without building anything', async () => {
     state.network = 'testnet'; // NETWORK_CONFIG.testnet has no boltzApiUrl
 
-    await expect(getSwaps(seed)).rejects.toThrow('LIGHTNING_UNAVAILABLE');
+    await expect(getSwaps()).rejects.toThrow('LIGHTNING_UNAVAILABLE');
     expect(state.createArkadeSwaps).not.toHaveBeenCalled();
   });
 
@@ -423,7 +421,7 @@ describe('getSwaps — singleton lifecycle', () => {
     const instance = fakeSwapInstance();
     state.createArkadeSwaps.mockResolvedValue(instance);
 
-    const [a, b] = await Promise.all([getSwaps(seed), getSwaps(seed)]);
+    const [a, b] = await Promise.all([getSwaps(), getSwaps()]);
 
     expect(a).toBe(instance);
     expect(b).toBe(instance);
@@ -436,7 +434,7 @@ describe('getSwaps — singleton lifecycle', () => {
     const gate = deferred<ReturnType<typeof fakeSwapInstance>>();
     state.createArkadeSwaps.mockReturnValueOnce(gate.promise).mockResolvedValueOnce(second);
 
-    const building = getSwaps(seed); // ArkadeSwaps.create is still pending (gate)
+    const building = getSwaps(); // ArkadeSwaps.create is still pending (gate)
 
     await disposeSwaps(); // a lock (or switchNetwork) races the in-flight build
 
@@ -445,7 +443,7 @@ describe('getSwaps — singleton lifecycle', () => {
     expect(first.dispose).toHaveBeenCalledOnce(); // self-destructed, not leaked
 
     // The memo was cleared by disposeSwaps, so the next call rebuilds cleanly.
-    const b = await getSwaps(seed);
+    const b = await getSwaps();
     expect(b).toBe(second);
     expect(state.createArkadeSwaps).toHaveBeenCalledTimes(2);
   });
@@ -455,10 +453,10 @@ describe('getSwaps — singleton lifecycle', () => {
     const instance = fakeSwapInstance();
     state.createArkadeSwaps.mockResolvedValueOnce(instance);
 
-    await expect(getSwaps(seed)).rejects.toThrow('boltz unreachable');
+    await expect(getSwaps()).rejects.toThrow('boltz unreachable');
     await Promise.resolve(); // let the internal failure-handler clear the memo
 
-    const b = await getSwaps(seed);
+    const b = await getSwaps();
     expect(b).toBe(instance);
     expect(state.createArkadeSwaps).toHaveBeenCalledTimes(2);
   });
@@ -469,18 +467,26 @@ describe('getSwaps / payInvoice — sharing the session Arkade wallet', () => {
     state.createArkadeSwaps.mockResolvedValue(fakeSwapInstance());
 
     const wallet = await getSessionWallet();
-    await getSwaps(seed);
+    await getSwaps();
 
     const config = state.createArkadeSwaps.mock.calls[0][0];
     expect(config.wallet).toBe(wallet);
   });
 
-  it('funds the payment with the identical wallet object ArkadeSwaps was built with, after refreshing VTXOs', async () => {
+  it('funds the payment with the identical wallet object ArkadeSwaps was built with, refreshing VTXOs before the send', async () => {
     const instance = fakeSwapInstance();
     state.createArkadeSwaps.mockResolvedValue(instance);
 
-    await payInvoice(seed, { invoice: INVOICE_250K, maxTotalSats: 250_350 });
+    const order: string[] = [];
+    state.ensureFreshVtxosMock.mockImplementation(async () => void order.push('refresh'));
+    state.walletSend.mockImplementation(async () => {
+      order.push('send');
+      return 'ark-funding-txid';
+    });
 
+    await payInvoice({ invoice: INVOICE_250K, maxTotalSats: 250_350 });
+
+    expect(order).toEqual(['refresh', 'send']);
     // One build total: the swap runtime and the funding send shared it.
     expect(state.walletBuildCount).toBe(1);
     const config = state.createArkadeSwaps.mock.calls[0][0];
@@ -493,7 +499,7 @@ describe('getSwaps / payInvoice — sharing the session Arkade wallet', () => {
     state.createArkadeSwaps.mockResolvedValue(fakeSwapInstance());
 
     const [, walletA, walletB] = await Promise.all([
-      getSwaps(seed), // Lightning path
+      getSwaps(), // Lightning path
       getSessionWallet(), // e.g. a regular send or balance read
       getSessionWallet(),
     ]);
@@ -505,7 +511,7 @@ describe('getSwaps / payInvoice — sharing the session Arkade wallet', () => {
   it('disposing the Lightning runtime does not touch the Arkade wallet', async () => {
     state.createArkadeSwaps.mockResolvedValue(fakeSwapInstance());
 
-    await getSwaps(seed);
+    await getSwaps();
     const walletBefore = await getSessionWallet();
     await disposeSwaps();
     const walletAfter = await getSessionWallet();
@@ -514,22 +520,14 @@ describe('getSwaps / payInvoice — sharing the session Arkade wallet', () => {
     expect(state.invalidateSessionWalletMock).not.toHaveBeenCalled();
   });
 
-  it('a wallet invalidation without a matching disposeSwaps() leaves ArkadeSwaps on the stale wallet — why lock/switchNetwork must always pair the two', async () => {
+  it('memoizes independently of the wallet: invalidateSessionWallet() alone does not make getSwaps() rebuild', async () => {
     const instance = fakeSwapInstance();
     state.createArkadeSwaps.mockResolvedValue(instance);
 
-    await getSwaps(seed);
-    const staleWallet = state.createArkadeSwaps.mock.calls[0][0].wallet;
+    await getSwaps();
+    await invalidateSessionWallet(); // wallet-side invalidation only, no disposeSwaps()
 
-    // What a lock or network switch does to the wallet side, without the paired
-    // disposeSwaps() this refactor's invariant requires.
-    await invalidateSessionWallet();
-    const freshWallet = await getSessionWallet();
-    expect(freshWallet).not.toBe(staleWallet);
-
-    // lightning.ts has no way to notice that on its own: the same ArkadeSwaps
-    // instance comes back, still holding the now-disposed wallet.
-    const s = await getSwaps(seed);
+    const s = await getSwaps();
     expect(s).toBe(instance);
     expect(state.createArkadeSwaps).toHaveBeenCalledOnce();
   });
@@ -540,7 +538,7 @@ describe('getSwaps / payInvoice — sharing the session Arkade wallet', () => {
     const gate = deferred<ReturnType<typeof fakeSwapInstance>>();
     state.createArkadeSwaps.mockReturnValueOnce(gate.promise).mockResolvedValueOnce(second);
 
-    const building = getSwaps(seed); // wallet build already resolved; ArkadeSwaps.create is gated
+    const building = getSwaps(); // wallet build already resolved; ArkadeSwaps.create is gated
 
     // A real lock or network switch invalidates both runtimes together.
     await disposeSwaps();
@@ -550,7 +548,7 @@ describe('getSwaps / payInvoice — sharing the session Arkade wallet', () => {
     await expect(building).rejects.toThrow('LOCKED');
     expect(first.dispose).toHaveBeenCalledOnce(); // self-destructed, not leaked
 
-    const b = await getSwaps(seed);
+    const b = await getSwaps();
     expect(b).toBe(second);
     // The wallet was invalidated too, so the rebuild gets a fresh one, not the
     // one the disposed-of first build used.
@@ -562,7 +560,7 @@ describe('getSwaps / payInvoice — sharing the session Arkade wallet', () => {
     const second = fakeSwapInstance();
     state.createArkadeSwaps.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
 
-    const instance = await getSwaps(seed); // fully resolved, not just building
+    const instance = await getSwaps(); // fully resolved, not just building
     expect(instance).toBe(first);
     const staleWallet = state.createArkadeSwaps.mock.calls[0][0].wallet;
 
@@ -572,7 +570,7 @@ describe('getSwaps / payInvoice — sharing the session Arkade wallet', () => {
     await invalidateSessionWallet();
     expect(first.dispose).toHaveBeenCalledOnce();
 
-    const rebuilt = await getSwaps(seed);
+    const rebuilt = await getSwaps();
     expect(rebuilt).toBe(second);
     expect(rebuilt).not.toBe(instance);
     const freshWallet = state.createArkadeSwaps.mock.calls[1][0].wallet;
@@ -636,7 +634,7 @@ describe('reconcilePendingSwaps', () => {
     const instance = fakeSwapInstance();
     state.createArkadeSwaps.mockResolvedValue(instance);
 
-    await reconcilePendingSwaps(seed);
+    await reconcilePendingSwaps();
 
     expect(state.createArkadeSwaps).toHaveBeenCalledOnce();
     expect(instance.refreshSwapsStatus).toHaveBeenCalledOnce();
@@ -657,7 +655,7 @@ describe('reconcilePendingSwaps', () => {
     const instance = fakeSwapInstance();
     state.createArkadeSwaps.mockResolvedValue(instance);
 
-    await reconcilePendingSwaps(seed);
+    await reconcilePendingSwaps();
 
     expect(instance.recoverAllSubmarineFunds).toHaveBeenCalledExactlyOnceWith([stranded]);
     expect(instance.refreshSwapsStatus).toHaveBeenCalledOnce();
@@ -799,7 +797,7 @@ describe('getPayQuote', () => {
 describe('payInvoice', () => {
   it('rejects an amountless invoice before building anything', async () => {
     await expect(
-      payInvoice(seed, { invoice: INVOICE_AMOUNTLESS, maxTotalSats: 1_000_000 }),
+      payInvoice({ invoice: INVOICE_AMOUNTLESS, maxTotalSats: 1_000_000 }),
     ).rejects.toThrow(/no amount/i);
     expect(state.createArkadeSwaps).not.toHaveBeenCalled();
   });
@@ -811,7 +809,7 @@ describe('payInvoice', () => {
     state.createArkadeSwaps.mockResolvedValue(instance);
 
     await expect(
-      payInvoice(seed, { invoice: INVOICE_250K, maxTotalSats: 1_000_000 }),
+      payInvoice({ invoice: INVOICE_250K, maxTotalSats: 1_000_000 }),
     ).rejects.toThrow(/between 300000 and 4000000/i);
     expect(instance.createSubmarineSwap).not.toHaveBeenCalled();
   });
@@ -841,7 +839,7 @@ describe('payInvoice', () => {
     // Quoted total 250 350; slack for 250 000 sats is max(10, 250) = 250 →
     // anything above 250 600 must abort. 300 000 is a real inflation.
     await expect(
-      payInvoice(seed, { invoice: INVOICE_250K, maxTotalSats: 250_350 }),
+      payInvoice({ invoice: INVOICE_250K, maxTotalSats: 250_350 }),
     ).rejects.toThrow(/more than the quoted total/i);
     expect(state.walletSend).not.toHaveBeenCalled();
   });
@@ -854,16 +852,19 @@ describe('payInvoice', () => {
     state.createArkadeSwaps.mockResolvedValue(instance);
 
     await expect(
-      payInvoice(seed, { invoice: INVOICE_250K, maxTotalSats: 250_350 }),
+      payInvoice({ invoice: INVOICE_250K, maxTotalSats: 250_350 }),
     ).rejects.toThrow(/could not verify/i);
     expect(state.walletSend).not.toHaveBeenCalled();
+    // Address verification strictly precedes the refresh — an unverified swap
+    // must not trigger a reconciliation the abort makes pointless.
+    expect(state.ensureFreshVtxosMock).not.toHaveBeenCalled();
   });
 
   it('funds the VHTLC at Boltz’s expectedAmount and returns the swap/tx identifiers', async () => {
     const instance = fakeSwapInstance();
     state.createArkadeSwaps.mockResolvedValue(instance);
 
-    const result = await payInvoice(seed, { invoice: INVOICE_250K, maxTotalSats: 250_350 });
+    const result = await payInvoice({ invoice: INVOICE_250K, maxTotalSats: 250_350 });
 
     expect(state.walletSend).toHaveBeenCalledExactlyOnceWith({
       address: 'tark1lockup',
@@ -909,7 +910,7 @@ describe('payInvoice', () => {
     });
     state.createArkadeSwaps.mockResolvedValue(instance);
 
-    const result = await payInvoice(seed, { invoice: INVOICE_250K, maxTotalSats: 250_350 });
+    const result = await payInvoice({ invoice: INVOICE_250K, maxTotalSats: 250_350 });
     expect(result.totalSats).toBe(250_352);
   });
 
@@ -918,7 +919,7 @@ describe('payInvoice', () => {
     state.walletSend.mockRejectedValue(new Error('Insufficient funds'));
 
     await expect(
-      payInvoice(seed, { invoice: INVOICE_250K, maxTotalSats: 250_350 }),
+      payInvoice({ invoice: INVOICE_250K, maxTotalSats: 250_350 }),
     ).rejects.toThrow(/not enough spendable balance/i);
   });
 });

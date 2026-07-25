@@ -115,10 +115,9 @@ export default defineBackground(() => {
     try {
       const network = await getStoredNetwork();
       if (await hasPendingSwaps(network)) {
-        const seed = getUnlockedSeed();
         // Fire-and-forget: refreshing statuses (WebSocket + manager start) must not
         // delay the unlock response.
-        if (seed) void reconcilePendingSwaps(seed);
+        void reconcilePendingSwaps();
       }
     } catch {
       /* best-effort — an unlock must still report success */
@@ -275,8 +274,8 @@ export default defineBackground(() => {
 
   // Unlock-gated: creating the swap runtime needs the wallet's claim key.
   onMessage('createLightningInvoice', async ({ data }) => {
-    const seed = await requireSeed();
-    return createInvoice(seed, data);
+    await requireUnlocked();
+    return createInvoice(data);
   });
 
   // Read-only poll; no unlock gate — works even before the singleton exists.
@@ -290,8 +289,8 @@ export default defineBackground(() => {
 
   // Unlock-gated: funding the swap's VHTLC signs an Arkade send.
   onMessage('payLightningInvoice', async ({ data }) => {
-    const seed = await requireSeed();
-    return payInvoice(seed, data);
+    await requireUnlocked();
+    return payInvoice(data);
   });
 
   // Read-only poll; no unlock gate — works even before the singleton exists.
@@ -369,15 +368,16 @@ export default defineBackground(() => {
 });
 
 /**
- * The in-memory seed, or throw if locked. Re-arms auto-lock on each sensitive
- * read so an active session keeps the idle window fresh. Throwing 'LOCKED' lets
- * the popup route to the unlock screen rather than show a broken read.
+ * Throw if locked, otherwise re-arm auto-lock so an active session keeps the
+ * idle window fresh. Throwing 'LOCKED' lets the popup route to the unlock
+ * screen rather than show a broken read. Used by the Lightning handlers, which
+ * need the wallet unlocked but read the seed themselves through
+ * `getSessionWallet()` rather than taking it from here.
  */
-async function requireSeed(): Promise<Uint8Array> {
+async function requireUnlocked(): Promise<void> {
   const seed = getUnlockedSeed();
   if (!seed || !isUnlocked()) throw new Error('LOCKED');
   await armAutoLock();
-  return seed;
 }
 
 /**
