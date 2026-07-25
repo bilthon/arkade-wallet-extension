@@ -100,7 +100,7 @@ async function createRuntime(seed: Uint8Array, gen: number): Promise<ArkadeSwaps
   const network = await getStoredNetwork();
   const cfg = networkConfig(network);
   if (!cfg.boltzApiUrl) throw new Error('LIGHTNING_UNAVAILABLE');
-  const wallet = await buildWallet(seed);
+  const wallet = await buildWallet(seed, network);
   const instance = await ArkadeSwaps.create({
     wallet,
     swapProvider: new BoltzSwapProvider({ apiUrl: cfg.boltzApiUrl, network }),
@@ -451,7 +451,7 @@ export async function payInvoice(
     );
   }
 
-  const wallet = await buildWallet(seed);
+  const wallet = await buildWallet(seed, await getStoredNetwork());
 
   // Verify the lockup address before we fund it. Boltz returns a VHTLC address for us to send
   // to, but nothing so far proves that address commits to OUR refund key. If it does not, the

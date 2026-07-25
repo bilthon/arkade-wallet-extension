@@ -101,19 +101,20 @@ export function networkConfig(network: NetworkName): NetworkConfig {
   return cfg;
 }
 
-// ─── buildWallet — per-wake rehydration ──────────────────────────────────────
+// ─── buildWallet — wallet construction ────────────────────────────────────────
 
 /**
- * Rehydrate a `Wallet` from the in-memory seed and the active network's config,
- * backed by IndexedDB repositories. Called by every read handler on each SW wake.
+ * Build a `Wallet` from the in-memory seed and the given network's config, backed
+ * by IndexedDB repositories. `network` is passed in explicitly (rather than read
+ * from storage here) so the caller's cache key and the constructed wallet always
+ * refer to the same network.
  *
- * The seed is BIP86-derived for the active network (coin type 0' mainnet / 1'
+ * The seed is BIP86-derived for the given network (coin type 0' mainnet / 1'
  * otherwise) via `SeedIdentity.fromSeed` — the canonical seed-first factory
  * (symmetric with `MnemonicIdentity.fromMnemonic`), so the keystore never has to
  * hand the mnemonic across.
  */
-export async function buildWallet(seed: Uint8Array): Promise<Wallet> {
-  const network = await getStoredNetwork();
+export async function buildWallet(seed: Uint8Array, network: NetworkName): Promise<Wallet> {
   const cfg = networkConfig(network);
   const identity = SeedIdentity.fromSeed(seed, { isMainnet: cfg.isMainnet });
   return Wallet.create({
@@ -143,6 +144,20 @@ export async function buildWallet(seed: Uint8Array): Promise<Wallet> {
     // must be the only signing path. Deliberate renewal/delegation is a later
     // job and will opt back in via `delegateProvider` / an explicit settlementConfig.
     settlementConfig: false,
+    // With one shared wallet per unlocked session (instead of one per message), the
+    // ContractWatcher this starts also lives for the whole session, so its backoff
+    // matters far more than it used to. The SDK's real defaults are
+    // failsafePollIntervalMs 20_000, reconnectDelayMs 1_000, maxReconnectDelayMs
+    // 5_000, maxReconnectAttempts 0 (unlimited) — the d.ts doc comments claim 60s/30s,
+    // which is wrong. We widen the poll to 60s and the backoff ceiling to 30s to cut
+    // idle indexer traffic over a session, and deliberately leave the attempt count
+    // at its unlimited default: attempts reset on a successful connect, so capping
+    // them would let a single ~30s indexer blip permanently kill the subscription for
+    // the rest of the unlocked session.
+    watcherConfig: {
+      failsafePollIntervalMs: 60_000,
+      maxReconnectDelayMs: 30_000,
+    },
   });
 }
 

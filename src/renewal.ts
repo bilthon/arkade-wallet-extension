@@ -1,4 +1,5 @@
 import { isUnlocked, getUnlockedSeed } from './keystore';
+import { getNetwork as getStoredNetwork } from './storage';
 import {
   buildWallet,
   renewExpiringVtxos,
@@ -117,7 +118,7 @@ export async function runRenewalTick(): Promise<
   // (`renewExpiringVtxos` also recovers-first internally as a standalone safety net for
   // the manual `renewNow` path; after this recover leg it re-reads fresh and finds
   // nothing to drain, so there is no double-recover.)
-  const wallet = await buildWallet(seed);
+  const wallet = await buildWallet(seed, await getStoredNetwork());
 
   try {
     let recovered = 0;

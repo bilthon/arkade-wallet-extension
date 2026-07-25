@@ -360,5 +360,5 @@ async function requireSeed(): Promise<Uint8Array> {
 
 /** Build a `Wallet` from the in-memory seed, or throw if locked (see {@link requireSeed}). */
 async function requireWallet() {
-  return buildWallet(await requireSeed());
+  return buildWallet(await requireSeed(), await getStoredNetwork());
 }
