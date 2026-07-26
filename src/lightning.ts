@@ -64,8 +64,9 @@ let generation = 0;
 const repoName = (network: NetworkName) => `arkade-swaps-${network}`;
 
 /**
- * Build (or reuse) the `ArkadeSwaps` runtime. Caller guarantees the wallet is
- * unlocked.
+ * Build (or reuse) the `ArkadeSwaps` runtime. The lock check is not the caller's job
+ * any more: `getSessionWallet()` reads the unlocked seed itself and throws LOCKED, so
+ * a caller that races a lock gets the rejection from there.
  *
  * Memoizes the IN-FLIGHT promise, not just the resolved instance, via a
  * synchronous check-and-assign (no `await` before `swapsPromise` is set) —

@@ -178,12 +178,6 @@ const INVOICE_250K =
 const INVOICE_AMOUNTLESS =
   'lnbc1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdpl2pkx2ctnv5sxxmmwwd5kgetjypeh2ursdae8g6twvus8g6rfwvs8qun0dfjkxaq8rkx3yf5tcsyz3d73gafnh3cax9rn449d9p5uxz9ezhhypd0elx87sjle52x86fux2ypatgddc6k63n7erqz25le42c4u4ecky03ylcqca784w';
 
-/** Yield enough microtasks for createRuntime to reach its gated `ArkadeSwaps.create()`
- * call (past the getStoredNetwork/getSessionWallet awaits) without resolving it. */
-async function settle(): Promise<void> {
-  for (let i = 0; i < 5; i++) await Promise.resolve();
-}
-
 /** A promise plus its resolve/reject, for controlling exactly when a mocked build settles. */
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -555,7 +549,10 @@ describe('getSwaps / payInvoice — sharing the session Arkade wallet', () => {
     state.createArkadeSwaps.mockReturnValueOnce(gate.promise).mockResolvedValueOnce(second);
 
     const building = getSwaps();
-    await settle(); // let the wallet build resolve; ArkadeSwaps.create is left gated
+    // Wait for the precondition itself rather than for a fixed number of microtask
+    // turns: the wallet build has happened, and `ArkadeSwaps.create` is still gated.
+    // Counting turns would silently run out if `createRuntime` ever grew another await.
+    await vi.waitFor(() => expect(state.walletBuildCount).toBe(1));
 
     // The real onLock/switchNetwork handlers fire both calls in the same
     // synchronous tick, invalidating the wallet before disposing the swap
