@@ -68,12 +68,10 @@ export function getSessionWallet(): Promise<Wallet> {
  * share this one promise instead of each starting a build.
  */
 async function resolveSessionWallet(): Promise<Wallet> {
-  // Check the lock before the cache read, not just on the build path below. `lock()`
-  // zeroes the seed and then awaits two storage writes before its listeners run
-  // `invalidateSessionWallet`, so for that window the wallet is already locked while
-  // the cached one is still here. Handing it out would let a post-lock caller sign,
-  // because the SDK identity was derived at build time and never re-reads the seed.
-  if (!getUnlockedSeed() || !isUnlocked()) throw new Error('LOCKED');
+  // Cheap early exit. The real guard is the recheck below, because a lock can land
+  // during either await between here and there.
+  const seed = getUnlockedSeed();
+  if (!seed || !isUnlocked()) throw new Error('LOCKED');
 
   const network = await getStoredNetwork();
 
@@ -89,6 +87,24 @@ async function resolveSessionWallet(): Promise<Wallet> {
     // that can reach it has to dispose the Lightning runtime too.
     await invalidateSessionWallet();
   }
+
+  // Check the lock again here, after the last await. Nothing may await between this
+  // line and the return below, or the same gap opens up again.
+  //
+  // `lock()` clears the seed right away, but it only invalidates this runtime two
+  // storage writes later. In that gap the wallet is locked and the cached one is
+  // still here. Returning it would let the caller sign after the lock, because the
+  // wallet copied its key when it was built and never reads the seed again.
+  //
+  // We compare the seed object rather than only calling `isUnlocked()`, so we also
+  // catch a lock and an unlock that both land in the gap. That leaves us unlocked
+  // again but in a new session, with a wallet from the old one.
+  //
+  // We do not check the generation here. If someone else invalidated us,
+  // `resolvedWallet` is already null and we fall through to a rebuild that checks it.
+  // If we invalidated it ourselves above, the generation moved because of us, and
+  // checking it would reject a network switch that is working correctly.
+  if (getUnlockedSeed() !== seed || !isUnlocked()) throw new Error('LOCKED');
 
   if (resolvedWallet && resolvedNetwork === network) return resolvedWallet;
 

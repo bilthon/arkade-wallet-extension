@@ -32,6 +32,7 @@ vi.mock('./wallet', () => ({
 
 // Import AFTER vi.mock so the mocked modules are in place.
 import { getSessionWallet, invalidateSessionWallet, ensureFreshVtxos } from './wallet-runtime';
+import { getNetwork as getStoredNetwork } from './storage';
 
 /** A promise plus its resolve/reject, for controlling exactly when a build settles. */
 function deferred<T>() {
@@ -276,6 +277,30 @@ describe('ensureFreshVtxos', () => {
  * share code.
  */
 describe('lifetime gaps', () => {
+  it('throws LOCKED when a lock lands DURING the network read, before the cache is read', async () => {
+    const wallet = fakeWallet();
+    buildWalletMock.mockResolvedValue(wallet);
+    expect(await getSessionWallet()).toBe(wallet); // now cached
+
+    // Hold the next call inside its `getStoredNetwork()` await.
+    const gate = deferred<NetworkName>();
+    let reading = false;
+    vi.mocked(getStoredNetwork).mockImplementationOnce(() => {
+      reading = true;
+      return gate.promise;
+    });
+    const racing = getSessionWallet();
+    await vi.waitFor(() => expect(reading).toBe(true));
+
+    // This is the state `lock()` leaves behind before its listener runs: the seed is
+    // gone, but `invalidateSessionWallet` has not been called yet, so the cached
+    // wallet is still here. A check made before the await has already passed by now.
+    state.seed = null;
+    gate.resolve('regtest');
+
+    await expect(racing).rejects.toThrow('LOCKED');
+  });
+
   it('throws LOCKED on the cache-hit path, not just when building', async () => {
     const wallet = fakeWallet();
     buildWalletMock.mockResolvedValue(wallet);
