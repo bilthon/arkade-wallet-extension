@@ -62,6 +62,20 @@ import {
   resolveApproval,
   onWindowClosed,
 } from '@/src/provider-handlers';
+import { withTimeout } from '@/src/async';
+
+/**
+ * Bounds the snapshot's address and balance reads.
+ *
+ * `getBalance` asks the onchain provider for boarding UTXOs. The SDK's REST provider
+ * sends no abort signal, so a request that is black-holed by a dead Esplora or a
+ * dropped connection never settles on its own. Without a bound the popup's refresh
+ * spinner runs forever.
+ *
+ * 8 seconds is shorter than the popup's 15 second poll, so a stuck read always fails
+ * before the next poll starts and the reads cannot pile up.
+ */
+const BALANCE_READ_TIMEOUT_MS = 8_000;
 
 /**
  * Stateless request router. Holds no secret/wallet state in memory between wakes —
@@ -187,8 +201,9 @@ export default defineBackground(() => {
   // Live reconciliation: read operator, persist + return fresh snapshot. Concurrent
   // callers (the popup's 15s poll racing a manual refresh, or another poll tick)
   // join the same `getSessionWallet`/`ensureFreshVtxos` calls rather than each
-  // starting their own build or reconciliation; the timeouts that bound a hung
-  // build or a hung indexer now live inside the runtime, not this handler.
+  // starting their own build or reconciliation. Those two steps are bounded inside
+  // the runtime. The balance read below is not part of either, so it carries its
+  // own timeout.
   onMessage('refreshWalletSnapshot', async () => {
     // Capture the network we're refreshing so we can tell, once the reads finish,
     // whether it moved underneath us.
@@ -198,11 +213,11 @@ export default defineBackground(() => {
     // not be answered from the freshness window, though it still joins a
     // reconciliation already in flight from another caller.
     await ensureFreshVtxos(wallet, 0);
-    const [address, boardingAddress, balance] = await Promise.all([
-      getAddress(wallet),
-      getBoardingAddress(wallet),
-      getBalance(wallet),
-    ]);
+    const [address, boardingAddress, balance] = await withTimeout(
+      Promise.all([getAddress(wallet), getBoardingAddress(wallet), getBalance(wallet)]),
+      BALANCE_READ_TIMEOUT_MS,
+      'balance read',
+    );
 
     if ((await getStoredNetwork()) !== network) {
       // A network switch landed while this refresh was running. The wallet and
