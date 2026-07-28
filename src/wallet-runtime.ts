@@ -233,6 +233,7 @@ export async function ensureFreshVtxos(wallet: Wallet, maxAgeMs = 10_000): Promi
   if (refreshPromise) return refreshPromise;
   if (Date.now() - lastRefreshMs < maxAgeMs) return;
 
+  const gen = generation;
   // The bound covers the whole refresh, not just `refreshVtxos()`. The first
   // `getContractManager()` of a session is itself an indexer round trip, and the SDK's
   // REST provider passes no abort signal, so a black-holed request there never settles.
@@ -242,18 +243,21 @@ export async function ensureFreshVtxos(wallet: Wallet, maxAgeMs = 10_000): Promi
   refreshPromise = mine;
   try {
     await mine;
+    // Stamp the window here, where we know how the refresh actually ended, and only
+    // while it still belongs to the current wallet. Two refreshes must not stamp it:
+    //  1. One that lost the timeout race. We already told its caller it failed, and
+    //     `withTimeout` does not cancel, so it keeps running and lands later. If it
+    //     stamped the window then, reads would trust a cache that no refresh ever
+    //     finished reconciling.
+    //  2. One that outlived a lock or a network switch. It reconciled the OLD wallet,
+    //     so its result says nothing about the wallet we hold now.
+    if (gen === generation) lastRefreshMs = Date.now();
   } finally {
     if (refreshPromise === mine) refreshPromise = null;
   }
 }
 
 async function refreshVtxosNow(wallet: Wallet): Promise<void> {
-  const gen = generation;
   const manager = await wallet.getContractManager();
   await manager.refreshVtxos();
-  // Only stamp the freshness window if this refresh still belongs to the current
-  // wallet. A refresh that lands after a lock or a network switch reconciled the OLD
-  // wallet, so recording it would make the next wallet look fresh when nothing has
-  // reconciled it, and reads would trust an unsynced cache for the whole window.
-  if (gen === generation) lastRefreshMs = Date.now();
 }

@@ -268,6 +268,33 @@ describe('ensureFreshVtxos', () => {
       vi.useRealTimers();
     }
   });
+
+  it('does not stamp the freshness window from a refresh that already timed out', async () => {
+    vi.useFakeTimers();
+    try {
+      const stalled = deferred<void>();
+      const refreshVtxos = vi.fn(() => stalled.promise);
+      const wallet = fakeWallet({ getContractManager: vi.fn(async () => ({ refreshVtxos })) });
+
+      // Default freshness window, so a stamp would be visible to the next caller.
+      const stuck = ensureFreshVtxos(wallet);
+      const assertion = expect(stuck).rejects.toThrow(/timed out/i);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await assertion;
+
+      // `withTimeout` does not cancel, so the abandoned refresh keeps running and
+      // lands here, long after its caller was told it failed.
+      stalled.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The next caller is well inside the 10s window, and still has to reconcile:
+      // no refresh ever finished, so there is nothing to call fresh.
+      await ensureFreshVtxos(wallet);
+      expect(refreshVtxos).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 /**
