@@ -21,20 +21,25 @@ import {
 import type { NetworkName } from '@arkade-os/sdk';
 import { hex } from '@scure/base';
 import { getNetwork as getStoredNetwork } from './storage';
-import { buildWallet, networkConfig } from './wallet';
+import { networkConfig } from './wallet';
+import { getSessionWallet, ensureFreshVtxos } from './wallet-runtime';
 import { submarineFeeForAmount, type LnPayStatus, type LnReceiveStatus } from './lightning-utils';
 
 /**
  * Lightning deposits (Lightning → Arkade) via Boltz reverse swaps, and
  * Lightning payments (Arkade → Lightning) via Boltz submarine swaps.
  *
- * `ArkadeSwaps` starts a `SwapManager` (WebSocket + failsafe polling) that
- * auto-claims a reverse swap's VHTLC the moment Boltz funds it, so — unlike
- * `buildWallet`, which is cheap and rebuilt per message — we keep ONE instance
- * alive for as long as the wallet stays unlocked: a lazy, unlock-scoped
- * singleton, disposed on lock and on network switch. This mirrors how the
- * seed itself lives in `keystore.ts` module memory: SW alive + unlocked →
- * singleton alive; SW killed → gone, rebuilt on next unlock if needed.
+ * `ArkadeSwaps` is built on the same shared session wallet every other read
+ * and send uses, via `getSessionWallet()` (see `wallet-runtime.ts`). We still
+ * keep a SEPARATE Lightning singleton on top of it, though: `ArkadeSwaps`
+ * starts a `SwapManager` (WebSocket + failsafe polling) that auto-claims a
+ * reverse swap's VHTLC the moment Boltz funds it, and that WebSocket and its
+ * timers are not part of the Arkade wallet at all. They need their own
+ * lifecycle: built lazily on first use, kept alive for as long as the wallet
+ * stays unlocked, and disposed on lock and on network switch. This mirrors
+ * how the seed itself lives in `keystore.ts` module memory: SW alive +
+ * unlocked → singleton alive; SW killed → gone, rebuilt on next unlock if
+ * needed.
  *
  * Claiming needs the unlocked wallet (our strict lock posture zeroes the seed
  * with the SW), so it only happens while the wallet is unlocked and the SW is
@@ -59,8 +64,9 @@ let generation = 0;
 const repoName = (network: NetworkName) => `arkade-swaps-${network}`;
 
 /**
- * Build (or reuse) the `ArkadeSwaps` runtime. Caller guarantees the wallet is
- * unlocked.
+ * Build (or reuse) the `ArkadeSwaps` runtime. The lock check is not the caller's job
+ * any more: `getSessionWallet()` reads the unlocked seed itself and throws LOCKED, so
+ * a caller that races a lock gets the rejection from there.
  *
  * Memoizes the IN-FLIGHT promise, not just the resolved instance, via a
  * synchronous check-and-assign (no `await` before `swapsPromise` is set) —
@@ -69,9 +75,9 @@ const repoName = (network: NetworkName) => `arkade-swaps-${network}`;
  * observe the same in-flight build and get the same instance, rather than
  * both calling `ArkadeSwaps.create` and leaking the loser's SwapManager.
  */
-export function getSwaps(seed: Uint8Array): Promise<ArkadeSwaps> {
+export function getSwaps(): Promise<ArkadeSwaps> {
   if (!swapsPromise) {
-    const mine = createRuntime(seed, generation);
+    const mine = createRuntime(generation);
     swapsPromise = mine;
     // A failed build must not poison the memo forever — clear it so the next
     // getSwaps retries. Guarded so we never clobber a NEWER promise that a
@@ -96,11 +102,11 @@ export function getSwaps(seed: Uint8Array): Promise<ArkadeSwaps> {
  * stale in-flight build. (Confirmed: `setNetwork`/`setVaultAndNetwork` has no
  * other production caller.)
  */
-async function createRuntime(seed: Uint8Array, gen: number): Promise<ArkadeSwaps> {
+async function createRuntime(gen: number): Promise<ArkadeSwaps> {
   const network = await getStoredNetwork();
   const cfg = networkConfig(network);
   if (!cfg.boltzApiUrl) throw new Error('LIGHTNING_UNAVAILABLE');
-  const wallet = await buildWallet(seed);
+  const wallet = await getSessionWallet();
   const instance = await ArkadeSwaps.create({
     wallet,
     swapProvider: new BoltzSwapProvider({ apiUrl: cfg.boltzApiUrl, network }),
@@ -189,13 +195,13 @@ export async function hasPendingSwaps(network: NetworkName): Promise<boolean> {
  * statuses (`transaction.lockupFailed`) stay with the manager too, hence the
  * `isSubmarineFinalStatus` filter.
  *
- * Called fire-and-forget (`void reconcilePendingSwaps(seed)`) from the unlock
+ * Called fire-and-forget (`void reconcilePendingSwaps()`) from the unlock
  * handler, so a rejection here has no caller watching for it. A lock racing
  * this call is an expected, harmless case now (see `disposeSwaps`'s
  * generation bump: `getSwaps` rejects with 'LOCKED' when that happens) — swallow
  * it here rather than let it surface as an unhandled promise rejection.
  */
-export async function reconcilePendingSwaps(seed: Uint8Array): Promise<void> {
+export async function reconcilePendingSwaps(): Promise<void> {
   try {
     const network = await getStoredNetwork();
     const repo = new IndexedDbSwapRepository(repoName(network)); // never disposed — see hasPendingSwaps
@@ -203,7 +209,7 @@ export async function reconcilePendingSwaps(seed: Uint8Array): Promise<void> {
       (s): s is BoltzSubmarineSwap =>
         isSubmarineSwapRefundable(s) && isSubmarineFinalStatus(s.status),
     );
-    const s = await getSwaps(seed); // starting the manager already loads pending swaps
+    const s = await getSwaps(); // starting the manager already loads pending swaps
     if (stranded.length > 0) await s.recoverAllSubmarineFunds(stranded);
     await s.refreshSwapsStatus(); // catch swaps that settled while we were closed
   } catch {
@@ -249,17 +255,14 @@ export async function getLightningInfo(): Promise<{
  * amount — mirrors the library). Unlock-gated: building the swap runtime
  * needs the wallet's claim key.
  */
-export async function createInvoice(
-  seed: Uint8Array,
-  { amount }: { amount: number },
-): Promise<{
+export async function createInvoice({ amount }: { amount: number }): Promise<{
   invoice: string;
   paymentHash: string;
   swapId: string;
   receiveAmount: number;
   expiresAt: number;
 }> {
-  const s = await getSwaps(seed);
+  const s = await getSwaps();
   const limits = await s.getLimits();
   if (amount < limits.min || amount > limits.max) {
     throw new Error(`Amount must be between ${limits.min} and ${limits.max} sats.`);
@@ -411,10 +414,13 @@ export function payTotalSlack(amountSats: number): number {
  * swaps the SW didn't live to see through. No preimage crosses back — the
  * popup only ever needs the status.
  */
-export async function payInvoice(
-  seed: Uint8Array,
-  { invoice, maxTotalSats }: { invoice: string; maxTotalSats: number },
-): Promise<{ swapId: string; txid: string; amountSats: number; totalSats: number }> {
+export async function payInvoice({
+  invoice,
+  maxTotalSats,
+}: {
+  invoice: string;
+  maxTotalSats: number;
+}): Promise<{ swapId: string; txid: string; amountSats: number; totalSats: number }> {
   let decoded: ReturnType<typeof decodeInvoice>;
   try {
     decoded = decodeInvoice(invoice);
@@ -428,7 +434,7 @@ export async function payInvoice(
     );
   }
 
-  const s = await getSwaps(seed);
+  const s = await getSwaps();
   const limits = await s.getLimits();
   if (decoded.amountSats < limits.min || decoded.amountSats > limits.max) {
     throw new Error(
@@ -451,7 +457,7 @@ export async function payInvoice(
     );
   }
 
-  const wallet = await buildWallet(seed);
+  const wallet = await getSessionWallet();
 
   // Verify the lockup address before we fund it. Boltz returns a VHTLC address for us to send
   // to, but nothing so far proves that address commits to OUR refund key. If it does not, the
@@ -477,6 +483,11 @@ export async function payInvoice(
       'The swap service returned a lockup address we could not verify. No funds were taken.',
     );
   }
+
+  // Coin selection needs a live view of what's spendable. Building the wallet used to
+  // give us that for free, because construction ran a delta sync. The shared session
+  // wallet does not, so we refresh explicitly right before the send that selects coins.
+  await ensureFreshVtxos(wallet);
 
   let txid: string;
   try {
