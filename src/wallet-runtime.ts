@@ -195,6 +195,15 @@ export async function invalidateSessionWallet(): Promise<void> {
   const wallet = resolvedWallet;
   resolvedWallet = null;
   resolvedNetwork = null;
+  // Drop the in-flight build too, not just the finished wallet. That build belongs
+  // to the session we are ending, and it is going to reject with LOCKED when it
+  // lands. Leaving it here would hand that rejection to the next caller, so an
+  // unlock or a network switch would bounce straight back to the unlock screen.
+  //
+  // The abandoned build still cleans up after itself: it disposes its wallet on the
+  // generation check, and its memo cleanup only fires when it still owns the memo,
+  // so it cannot clear a build the next session started.
+  pendingWallet = null;
   // The freshness window belongs to the wallet we just dropped; a wallet built
   // next (possibly for a different network) starts with no assumed freshness.
   lastRefreshMs = 0;

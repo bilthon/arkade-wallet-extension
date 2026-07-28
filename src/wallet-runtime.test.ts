@@ -313,6 +313,59 @@ describe('lifetime gaps', () => {
     await expect(getSessionWallet()).rejects.toThrow('LOCKED');
   });
 
+  it('does not hand the next session a build started by the previous one', async () => {
+    const stalled = deferred<Wallet>();
+    buildWalletMock.mockReturnValueOnce(stalled.promise);
+    const abandoned = getSessionWallet();
+    await vi.waitFor(() => expect(buildWalletMock).toHaveBeenCalledOnce());
+
+    // A lock or a network switch, while that first build is still in flight.
+    await invalidateSessionWallet();
+
+    // This caller belongs to the new session, so it has to start its own build. The
+    // one still running is going to reject with LOCKED, and waiting on it would send
+    // a freshly unlocked popup straight back to the unlock screen.
+    const fresh = fakeWallet();
+    buildWalletMock.mockResolvedValueOnce(fresh);
+    const second = getSessionWallet();
+    await vi.waitFor(() => expect(buildWalletMock).toHaveBeenCalledTimes(2));
+    await expect(second).resolves.toBe(fresh);
+
+    // The abandoned build still cleans up after itself when it finally lands.
+    const late = fakeWallet();
+    stalled.resolve(late);
+    await expect(abandoned).rejects.toThrow('LOCKED');
+    expect(late.dispose).toHaveBeenCalledOnce();
+  });
+
+  it('lets a late build from the old session clear only its own memo', async () => {
+    const stalledOld = deferred<Wallet>();
+    buildWalletMock.mockReturnValueOnce(stalledOld.promise);
+    const abandoned = getSessionWallet();
+    await vi.waitFor(() => expect(buildWalletMock).toHaveBeenCalledOnce());
+
+    await invalidateSessionWallet();
+
+    const stalledNew = deferred<Wallet>();
+    buildWalletMock.mockReturnValueOnce(stalledNew.promise);
+    const second = getSessionWallet();
+    await vi.waitFor(() => expect(buildWalletMock).toHaveBeenCalledTimes(2));
+
+    // The old build lands while the new one is still running.
+    stalledOld.resolve(fakeWallet());
+    await expect(abandoned).rejects.toThrow('LOCKED');
+
+    // Its cleanup only fires when it still owns the memo, so a caller arriving now
+    // joins the new build instead of starting a third one.
+    const third = getSessionWallet();
+    const fresh = fakeWallet();
+    stalledNew.resolve(fresh);
+
+    await expect(second).resolves.toBe(fresh);
+    await expect(third).resolves.toBe(fresh);
+    expect(buildWalletMock).toHaveBeenCalledTimes(2);
+  });
+
   it('bounds the whole refresh, so a hung getContractManager cannot wedge later callers', async () => {
     vi.useFakeTimers();
     try {
