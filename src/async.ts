@@ -4,8 +4,9 @@
  * IMPORTANT: this does NOT cancel `promise`. It races the promise against a timer, so when
  * the timeout wins the underlying work keeps running to completion — its result is just
  * ignored. Callers that hold a resource (a network connection, a built wallet, a
- * subscription) must release it on timeout themselves. For example the balance refresh
- * disposes its wallet in a `finally` whether or not the read timed out.
+ * subscription) must release it on timeout themselves. For example, `buildSessionWallet`
+ * attaches a handler to dispose the wallet if it arrives after the timeout, so a slow
+ * operator build does not leak a watcher for every timed-out attempt.
  *
  * The timer is cleared once the race settles, so a fast success leaves nothing pending.
  */

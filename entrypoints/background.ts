@@ -78,10 +78,15 @@ import { withTimeout } from '@/src/async';
 const BALANCE_READ_TIMEOUT_MS = 8_000;
 
 /**
- * Stateless request router. Holds no secret/wallet state in memory between wakes —
- * every read handler rehydrates a `Wallet` from IndexedDB + the in-memory seed on
- * demand. The one persistent in-memory value is the unlocked seed, held in
- * `keystore.ts` module memory and zeroed on lock/auto-lock.
+ * Request router. Holds one session-scoped `Wallet` in memory for as long as the
+ * service worker stays unlocked on one network. Every read/send/renewal handler
+ * shares this wallet via `getSessionWallet()` instead of building its own. The wallet
+ * is disposed only on lock or on a network switch, by `invalidateSessionWallet()`.
+ * The unlocked seed is held in `keystore.ts` module memory and zeroed on lock/auto-lock.
+ *
+ * None of that memory survives the service worker being killed. When the worker dies
+ * the seed dies with it, so the wallet is locked again and the next sensitive action
+ * asks for the password.
  *
  * Boundary rule: keystore ops run entirely here; the seed/mnemonic NEVER leaves
  * the SW except the explicit, user-initiated `getMnemonicForBackup` reveal.
