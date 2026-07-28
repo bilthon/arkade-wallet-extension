@@ -265,8 +265,15 @@ export default defineBackground(() => {
 
   // ── Renewal + recovery + onboarding ────────────────────────────────────────
   // All sign, so all go through requireWallet (unlock-gated; throws 'LOCKED').
+  // renewNow and recoverNow both pick their coins by state, and both report back
+  // how many they acted on. A stale cache makes them answer "nothing to do" when
+  // there is something to do, so both reconcile first. They pass maxAgeMs 0 rather
+  // than the default window because the user pressed a button and expects a look
+  // at the operator right now. onboardNow is not in this list: it works on boarding
+  // UTXOs read from the onchain provider, which ensureFreshVtxos does not touch.
   onMessage('renewNow', async () => {
     const wallet = await requireWallet();
+    await ensureFreshVtxos(wallet, 0);
     return renewExpiringVtxos(wallet, RENEW_MARGIN_MS);
   });
 
@@ -274,6 +281,7 @@ export default defineBackground(() => {
   // renewal, which only refreshes still-valid coins).
   onMessage('recoverNow', async () => {
     const wallet = await requireWallet();
+    await ensureFreshVtxos(wallet, 0);
     return recoverExpiredVtxos(wallet);
   });
 
