@@ -85,33 +85,49 @@ export async function getMnemonicForBackup(password: string): Promise<string> {
 }
 
 /**
- * Switch the active network behind a password re-auth.
+ * Check the password and get a network switch ready, without changing anything yet.
+ * Returns `null` when the requested network is the one already active.
  *
  * The vault binds the encrypted mnemonic to its network via the AES-GCM
  * additional-data (`"arkade-vault-v1" + network`), so a plain `setNetwork` call
- * would leave the vault undecryptable on the new network. This function re-auth's
- * under the CURRENT network, then re-encrypts the same mnemonic under the NEW
- * network's AAD and atomically flips the stored network.
+ * would leave the vault undecryptable on the new network. So we re-auth under the
+ * CURRENT network, then re-encrypt the same mnemonic under the NEW network's AAD.
+ *
+ * Preparing and committing are separate because the caller has to tear down the
+ * session wallet and the Lightning swap runtime around the switch, and those are
+ * both live things a user may be relying on. Doing that before the password is
+ * checked would stop a running Lightning swap over nothing more than a typo. Now
+ * a wrong password throws here, before the caller touches either runtime.
  *
  * Boundary: the mnemonic stays in the SW, only the password crosses in — same
  * contract as `getMnemonicForBackup`. A wrong password (or tamper) throws from
  * `decryptVault` and leaves the stored vault + network UNCHANGED (fail-closed).
  */
-export async function switchNetwork(newNetwork: NetworkName, password: string): Promise<void> {
+export async function prepareNetworkSwitch(
+  newNetwork: NetworkName,
+  password: string,
+): Promise<{ commit: () => Promise<void> } | null> {
   const blob = await getVault();
-  if (!blob) throw new Error('switchNetwork: no vault');
+  if (!blob) throw new Error('prepareNetworkSwitch: no vault');
   const current = await getNetwork();
-  if (newNetwork === current) return; // no-op
+  if (newNetwork === current) return null; // no-op
   // Re-auth under the CURRENT network (fail-closed: wrong password/tamper throws from decryptVault).
   const mnemonic = await decryptVault(blob, password, current);
-  // Re-encrypt the SAME mnemonic under the NEW network's AAD and flip the stored network
-  // in ONE atomic write — vault and network must never disagree (a mismatch can't unlock).
+  // Re-encrypt the SAME mnemonic under the NEW network's AAD. Nothing is stored until
+  // `commit` runs, so everything above is safe to abandon.
   const newVault = await encryptVault(mnemonic, password, newNetwork);
-  await setVaultAndNetwork(newVault, newNetwork);
-  await clearSnapshot(); // per-network address/balance cache — drop the old one
-  // We just proved the password and hold the mnemonic → keep it unlocked under the new
-  // network rather than forcing a re-unlock. If it was locked, stay locked.
-  if (isUnlocked()) await holdUnlocked(mnemonic);
+
+  return {
+    async commit() {
+      // Flip the vault and the stored network in ONE atomic write — they must never
+      // disagree, because a mismatch can't unlock.
+      await setVaultAndNetwork(newVault, newNetwork);
+      await clearSnapshot(); // per-network address/balance cache — drop the old one
+      // We proved the password and hold the mnemonic → keep it unlocked under the new
+      // network rather than forcing a re-unlock. If it was locked, stay locked.
+      if (isUnlocked()) await holdUnlocked(mnemonic);
+    },
+  };
 }
 
 // ─── Create / import ─────────────────────────────────────────────────────────

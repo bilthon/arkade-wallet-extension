@@ -84,7 +84,7 @@ describe('keystore handler round-trip (boundary)', () => {
   });
 });
 
-describe('switchNetwork', () => {
+describe('prepareNetworkSwitch', () => {
   // Reuse the same browser mock (local/session) declared above; cleared before each case.
   beforeEach(async () => {
     local.clear();
@@ -97,7 +97,8 @@ describe('switchNetwork', () => {
     await keystore.createWallet(PASSWORD);
 
     // Switch to mutinynet.
-    await keystore.switchNetwork('mutinynet', PASSWORD);
+    const prepared = await keystore.prepareNetworkSwitch('mutinynet', PASSWORD);
+    await prepared!.commit();
 
     // The stored network flips.
     expect(local.get('network')).toBe('mutinynet');
@@ -122,7 +123,9 @@ describe('switchNetwork', () => {
     await keystore.createWallet(PASSWORD);
     const vaultBefore = local.get('vault');
 
-    await expect(keystore.switchNetwork('mutinynet', 'wrong-password')).rejects.toThrow();
+    await expect(
+      keystore.prepareNetworkSwitch('mutinynet', 'wrong-password'),
+    ).rejects.toThrow();
 
     // Network unchanged (still regtest/default).
     expect(local.get('network')).toBeUndefined(); // never set → default regtest
@@ -137,9 +140,28 @@ describe('switchNetwork', () => {
     const vaultBefore = local.get('vault');
 
     // regtest is the default; switching to it again is a no-op.
-    await keystore.switchNetwork('regtest', PASSWORD);
+    expect(await keystore.prepareNetworkSwitch('regtest', PASSWORD)).toBeNull();
 
     expect(local.get('vault')).toEqual(vaultBefore);
     expect(local.get('network')).toBeUndefined(); // setNetwork was never called
+  });
+
+  it('preparing changes nothing until commit runs', async () => {
+    // This is what keeps a wrong password from tearing down the session wallet and
+    // the Lightning swap runtime: the caller only drops those once preparing has
+    // succeeded, so a typo leaves a running swap alone.
+    await keystore.createWallet(PASSWORD);
+    const vaultBefore = local.get('vault');
+
+    const prepared = await keystore.prepareNetworkSwitch('mutinynet', PASSWORD);
+    expect(prepared).not.toBeNull();
+
+    // Password already proven, but nothing is stored yet.
+    expect(local.get('vault')).toEqual(vaultBefore);
+    expect(local.get('network')).toBeUndefined();
+
+    await prepared!.commit();
+    expect(local.get('network')).toBe('mutinynet');
+    expect(local.get('vault')).not.toEqual(vaultBefore);
   });
 });

@@ -12,7 +12,7 @@ import {
   lock,
   onLock,
   getMnemonicForBackup,
-  switchNetwork,
+  prepareNetworkSwitch,
 } from '@/src/keystore';
 import { hasVault, getNetwork as getStoredNetwork } from '@/src/storage';
 import {
@@ -136,14 +136,20 @@ export default defineBackground(() => {
   });
 
   onMessage('switchNetwork', async ({ data }) => {
+    // Check the password first. A wrong one throws here, before we touch either
+    // runtime, so a typo can't stop a Lightning swap that is mid-flight. `null`
+    // means we are already on this network, so there is nothing to do at all.
+    const prepared = await prepareNetworkSwitch(data.network, data.password);
+    if (!prepared) return { ok: true as const };
+
     // Both runtimes are keyed by the network baked into their operator/Boltz config,
-    // so drop them before the password check — nothing should keep building against
-    // a network storage is about to disagree with.
+    // so drop them around the write — nothing should keep building against a network
+    // storage is about to disagree with.
     void invalidateSessionWallet();
     void disposeSwaps();
-    await switchNetwork(data.network, data.password);
-    // Invalidate again: anything that started building during the password check
-    // (a race, not the common case) must not survive into the new network either.
+    await prepared.commit();
+    // Invalidate again: anything that started building during the write (a race, not
+    // the common case) must not survive into the new network either.
     void invalidateSessionWallet();
     void disposeSwaps();
     // Operator network changed → notify connected sites so they don't keep acting on the
