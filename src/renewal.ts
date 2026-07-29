@@ -1,5 +1,4 @@
-import { isUnlocked, getUnlockedSeed } from './keystore';
-import { getSessionWallet, ensureFreshVtxos } from './wallet-runtime';
+import { getSessionWallet, ensureFreshVtxos, isUnlocked } from './wallet-runtime';
 import { renewExpiringVtxos, recoverExpiredVtxos, getExpiredVtxoSummary } from './wallet';
 
 /**
@@ -93,10 +92,10 @@ export async function runRenewalTick(): Promise<
   | { state: 'locked'; warning: RenewalWarning | null }
   | { state: 'unlocked'; renewed: number; recovered: number; txid?: string }
 > {
-  if (!getUnlockedSeed() || !isUnlocked()) {
+  if (!isUnlocked()) {
     // Locked: warn only. Build a read-only view of expiry from the cached VTXO set.
-    // We cannot read the live operator without a wallet, but the IndexedDB-backed
-    // wallet build needs the seed — so when locked we have no fresh read. Fall back
+    // We cannot read the live operator without a wallet, and wallet construction needs
+    // the live runtime identity — so when locked we have no fresh read. Fall back
     // to leaving any prior warning in place (it was written while unlocked; the popup
     // ages the copy via `isWarningStale` so a respawn-while-locked snapshot reads as
     // "last known", not current).

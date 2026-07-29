@@ -49,13 +49,9 @@ const browserMock = {
 vi.stubGlobal('browser', browserMock);
 if (!globalThis.crypto) vi.stubGlobal('crypto', webcrypto);
 
-// hasVault/getNetwork read storage (set in beforeEach). isUnlocked is the lock gate —
-// mock keystore so we control lock state without a real seed.
+// hasVault/getNetwork read storage (set in beforeEach). Runtime state is the lock gate.
 let unlocked = true;
-vi.mock('./keystore', async () => {
-  const actual = await vi.importActual<typeof import('./keystore')>('./keystore');
-  return { ...actual, isUnlocked: () => unlocked };
-});
+vi.mock('./wallet-runtime', () => ({ isUnlocked: () => unlocked }));
 // networkConfig is pure but imports the SDK; stub to avoid pulling SDK into the test.
 vi.mock('./wallet', () => ({
   networkConfig: () => ({ arkServerUrl: 'http://localhost:7070', esploraUrl: '', isMainnet: false }),

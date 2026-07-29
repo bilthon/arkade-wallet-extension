@@ -4,8 +4,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
  * Keystore handler-logic round-trip (the message handlers are thin wrappers over
  * these functions). Proves the boundary end-to-end against an in-memory
  * `browser.storage`/`alarms`:
- *   create → unlocked + vault persisted + seed NEVER in session
- *   lock   → locked + session cleared
+ *   create → runtime unlocked + encrypted vault persisted, no session hint
+ *   lock   → runtime capability revoked while the encrypted vault remains
  *   getMnemonicForBackup re-auths from the vault (wrong password rejected)
  * This is the security-critical contract the background `onMessage` handlers expose.
  */
@@ -40,6 +40,7 @@ vi.stubGlobal('browser', browserMock);
 
 const keystore = await import('./keystore');
 const crypto = await import('./crypto');
+const runtime = await import('./wallet-runtime');
 
 const PASSWORD = 'correct horse battery staple';
 
@@ -50,31 +51,40 @@ describe('keystore handler round-trip (boundary)', () => {
     await keystore.lock(); // ensure clean in-memory state between cases
   });
 
-  it('create → unlocked, vault persisted, seed never in session', async () => {
+  it('create → runtime unlocked, vault persisted, nothing written to session storage', async () => {
     expect(await keystore.getLockState()).toEqual({ hasVault: false, unlocked: false });
 
     const mnemonic = await keystore.createWallet(PASSWORD);
     expect(mnemonic.split(/\s+/).length).toBe(12);
 
-    // Unlocked in memory; vault persisted to local.
+    // The runtime owns unlock state; the encrypted mnemonic is persisted locally.
     expect(await keystore.getLockState()).toEqual({ hasVault: true, unlocked: true });
+    expect(runtime.isUnlocked()).toBe(true);
     expect(local.get('vault')).toBeTruthy();
 
-    // The only thing in session is the unlock flag — never the seed/mnemonic.
-    const sessionDump = JSON.stringify([...session.entries()]);
-    expect(sessionDump).not.toContain(mnemonic);
-    expect(sessionDump).not.toContain(mnemonic.split(/\s+/)[0]);
-    expect(session.get('unlocked')).toBe(true);
+    expect([...session.entries()]).toEqual([]);
   });
 
-  it('lock clears the in-memory seed and the session flag', async () => {
+  it('lock revokes the runtime wallet while retaining the encrypted vault', async () => {
     await keystore.createWallet(PASSWORD);
     await keystore.lock();
-    expect(keystore.isUnlocked()).toBe(false);
-    expect(keystore.getUnlockedSeed()).toBeNull();
-    expect(session.get('unlocked')).toBeUndefined();
+    expect(runtime.isUnlocked()).toBe(false);
+    await expect(runtime.getSessionWallet()).rejects.toThrow('LOCKED');
+    expect([...session.entries()]).toEqual([]);
     // Vault stays at rest so the wallet can be unlocked again.
     expect(local.get('vault')).toBeTruthy();
+  });
+
+  it('imports and unlocks without persisting an unlock hint', async () => {
+    const mnemonic = crypto.generateMnemonic();
+    await keystore.importWallet(mnemonic, PASSWORD);
+    expect(runtime.isUnlocked()).toBe(true);
+    expect([...session.entries()]).toEqual([]);
+
+    await keystore.lock();
+    await keystore.unlock(PASSWORD);
+    expect(runtime.isUnlocked()).toBe(true);
+    expect([...session.entries()]).toEqual([]);
   });
 
   it('getMnemonicForBackup re-auths from the vault', async () => {
@@ -98,6 +108,9 @@ describe('prepareNetworkSwitch', () => {
 
     // Switch to mutinynet.
     const prepared = await keystore.prepareNetworkSwitch('mutinynet', PASSWORD);
+    // Mirror the background's interim switch choreography: drop the SDK wallet before
+    // committing, while retaining the runtime identity so an unlocked switch stays unlocked.
+    await runtime.invalidateSessionWallet();
     await prepared!.commit();
 
     // The stored network flips.
@@ -106,7 +119,8 @@ describe('prepareNetworkSwitch', () => {
     // unlock succeeds under the new network (vault was re-encrypted under mutinynet AAD).
     await keystore.lock();
     await expect(keystore.unlock(PASSWORD)).resolves.not.toThrow();
-    expect(keystore.isUnlocked()).toBe(true);
+    expect(runtime.isUnlocked()).toBe(true);
+    expect(runtime.getSessionNetwork()).toBe('mutinynet');
 
     // …and the vault NO LONGER decrypts under the OLD network's AAD — proves the switch
     // actually re-encrypted (rebound the AAD), not just flipped the stored network pointer.
@@ -133,6 +147,8 @@ describe('prepareNetworkSwitch', () => {
     expect(local.get('vault')).toEqual(vaultBefore);
     // Still decryptable under the original network.
     await expect(keystore.getMnemonicForBackup(PASSWORD)).resolves.toBeTruthy();
+    expect(runtime.isUnlocked()).toBe(true);
+    expect(runtime.getSessionNetwork()).toBe('regtest');
   });
 
   it('same-network target is a no-op (vault unchanged)', async () => {
@@ -163,5 +179,18 @@ describe('prepareNetworkSwitch', () => {
     await prepared!.commit();
     expect(local.get('network')).toBe('mutinynet');
     expect(local.get('vault')).not.toEqual(vaultBefore);
+    expect(runtime.isUnlocked()).toBe(true);
+    expect(runtime.getSessionNetwork()).toBe('mutinynet');
+  });
+
+  it('does not reopen a prepared switch after the user locks', async () => {
+    await keystore.createWallet(PASSWORD);
+    const prepared = await keystore.prepareNetworkSwitch('mutinynet', PASSWORD);
+
+    await keystore.lock();
+    await prepared!.commit();
+
+    expect(runtime.isUnlocked()).toBe(false);
+    expect(local.get('network')).toBe('mutinynet');
   });
 });

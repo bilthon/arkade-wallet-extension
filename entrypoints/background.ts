@@ -3,8 +3,6 @@ import { onMessage } from '@/src/messaging';
 import {
   registerAutoLock,
   armAutoLock,
-  isUnlocked,
-  getUnlockedSeed,
   getLockState,
   createWallet,
   importWallet,
@@ -28,7 +26,12 @@ import {
   onboardBoarding,
   getTransactionHistory,
 } from '@/src/wallet';
-import { getSessionWallet, invalidateSessionWallet, ensureFreshVtxos } from '@/src/wallet-runtime';
+import {
+  getSessionWallet,
+  invalidateSessionWallet,
+  ensureFreshVtxos,
+  isUnlocked,
+} from '@/src/wallet-runtime';
 import { getSnapshot, setSnapshot, type WalletSnapshot } from '@/src/wallet-cache';
 import {
   registerRenewal,
@@ -82,10 +85,10 @@ const BALANCE_READ_TIMEOUT_MS = 8_000;
  * service worker stays unlocked on one network. Every read/send/renewal handler
  * shares this wallet via `getSessionWallet()` instead of building its own. The wallet
  * is disposed only on lock or on a network switch, by `invalidateSessionWallet()`.
- * The unlocked seed is held in `keystore.ts` module memory and zeroed on lock/auto-lock.
+ * The live identity and active session network are owned by `wallet-runtime.ts`.
  *
  * None of that memory survives the service worker being killed. When the worker dies
- * the seed dies with it, so the wallet is locked again and the next sensitive action
+ * the identity dies with it, so the wallet is locked again and the next sensitive action
  * asks for the password.
  *
  * Boundary rule: keystore ops run entirely here; the seed/mnemonic NEVER leaves
@@ -113,7 +116,7 @@ export default defineBackground(() => {
     return { pong: true as const, timestamp: Date.now(), echo: data?.echo };
   });
 
-  // ── Keystore (seed stays in the SW) ────────────────────────────────────────
+  // ── Encrypted keystore + runtime session ──────────────────────────────────
   onMessage('hasVault', () => hasVault());
   onMessage('getLockState', () => getLockState());
 
@@ -405,12 +408,10 @@ export default defineBackground(() => {
  * Throw if locked, otherwise re-arm auto-lock so an active session keeps the
  * idle window fresh. Throwing 'LOCKED' lets the popup route to the unlock
  * screen rather than show a broken read. Used by the Lightning handlers, which
- * need the wallet unlocked but read the seed themselves through
- * `getSessionWallet()` rather than taking it from here.
+ * need a live runtime session but acquire their wallet internally.
  */
 async function requireUnlocked(): Promise<void> {
-  const seed = getUnlockedSeed();
-  if (!seed || !isUnlocked()) throw new Error('LOCKED');
+  if (!isUnlocked()) throw new Error('LOCKED');
   await armAutoLock();
 }
 

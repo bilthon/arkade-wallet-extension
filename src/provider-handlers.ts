@@ -17,7 +17,7 @@ import {
   type ApprovalPayload,
 } from './approvals';
 import { getNetwork as getStoredNetwork, hasVault } from './storage';
-import { isUnlocked } from './keystore';
+import { isUnlocked } from './wallet-runtime';
 import { networkConfig } from './wallet';
 import { encodeProviderError, type ProviderEvent } from './provider-api';
 import { PROVIDER_EVENT_TYPE, type ProviderEventMessage } from './provider-events';
@@ -36,11 +36,10 @@ import { networks, type Wallet } from '@arkade-os/sdk';
  * Provider-facing handler logic. Every function here takes the message
  * `sender` and derives the origin from it — NEVER from a body field. It then
  * checks the per-origin grant and the wallet lock state, and returns public results
- * only. The seed/mnemonic never reach this layer (it lives in keystore.ts).
+ * only. Mnemonics and temporary raw seeds never reach this layer.
  *
- * `buildWalletForRead` is injected by the background (it owns `requireWallet`/the
- * unlocked seed) so this module stays free of the keystore-memory coupling and is
- * unit-testable with a fake wallet + fake sender.
+ * `buildWalletForRead` is injected by the background so this module stays free of SDK
+ * construction details and is unit-testable with a fake wallet + fake sender.
  */
 
 /**

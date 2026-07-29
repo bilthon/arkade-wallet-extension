@@ -1,6 +1,5 @@
 import {
   Wallet,
-  SeedIdentity,
   ArkAddress,
   Ramps,
   DustChangeError,
@@ -12,6 +11,7 @@ import {
   IndexedDBWalletRepository,
   IndexedDBContractRepository,
   type NetworkName,
+  type Identity,
   type WalletBalance,
   type ExtendedVirtualCoin,
   type ArkTransaction,
@@ -32,7 +32,7 @@ import {
  * SDK wallet runtime.
  *
  * `wallet-runtime.ts` holds one `Wallet` for the whole unlocked session and builds
- * it via `buildWallet(seed, network)`, backed by IndexedDB repositories (where the
+ * it via `buildWallet(identity, network)`, backed by IndexedDB repositories (where the
  * SDK persists VTXO/balance/history state so it survives SW restarts). The
  * functions below all operate on that already-built wallet.
  */
@@ -100,19 +100,16 @@ export function networkConfig(network: NetworkName): NetworkConfig {
 // ─── buildWallet — wallet construction ────────────────────────────────────────
 
 /**
- * Build a `Wallet` from the in-memory seed and the given network's config, backed
+ * Build a `Wallet` from the runtime-owned identity and the given network's config, backed
  * by IndexedDB repositories. `network` is passed in explicitly (rather than read
  * from storage here) so the caller's cache key and the constructed wallet always
  * refer to the same network.
  *
- * The seed is BIP86-derived for the given network (coin type 0' mainnet / 1'
- * otherwise) via `SeedIdentity.fromSeed` — the canonical seed-first factory
- * (symmetric with `MnemonicIdentity.fromMnemonic`), so the keystore never has to
- * hand the mnemonic across.
+ * Identity derivation happens once at the runtime boundary. This builder never receives
+ * the mnemonic or an application-owned raw seed.
  */
-export async function buildWallet(seed: Uint8Array, network: NetworkName): Promise<Wallet> {
+export async function buildWallet(identity: Identity, network: NetworkName): Promise<Wallet> {
   const cfg = networkConfig(network);
-  const identity = SeedIdentity.fromSeed(seed, { isMainnet: cfg.isMainnet });
   return Wallet.create({
     identity,
     // arkServerUrl/esploraUrl are @deprecated in favor of explicit providers, but

@@ -36,13 +36,12 @@ import { submarineFeeForAmount, type LnPayStatus, type LnReceiveStatus } from '.
  * reverse swap's VHTLC the moment Boltz funds it, and that WebSocket and its
  * timers are not part of the Arkade wallet at all. They need their own
  * lifecycle: built lazily on first use, kept alive for as long as the wallet
- * stays unlocked, and disposed on lock and on network switch. This mirrors
- * how the seed itself lives in `keystore.ts` module memory: SW alive +
- * unlocked → singleton alive; SW killed → gone, rebuilt on next unlock if
- * needed.
+ * stays unlocked, and disposed on lock and on network switch. This mirrors the
+ * runtime-owned identity: SW alive + unlocked → singleton alive; SW killed →
+ * gone, rebuilt on the next unlock if needed.
  *
- * Claiming needs the unlocked wallet (our strict lock posture zeroes the seed
- * with the SW), so it only happens while the wallet is unlocked and the SW is
+ * Claiming needs the unlocked wallet (our strict lock posture revokes the live
+ * identity with the SW), so it only happens while the wallet is unlocked and the SW is
  * alive — in practice while the popup showing the invoice is open. If the
  * user closes the popup before the payment lands, nothing is lost: the swap
  * sits in the per-network `IndexedDbSwapRepository`, and `reconcilePendingSwaps`
@@ -65,7 +64,7 @@ const repoName = (network: NetworkName) => `arkade-swaps-${network}`;
 
 /**
  * Build (or reuse) the `ArkadeSwaps` runtime. The lock check is not the caller's job
- * any more: `getSessionWallet()` reads the unlocked seed itself and throws LOCKED, so
+ * any more: `getSessionWallet()` reads the live runtime session and throws LOCKED, so
  * a caller that races a lock gets the rejection from there.
  *
  * Memoizes the IN-FLIGHT promise, not just the resolved instance, via a

@@ -2,21 +2,19 @@ import type { NetworkName } from '@arkade-os/sdk';
 import type { VaultBlob } from './crypto';
 
 /**
- * Typed `chrome.storage` I/O. Two areas, strict separation:
+ * Typed persistent `chrome.storage.local` I/O:
  *
- *  • local  — persistent: the encrypted vault + the active network. Survives restarts.
- *  • session — in-memory, trusted-context only: the unlock FLAG only. Under the Strict
- *              lock posture NOTHING secret lives here — no seed, no password, no key.
- *              After the SW dies the flag is gone and we re-prompt.
+ *  • the encrypted mnemonic vault and active network survive restarts;
+ *  • live identity and unlock state exist only in `wallet-runtime.ts` memory.
  *
- * The decrypted seed lives ONLY in SW module memory (see `keystore.ts`), never here.
+ * Other modules use `storage.session` for non-secret ephemeral state such as pending
+ * approvals. This storage layer does not persist an unlock hint or any key material.
  * We use `browser.storage.*` directly (not WXT's `storage` helper) to keep the
  * local/session split explicit and auditable for this security-critical layer.
  */
 
 const VAULT_KEY = 'vault';
 const NETWORK_KEY = 'network';
-const UNLOCK_FLAG_KEY = 'unlocked';
 
 /** Default dev network: nigiri regtest is the inner-loop default. */
 export const DEFAULT_NETWORK: NetworkName = 'regtest';
@@ -54,22 +52,4 @@ export async function setNetwork(network: NetworkName): Promise<void> {
  */
 export async function setVaultAndNetwork(blob: VaultBlob, network: NetworkName): Promise<void> {
   await browser.storage.local.set({ [VAULT_KEY]: blob, [NETWORK_KEY]: network });
-}
-
-// ─── session (ephemeral, nothing secret) ─────────────────────────────────────
-
-/** Set/clear the unlock flag. Strict posture: this is the ONLY thing session holds. */
-export async function setUnlockFlag(unlocked: boolean): Promise<void> {
-  if (unlocked) await browser.storage.session.set({ [UNLOCK_FLAG_KEY]: true });
-  else await browser.storage.session.remove(UNLOCK_FLAG_KEY);
-}
-
-/**
- * Whether the SW believes itself unlocked. This is only a hint for the UI — the
- * authority is whether the in-memory seed is present (`keystore.isUnlocked()`).
- * After SW death the flag is gone, so a stale "unlocked" can't outlive the seed.
- */
-export async function getUnlockFlag(): Promise<boolean> {
-  const got = await browser.storage.session.get(UNLOCK_FLAG_KEY);
-  return got[UNLOCK_FLAG_KEY] === true;
 }

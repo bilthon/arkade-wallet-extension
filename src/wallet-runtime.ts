@@ -1,156 +1,121 @@
-import type { NetworkName, Wallet } from '@arkade-os/sdk';
-import { getUnlockedSeed, isUnlocked } from './keystore';
-import { getNetwork as getStoredNetwork } from './storage';
-import { buildWallet } from './wallet';
+import { SeedIdentity, type NetworkName, type Wallet } from '@arkade-os/sdk';
+import { mnemonicToSeed } from './crypto';
+import { buildWallet, networkConfig } from './wallet';
 import { withTimeout } from './async';
 
 /**
- * Session-scoped Arkade wallet.
+ * The service worker's live wallet session.
  *
- * Before this module existed, every background message built its own `Wallet` via
- * `buildWallet(seed)`. That meant a fresh `ContractManager`, a fresh `ContractWatcher`,
- * and a fresh SDK transaction lock per message, all torn down again right after.
- * This module instead holds one `Wallet` for as long as the service worker stays
- * unlocked on one network, and every read/send/renewal path shares it.
- *
- * Per-message construction was also what kept the VTXO cache fresh, though not via
- * `Wallet.create` itself. The contract manager is built lazily on the first
- * `getContractManager()`, and building it reconciles the watched contracts against
- * the operator. Every read went through `wallet.getVtxos()`, which calls
- * `getContractManager()`, so each message paid one delta sync. One shared wallet
- * builds that manager once, so a read that needs a live view now has to call
- * `ensureFreshVtxos` first.
+ * Durable encrypted key material belongs to the keystore and storage modules. Once a
+ * password has opened that vault, this module becomes the sole authority for the live
+ * signing identity, its network, and the lazily constructed SDK wallet. Neither the
+ * mnemonic nor an application-owned raw seed is retained here.
  */
 
-// ─── Session wallet ────────────────────────────────────────────────────────────
+interface RuntimeSession {
+  epoch: number;
+  network: NetworkName;
+  identity: SeedIdentity;
+  wallet: Wallet | null;
+  pendingWallet: Promise<Wallet> | null;
+  lastRefreshMs: number;
+  refreshPromise: Promise<void> | null;
+}
 
-let resolvedWallet: Wallet | null = null;
-let resolvedNetwork: NetworkName | null = null;
-let pendingWallet: Promise<Wallet> | null = null;
-// Bumped by invalidateSessionWallet. Lets a build already in flight when a lock or
-// network switch happens detect, once it resolves, that it landed too late and
-// self-destruct instead of leaking a live ContractWatcher past the seed or network
-// it was built from. See buildSessionWallet's post-build check.
-let generation = 0;
+let session: RuntimeSession | null = null;
+let epoch = 0;
 
-/** Bounds a single wallet build so a hung operator `getInfo` can't wedge every later caller. */
+/** Bounds a single wallet build so a hung operator `getInfo` cannot wedge later callers. */
 const BUILD_TIMEOUT_MS = 8_000;
 
+/** Bounds a single refresh so a hung indexer cannot wedge later callers. */
+const REFRESH_TIMEOUT_MS = 60_000;
+
+export function isUnlocked(): boolean {
+  return session !== null;
+}
+
+/** The network bound to the current live identity. */
+export function getSessionNetwork(): NetworkName {
+  if (!session) throw new Error('LOCKED');
+  return session.network;
+}
+
 /**
- * Get the session's `Wallet`, building it if needed. Reads the unlocked seed and
- * the active network itself on every call, so no caller can hand it a stale pair
- * and the lock guard lives in one place instead of being re-implemented at every
- * call site.
+ * Install a new live identity without contacting the operator. The temporary raw seed is
+ * cleared immediately after `SeedIdentity` copies it. Wallet construction remains lazy,
+ * so a correct password unlocks even while the operator is offline.
  *
- * Deliberately neutral about auto-lock: it does not check, extend, or otherwise
- * change the auto-lock deadline. The caller decides whether an access counts as
- * user activity.
+ * Session replacement is synchronous. The returned promise only represents best-effort
+ * disposal of the previous resolved wallet.
+ */
+export function openSession(mnemonic: string, network: NetworkName): Promise<void> {
+  const identity = identityFromMnemonic(mnemonic, network);
+  const previous = session;
+  session = createSession(identity, network);
+  return disposeRuntimeSession(previous);
+}
+
+function identityFromMnemonic(mnemonic: string, network: NetworkName): SeedIdentity {
+  const seed = mnemonicToSeed(mnemonic);
+  try {
+    return SeedIdentity.fromSeed(seed, { isMainnet: networkConfig(network).isMainnet });
+  } finally {
+    seed.fill(0);
+  }
+}
+
+function createSession(identity: SeedIdentity, network: NetworkName): RuntimeSession {
+  return {
+    epoch: ++epoch,
+    network,
+    identity,
+    wallet: null,
+    pendingWallet: null,
+    lastRefreshMs: 0,
+    refreshPromise: null,
+  };
+}
+
+/**
+ * Revoke the live session synchronously, then return its asynchronous cleanup. A caller
+ * cannot acquire the old identity or wallet after this function returns.
+ */
+export function beginSessionLock(): { didLock: boolean; disposal: Promise<void> } {
+  const previous = session;
+  if (!previous) return { didLock: false, disposal: Promise.resolve() };
+
+  session = null;
+  epoch++;
+  return { didLock: true, disposal: disposeRuntimeSession(previous) };
+}
+
+/**
+ * Get the session wallet, building it once if needed. This function deliberately stays
+ * non-async: the pending promise is installed before any caller can reach an `await`, so
+ * concurrent requests always share one build.
  */
 export function getSessionWallet(): Promise<Wallet> {
-  if (pendingWallet) return pendingWallet;
-  const mine = resolveSessionWallet();
-  pendingWallet = mine;
-  // Clear the memo on EITHER outcome so the next call re-derives the network and
-  // re-checks the cache, rather than a rejection permanently poisoning it. Using
-  // `.then` with both handlers (not `.finally`) keeps this cleanup promise itself
-  // from rejecting, since `mine` is already returned to and handled by the caller.
+  const owner = session;
+  if (!owner) return Promise.reject(new Error('LOCKED'));
+  if (owner.wallet) return Promise.resolve(owner.wallet);
+  if (owner.pendingWallet) return owner.pendingWallet;
+
+  const mine = buildSessionWallet(owner);
+  owner.pendingWallet = mine;
   const clear = () => {
-    if (pendingWallet === mine) pendingWallet = null;
+    if (owner.pendingWallet === mine) owner.pendingWallet = null;
   };
   mine.then(clear, clear);
   return mine;
 }
 
-/**
- * The actual per-call logic behind `getSessionWallet`. Split out so the
- * memoization above stays synchronous: two concurrent `getSessionWallet()` calls
- * both see `pendingWallet` already set before either reaches an `await`, so they
- * share this one promise instead of each starting a build.
- */
-async function resolveSessionWallet(): Promise<Wallet> {
-  // Cheap early exit. The real guard is the recheck below, because a lock can land
-  // during either await between here and there.
-  const seed = getUnlockedSeed();
-  if (!seed || !isUnlocked()) throw new Error('LOCKED');
+/** Build a fresh wallet for one captured runtime session and cache it only if still current. */
+async function buildSessionWallet(owner: RuntimeSession): Promise<Wallet> {
+  const build = buildWallet(owner.identity, owner.network);
 
-  const network = await getStoredNetwork();
-
-  if (resolvedNetwork !== null && resolvedNetwork !== network) {
-    // The active network moved since the last build. The cached wallet points at
-    // the wrong operator now, so drop it before building fresh.
-    //
-    // Unreachable today, and deliberately so: the only writer of the stored network
-    // is the switchNetwork handler, which invalidates both this runtime and the
-    // Lightning one on either side of the write. This branch would invalidate the
-    // wallet WITHOUT disposing the Lightning runtime, which breaks the rule that the
-    // two are always torn down together. Kept as a backstop, but any future caller
-    // that can reach it has to dispose the Lightning runtime too.
-    await invalidateSessionWallet();
-  }
-
-  // Check the lock again here, after the last await. Nothing may await between this
-  // line and the return below, or the same gap opens up again.
-  //
-  // `lock()` clears the seed right away, but it only invalidates this runtime two
-  // storage writes later. In that gap the wallet is locked and the cached one is
-  // still here. Returning it would let the caller sign after the lock, because the
-  // wallet copied its key when it was built and never reads the seed again.
-  //
-  // We compare the seed object rather than only calling `isUnlocked()`, so we also
-  // catch a lock and an unlock that both land in the gap. That leaves us unlocked
-  // again but in a new session, with a wallet from the old one.
-  //
-  // We do not check the generation here. If someone else invalidated us,
-  // `resolvedWallet` is already null and we fall through to a rebuild that checks it.
-  // If we invalidated it ourselves above, the generation moved because of us, and
-  // checking it would reject a network switch that is working correctly.
-  if (getUnlockedSeed() !== seed || !isUnlocked()) throw new Error('LOCKED');
-
-  if (resolvedWallet && resolvedNetwork === network) return resolvedWallet;
-
-  return buildSessionWallet(network);
-}
-
-/**
- * Dispose a wallet we are finished with, and make sure it stays dead.
- *
- * `Wallet.dispose()` clears both of the wallet's managers but leaves the wallet
- * usable, and each accessor rebuilds when it finds its field empty. That matters
- * because handlers hold their wallet across awaits, so a read racing a lock resumes
- * after we disposed and rebuilds whatever it asks for, on a wallet nobody holds a
- * reference to any more:
- *  1. `getContractManager()` starts a fresh ContractWatcher with its own subscription
- *     and its own repeating poll, which nothing can then stop.
- *  2. `getVtxoManager()` constructs a VtxoManager, whose constructor schedules a
- *     self-rescheduling boarding poll that auto-settles. That poll is inert only
- *     because we pass `settlementConfig: false`. Automatic boarding is the planned
- *     follow-up to this refactor, and it would turn this into a leaked poll that
- *     signs on its own.
- *
- * Replacing both accessors closes the hole. Reads that belong to a dead session now
- * fail with LOCKED, which the messaging layer already routes to the unlock screen,
- * instead of leaking background work for the rest of the service worker's life. We
- * swap them before disposing so there is no window where the old ones still work.
- * Disposal itself is unaffected: it reads the manager fields directly, never through
- * these accessors.
- */
-async function disposeWallet(wallet: Wallet): Promise<void> {
-  wallet.getContractManager = () => Promise.reject(new Error('LOCKED'));
-  wallet.getVtxoManager = () => Promise.reject(new Error('LOCKED'));
-  await wallet.dispose().catch(() => {});
-}
-
-/** Build a fresh session wallet for `network` and cache it on success. */
-async function buildSessionWallet(network: NetworkName): Promise<Wallet> {
-  const seed = getUnlockedSeed();
-  if (!seed || !isUnlocked()) throw new Error('LOCKED');
-
-  const gen = generation;
-  const build = buildWallet(seed, network);
-  // `withTimeout` races, it does not cancel. When the timer wins, the build keeps
-  // running and resolves into a live wallet nobody holds a reference to. Dispose that
-  // one, or a slow operator leaks a watcher per timed-out attempt, which is the
-  // pile-up this module exists to remove.
+  // `withTimeout` races rather than cancels. If the timer wins, dispose the wallet when
+  // the underlying build eventually resolves so it cannot leak managers or watchers.
   let timedOut = false;
   build.then(
     (late) => {
@@ -167,93 +132,69 @@ async function buildSessionWallet(network: NetworkName): Promise<Wallet> {
     throw err;
   }
 
-  // A lock or a network switch landing during the build above invalidates it: the
-  // generation moved, or the unlocked seed is no longer the one we started with.
-  // Either way this wallet must not become the cached one.
-  if (gen !== generation || getUnlockedSeed() !== seed) {
+  if (session !== owner) {
     await disposeWallet(wallet);
     throw new Error('LOCKED');
   }
 
-  resolvedWallet = wallet;
-  resolvedNetwork = network;
+  owner.wallet = wallet;
   return wallet;
 }
 
 /**
- * Drop the session wallet: bump the generation, clear every cached reference, and
- * dispose the old wallet. Called on lock and on a real network switch.
- *
- * The generation bump and reference clearing happen synchronously, before the
- * `await` on disposal, so a build already in flight can detect (once it resolves)
- * that it is now stale and self-destruct instead of getting cached — see
- * `buildSessionWallet`'s post-build check. Disposal itself is best-effort: a
- * failure here must not block locking or switching networks.
+ * Invalidate the SDK wallet while retaining the live identity and network. This temporary
+ * API preserves the current network-switch choreography; the serialized switch transition
+ * will replace it with an explicit session fence later in this refactor.
  */
-export async function invalidateSessionWallet(): Promise<void> {
-  generation++;
-  const wallet = resolvedWallet;
-  resolvedWallet = null;
-  resolvedNetwork = null;
-  // Drop the in-flight build too, not just the finished wallet. That build belongs
-  // to the session we are ending, and it is going to reject with LOCKED when it
-  // lands. Leaving it here would hand that rejection to the next caller, so an
-  // unlock or a network switch would bounce straight back to the unlock screen.
-  //
-  // The abandoned build still cleans up after itself: it disposes its wallet on the
-  // generation check, and its memo cleanup only fires when it still owns the memo,
-  // so it cannot clear a build the next session started.
-  pendingWallet = null;
-  // The freshness window belongs to the wallet we just dropped; a wallet built
-  // next (possibly for a different network) starts with no assumed freshness.
-  lastRefreshMs = 0;
-  refreshPromise = null;
+export function invalidateSessionWallet(): Promise<void> {
+  const previous = session;
+  if (!previous) return Promise.resolve();
+
+  session = createSession(previous.identity, previous.network);
+  return disposeRuntimeSession(previous);
+}
+
+async function disposeRuntimeSession(owner: RuntimeSession | null): Promise<void> {
+  if (!owner) return;
+
+  const wallet = owner.wallet;
+  owner.wallet = null;
+  owner.pendingWallet = null;
+  owner.lastRefreshMs = 0;
+  owner.refreshPromise = null;
   if (wallet) await disposeWallet(wallet);
 }
 
-// ─── VTXO freshness ────────────────────────────────────────────────────────────
-
-let lastRefreshMs = 0;
-let refreshPromise: Promise<void> | null = null;
-
-/** Bounds a single refresh so a hung indexer can't wedge every later caller. */
-const REFRESH_TIMEOUT_MS = 60_000;
+/**
+ * Dispose a wallet and permanently disable both manager accessors. SDK `dispose()` stops
+ * existing managers but otherwise leaves these accessors able to recreate background work.
+ */
+async function disposeWallet(wallet: Wallet): Promise<void> {
+  wallet.getContractManager = () => Promise.reject(new Error('LOCKED'));
+  wallet.getVtxoManager = () => Promise.reject(new Error('LOCKED'));
+  await wallet.dispose().catch(() => {});
+}
 
 /**
- * Reconcile the wallet's VTXO cache against the operator, unless a refresh
- * already finished within `maxAgeMs`. Construction used to do this implicitly on
- * every message; with one shared wallet it has to be explicit before any read
- * that needs a live view: `listCoins`, coin selection in a send, the renewal
- * tick's `selectRenewable`, and the balance snapshot.
- *
- * Memoizes the in-flight refresh so concurrent callers join one reconciliation
- * instead of each starting their own.
+ * Reconcile the current wallet's VTXO cache, unless it was refreshed within `maxAgeMs`.
+ * Freshness and the in-flight refresh promise belong to one RuntimeSession, so neither can
+ * leak into a later unlock or network.
  */
 export async function ensureFreshVtxos(wallet: Wallet, maxAgeMs = 10_000): Promise<void> {
-  if (refreshPromise) return refreshPromise;
-  if (Date.now() - lastRefreshMs < maxAgeMs) return;
+  const owner = session;
+  if (!owner || owner.wallet !== wallet) throw new Error('LOCKED');
+  if (owner.refreshPromise) return owner.refreshPromise;
+  if (Date.now() - owner.lastRefreshMs < maxAgeMs) return;
 
-  const gen = generation;
-  // The bound covers the whole refresh, not just `refreshVtxos()`. The first
-  // `getContractManager()` of a session is itself an indexer round trip, and the SDK's
-  // REST provider passes no abort signal, so a black-holed request there never settles.
-  // Timing out only the second half would leave this memo set forever and every later
-  // caller would join a promise that never resolves.
   const mine = withTimeout(refreshVtxosNow(wallet), REFRESH_TIMEOUT_MS, 'vtxo refresh');
-  refreshPromise = mine;
+  owner.refreshPromise = mine;
   try {
     await mine;
-    // Stamp the window here, where we know how the refresh actually ended, and only
-    // while it still belongs to the current wallet. Two refreshes must not stamp it:
-    //  1. One that lost the timeout race. We already told its caller it failed, and
-    //     `withTimeout` does not cancel, so it keeps running and lands later. If it
-    //     stamped the window then, reads would trust a cache that no refresh ever
-    //     finished reconciling.
-    //  2. One that outlived a lock or a network switch. It reconciled the OLD wallet,
-    //     so its result says nothing about the wallet we hold now.
-    if (gen === generation) lastRefreshMs = Date.now();
+    // The uncancellable inner refresh may finish after a timeout or invalidation. Stamp
+    // freshness only when this exact session and wallet still own the successful result.
+    if (session === owner && owner.wallet === wallet) owner.lastRefreshMs = Date.now();
   } finally {
-    if (refreshPromise === mine) refreshPromise = null;
+    if (owner.refreshPromise === mine) owner.refreshPromise = null;
   }
 }
 

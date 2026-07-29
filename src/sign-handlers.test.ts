@@ -55,10 +55,7 @@ vi.stubGlobal('browser', browserMock);
 if (!globalThis.crypto) vi.stubGlobal('crypto', webcrypto);
 
 let unlocked = true;
-vi.mock('./keystore', async () => {
-  const actual = await vi.importActual<typeof import('./keystore')>('./keystore');
-  return { ...actual, isUnlocked: () => unlocked };
-});
+vi.mock('./wallet-runtime', () => ({ isUnlocked: () => unlocked }));
 vi.mock('./wallet', () => ({
   networkConfig: () => ({ arkServerUrl: 'http://localhost:7070', esploraUrl: '', isMainnet: false }),
 }));

@@ -10,8 +10,7 @@ import type { Wallet } from '@arkade-os/sdk';
  * the wallet never auto-locks while the service worker lives.
  *
  * Module mocking strategy:
- *  • './keystore' → real module, with only the seed readers overridden.
- *  • './wallet-runtime' → `getSessionWallet`/`ensureFreshVtxos` spies, no real wallet.
+ *  • './wallet-runtime' → unlock gate + wallet/freshness spies, no real wallet.
  *  • './wallet' → the three settle/read helpers the tick calls.
  */
 
@@ -32,21 +31,16 @@ vi.stubGlobal('browser', {
   alarms: { create: alarmCreate, clear: vi.fn(async () => {}), onAlarm: { addListener: vi.fn() } },
 });
 
-const state = vi.hoisted(() => ({ seed: new Uint8Array(32).fill(1) as Uint8Array | null }));
-
-// Keep the REAL `armAutoLock` and watch the alarm it creates, rather than spying on a
-// mock of it. A spy only catches someone importing `armAutoLock` into this module by
-// name; watching the alarm catches any transitive rearm, and it survives a rename.
-vi.mock('./keystore', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('./keystore')>()),
-  getUnlockedSeed: vi.fn(() => state.seed),
-  isUnlocked: vi.fn(() => state.seed !== null),
-}));
+const state = vi.hoisted(() => ({ unlocked: true }));
 
 const wallet = vi.hoisted(() => ({}) as Wallet);
 const getSessionWallet = vi.hoisted(() => vi.fn());
 const ensureFreshVtxos = vi.hoisted(() => vi.fn(async () => {}));
-vi.mock('./wallet-runtime', () => ({ getSessionWallet, ensureFreshVtxos }));
+vi.mock('./wallet-runtime', () => ({
+  getSessionWallet,
+  ensureFreshVtxos,
+  isUnlocked: () => state.unlocked,
+}));
 
 const recoverExpiredVtxos = vi.hoisted(() => vi.fn(async () => ({ recovered: 0, sats: 0 })));
 const renewExpiringVtxos = vi.hoisted(() => vi.fn(async () => ({ renewed: 0 })));
@@ -69,7 +63,7 @@ vi.mock('./wallet', () => ({
 import { runRenewalTick } from './renewal';
 
 beforeEach(() => {
-  state.seed = new Uint8Array(32).fill(1);
+  state.unlocked = true;
   vi.resetAllMocks(); // clearAllMocks leaves mockImplementation in place, which leaks between cases
   getSessionWallet.mockResolvedValue(wallet);
 });
@@ -114,7 +108,7 @@ describe('runRenewalTick', () => {
   });
 
   it('never asks for a wallet while locked', async () => {
-    state.seed = null;
+    state.unlocked = false;
 
     const result = await runRenewalTick();
 

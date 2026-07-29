@@ -1,23 +1,17 @@
-import { decryptVault, encryptVault, generateMnemonic, mnemonicToSeed, validateMnemonic } from './crypto';
-import { getNetwork, getVault, hasVault, setUnlockFlag, setVault, setVaultAndNetwork } from './storage';
+import { decryptVault, encryptVault, generateMnemonic, validateMnemonic } from './crypto';
+import { getNetwork, getVault, hasVault, setVault, setVaultAndNetwork } from './storage';
+import { beginSessionLock, isUnlocked, openSession } from './wallet-runtime';
 import { clearSnapshot } from './wallet-cache';
 import type { NetworkName } from '@arkade-os/sdk';
 
 /**
- * Lock model under MV3 (Strict posture).
+ * Persistent encrypted wallet key material and password authentication.
  *
- * The decrypted mnemonic/seed lives ONLY in this SW module-scope memory. It is
- * NEVER written to `chrome.storage.session` (which holds only the unlock flag).
- * When the SW is killed this memory is gone → the next sensitive action re-prompts
- * for the password. On manual/auto lock we zero the buffer.
- *
- * "Liveness" (VTXO renewal) does NOT need a hot key here — it uses pre-signed,
- * time-bounded intents produced while unlocked, so keeping the seed encrypted at
- * rest is compatible with the wallet staying fresh. This module intentionally
- * exposes no way to persist the seed.
+ * This module creates, imports, decrypts, and re-encrypts the mnemonic vault. Plaintext
+ * mnemonics remain scoped to those operations and are handed directly to wallet-runtime,
+ * which constructs the live identity and owns unlock state. No plaintext mnemonic or raw
+ * seed is retained here.
  */
-
-// ─── In-memory seed ──────────────────────────────────────────────────────────
 
 // Observers notified AFTER the wallet locks (manual, auto, or any future path). The
 // background uses this to emit a `disconnect` provider event to connected web apps so a
@@ -31,32 +25,13 @@ export function onLock(listener: () => void): () => void {
   return () => lockListeners.delete(listener);
 }
 
-let unlockedSeed: Uint8Array | null = null;
-// Kept alongside the seed so the build step can re-derive the identity
-// without re-decrypting. Also in memory only; cleared on lock.
-let unlockedMnemonic: string | null = null;
-
 const ALARM_AUTO_LOCK = 'arkade:auto-lock';
 const DEFAULT_AUTO_LOCK_MINUTES = 10;
 
-export function isUnlocked(): boolean {
-  return unlockedSeed !== null;
-}
-
-/** The decrypted seed, or null if locked. Consumed by `buildWallet`. */
-export function getUnlockedSeed(): Uint8Array | null {
-  return unlockedSeed;
-}
-
-/** The decrypted mnemonic, or null if locked. Consumed by `buildWallet`. */
-export function getUnlockedMnemonic(): string | null {
-  return unlockedMnemonic;
-}
-
 /**
  * Lock state for the popup router. `hasVault` decides welcome-vs-unlock; `unlocked`
- * is the AUTHORITY (the in-memory seed), not the session flag — after an SW kill the
- * seed is gone so this correctly reports locked even if a stale flag lingered.
+ * is authoritative runtime state. After an SW kill that state is gone, so the next
+ * sensitive action requires the password again.
  */
 export interface LockState {
   hasVault: boolean;
@@ -74,8 +49,8 @@ export async function getLockState(): Promise<LockState> {
  * already unlocked. A wrong password throws from `decryptVault`; we never return the
  * phrase on failed auth.
  *
- * This is the ONLY path by which the mnemonic crosses the SW boundary, and only on
- * an explicit, user-initiated request.
+ * Apart from the one-time creation response, this is the only path by which the
+ * mnemonic crosses the SW boundary, and only on an explicit user request.
  */
 export async function getMnemonicForBackup(password: string): Promise<string> {
   const blob = await getVault();
@@ -125,7 +100,7 @@ export async function prepareNetworkSwitch(
       await clearSnapshot(); // per-network address/balance cache — drop the old one
       // We proved the password and hold the mnemonic → keep it unlocked under the new
       // network rather than forcing a re-unlock. If it was locked, stay locked.
-      if (isUnlocked()) await holdUnlocked(mnemonic);
+      if (isUnlocked()) await openRuntimeSession(mnemonic, newNetwork);
     },
   };
 }
@@ -146,7 +121,7 @@ export async function createWallet(
   const mnemonic = generateMnemonic(strength);
   const network = await getNetwork();
   await setVault(await encryptVault(mnemonic, password, network));
-  await holdUnlocked(mnemonic);
+  await openRuntimeSession(mnemonic, network);
   return mnemonic;
 }
 
@@ -156,37 +131,33 @@ export async function importWallet(mnemonic: string, password: string): Promise<
   if (!validateMnemonic(mnemonic)) throw new Error('importWallet: invalid mnemonic');
   const network = await getNetwork();
   await setVault(await encryptVault(mnemonic, password, network));
-  await holdUnlocked(mnemonic);
+  await openRuntimeSession(mnemonic, network);
 }
 
 // ─── Lock / unlock ───────────────────────────────────────────────────────────
 
 /**
  * Unlock by decrypting the stored vault. A wrong password (or a tampered vault)
- * throws from `decryptVault` and the wallet stays locked — we never set the seed
- * on a failed auth. On success the seed is held in memory and the auto-lock timer
- * (re)starts.
+ * throws from `decryptVault` and the wallet stays locked. On success the runtime owns
+ * the derived identity and the auto-lock timer (re)starts.
  */
 export async function unlock(password: string): Promise<void> {
   const blob = await getVault();
   if (!blob) throw new Error('unlock: no vault');
   const network = await getNetwork();
   const mnemonic = await decryptVault(blob, password, network); // throws on bad password/tamper
-  await holdUnlocked(mnemonic);
+  await openRuntimeSession(mnemonic, network);
 }
 
 /**
- * Lock: zero the seed *buffer*, drop references, clear the flag, cancel auto-lock.
- * Note: only the seed `Uint8Array` is scrubbed in place. The mnemonic is a JS string
- * (immutable, un-zeroable) — dropping the reference makes it GC-reachable but it may
- * linger in memory until collected. Don't assume the mnemonic is wiped synchronously.
+ * Lock the runtime synchronously, then perform the listener and alarm cleanup. These
+ * policy concerns remain here only until the dedicated lifecycle coordinator takes over.
  */
 export async function lock(): Promise<void> {
-  if (unlockedSeed) unlockedSeed.fill(0);
-  unlockedSeed = null;
-  unlockedMnemonic = null;
+  const transition = beginSessionLock();
   await browser.alarms.clear(ALARM_AUTO_LOCK);
-  await setUnlockFlag(false);
+  await transition.disposal;
+  if (!transition.didLock) return;
   // Notify observers (the background emits `disconnect` to connected web apps). Listener
   // errors must not break the lock — swallow them.
   for (const listener of [...lockListeners]) {
@@ -198,12 +169,10 @@ export async function lock(): Promise<void> {
   }
 }
 
-/** Derive + hold the seed in memory and arm auto-lock. Internal to unlock paths. */
-async function holdUnlocked(mnemonic: string): Promise<void> {
-  unlockedMnemonic = mnemonic;
-  unlockedSeed = mnemonicToSeed(mnemonic);
-  await setUnlockFlag(true);
-  await armAutoLock();
+/** Install the runtime identity locally, dispose any prior wallet, and arm auto-lock. */
+function openRuntimeSession(mnemonic: string, network: NetworkName): Promise<void> {
+  const disposal = openSession(mnemonic, network);
+  return Promise.all([disposal, armAutoLock()]).then(() => undefined);
 }
 
 // ─── Auto-lock (chrome.alarms) ───────────────────────────────────────────────
@@ -211,7 +180,7 @@ async function holdUnlocked(mnemonic: string): Promise<void> {
 /**
  * (Re)arm the idle auto-lock alarm. Call on unlock and on each sensitive action to
  * reset the idle window. `chrome.alarms` is the only timer that survives the SW
- * being suspended; if the SW is killed first, the seed is already gone so the
+ * being suspended; if the SW is killed first, the live identity is already gone so the
  * effect — a locked wallet — is the same.
  */
 export async function armAutoLock(minutes: number = DEFAULT_AUTO_LOCK_MINUTES): Promise<void> {
