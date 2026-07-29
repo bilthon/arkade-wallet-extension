@@ -16,7 +16,10 @@ const session = new Map<string, unknown>();
 const browserMock = {
   storage: {
     local: {
-      get: vi.fn(async (key: string) => ({ [key]: local.get(key) })),
+      get: vi.fn(async (keys: string | string[]) => {
+        const requested = Array.isArray(keys) ? keys : [keys];
+        return Object.fromEntries(requested.map((key) => [key, local.get(key)]));
+      }),
       set: vi.fn(async (items: Record<string, unknown>) => {
         for (const [k, v] of Object.entries(items)) local.set(k, v);
       }),
@@ -112,35 +115,23 @@ describe('prepareNetworkSwitch', () => {
     await resetRuntime();
   });
 
-  it('switches network: vault decryptable under new network, stored network updated', async () => {
-    // Create under default (regtest).
-    await keystore.createWallet(PASSWORD);
+  it('stages a target-network vault without changing durable or runtime state', async () => {
+    const mnemonic = await keystore.createWallet(PASSWORD);
+    const vaultBefore = local.get('vault');
+    const epochBefore = runtime.getSessionEpoch();
 
-    // Switch to mutinynet.
     const prepared = await keystore.prepareNetworkSwitch('mutinynet', PASSWORD);
-    // Mirror the background's interim switch choreography: drop the SDK wallet before
-    // committing, while retaining the runtime identity so an unlocked switch stays unlocked.
-    await runtime.invalidateSessionWallet();
-    await prepared!.commit();
 
-    // The stored network flips.
-    expect(local.get('network')).toBe('mutinynet');
-
-    // unlock succeeds under the new network (vault was re-encrypted under mutinynet AAD).
-    await resetRuntime();
-    await expect(keystore.unlock(PASSWORD)).resolves.not.toThrow();
-    expect(runtime.isUnlocked()).toBe(true);
-    expect(runtime.getSessionNetwork()).toBe('mutinynet');
-
-    // …and the vault NO LONGER decrypts under the OLD network's AAD — proves the switch
-    // actually re-encrypted (rebound the AAD), not just flipped the stored network pointer.
-    await expect(
-      crypto.decryptVault(
-        local.get('vault') as Parameters<typeof crypto.decryptVault>[0],
-        PASSWORD,
-        'regtest',
-      ),
-    ).rejects.toThrow();
+    expect(prepared).toMatchObject({
+      sourceNetwork: 'regtest',
+      targetNetwork: 'mutinynet',
+    });
+    expect(await crypto.decryptVault(prepared!.vault, PASSWORD, 'mutinynet')).toBe(mnemonic);
+    await expect(crypto.decryptVault(prepared!.vault, PASSWORD, 'regtest')).rejects.toThrow();
+    expect(local.get('vault')).toEqual(vaultBefore);
+    expect(local.get('network')).toBeUndefined();
+    expect(runtime.getSessionEpoch()).toBe(epochBefore);
+    expect(runtime.getSessionNetwork()).toBe('regtest');
   });
 
   it('wrong password leaves vault + network unchanged', async () => {
@@ -172,35 +163,16 @@ describe('prepareNetworkSwitch', () => {
     expect(local.get('network')).toBeUndefined(); // setNetwork was never called
   });
 
-  it('preparing changes nothing until commit runs', async () => {
-    // This is what keeps a wrong password from tearing down the session wallet and
-    // the Lightning swap runtime: the caller only drops those once preparing has
-    // succeeded, so a typo leaves a running swap alone.
+  it('preparing changes nothing until the coordinator commits it', async () => {
     await keystore.createWallet(PASSWORD);
     const vaultBefore = local.get('vault');
+    const epochBefore = runtime.getSessionEpoch();
 
     const prepared = await keystore.prepareNetworkSwitch('mutinynet', PASSWORD);
     expect(prepared).not.toBeNull();
-
-    // Password already proven, but nothing is stored yet.
     expect(local.get('vault')).toEqual(vaultBefore);
     expect(local.get('network')).toBeUndefined();
-
-    await prepared!.commit();
-    expect(local.get('network')).toBe('mutinynet');
-    expect(local.get('vault')).not.toEqual(vaultBefore);
-    expect(runtime.isUnlocked()).toBe(true);
-    expect(runtime.getSessionNetwork()).toBe('mutinynet');
-  });
-
-  it('does not reopen a prepared switch after the user locks', async () => {
-    await keystore.createWallet(PASSWORD);
-    const prepared = await keystore.prepareNetworkSwitch('mutinynet', PASSWORD);
-
-    await resetRuntime();
-    await prepared!.commit();
-
-    expect(runtime.isUnlocked()).toBe(false);
-    expect(local.get('network')).toBe('mutinynet');
+    expect(runtime.getSessionEpoch()).toBe(epochBefore);
+    expect(runtime.getSessionNetwork()).toBe('regtest');
   });
 });

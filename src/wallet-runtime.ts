@@ -22,6 +22,40 @@ interface RuntimeSession {
   refreshPromise: Promise<void> | null;
 }
 
+export interface RuntimeVersion {
+  readonly epoch: number;
+  readonly network: NetworkName | null;
+}
+
+const PREPARED_NETWORK_SWITCH = Symbol('preparedNetworkSwitch');
+
+interface PreparedSwitchState {
+  source: RuntimeVersion;
+  targetNetwork: NetworkName;
+  identity: SeedIdentity | null;
+  consumed: boolean;
+}
+
+interface ActiveNetworkTransition {
+  fenceEpoch: number;
+  hadSession: boolean;
+  disposal: Promise<void>;
+  cancel(): boolean;
+}
+
+/** Opaque staged identity tied to one exact source runtime version. */
+export interface PreparedRuntimeNetworkSwitch {
+  readonly [PREPARED_NETWORK_SWITCH]: PreparedSwitchState;
+}
+
+export interface RuntimeNetworkTransition {
+  readonly hadSession: boolean;
+  readonly targetNetwork: NetworkName;
+  readonly disposal: Promise<void>;
+  install(): boolean;
+  abort(): void;
+}
+
 /**
  * An atomic capability for work performed by one live wallet session. Call
  * `assertCurrent()` immediately before any SDK operation that can sign or persist a
@@ -37,6 +71,7 @@ export interface SessionContext {
 
 let session: RuntimeSession | null = null;
 let epoch = 0;
+let activeNetworkTransition: ActiveNetworkTransition | null = null;
 
 /** Bounds a single wallet build so a hung operator `getInfo` cannot wedge later callers. */
 const BUILD_TIMEOUT_MS = 8_000;
@@ -60,6 +95,11 @@ export function getSessionEpoch(): number {
   return session.epoch;
 }
 
+/** Capture runtime state without constructing the SDK wallet. */
+export function getRuntimeVersion(): RuntimeVersion {
+  return { epoch, network: session?.network ?? null };
+}
+
 /**
  * Install a new live identity without contacting the operator. The temporary raw seed is
  * cleared immediately after `SeedIdentity` copies it. Wallet construction remains lazy,
@@ -69,6 +109,7 @@ export function getSessionEpoch(): number {
  * disposal of the previous resolved wallet.
  */
 export function openSession(mnemonic: string, network: NetworkName): Promise<void> {
+  if (activeNetworkTransition) throw new Error('NETWORK_TRANSITION');
   const identity = identityFromMnemonic(mnemonic, network);
   const previous = session;
   session = createSession(identity, network);
@@ -81,6 +122,99 @@ function identityFromMnemonic(mnemonic: string, network: NetworkName): SeedIdent
     return SeedIdentity.fromSeed(seed, { isMainnet: networkConfig(network).isMainnet });
   } finally {
     seed.fill(0);
+  }
+}
+
+/**
+ * Derive the target identity while the password-authenticated mnemonic is in scope. A
+ * locked source deliberately stages no identity so a locked network switch stays locked.
+ */
+export function prepareRuntimeNetworkSwitch(
+  mnemonic: string,
+  targetNetwork: NetworkName,
+  source: RuntimeVersion,
+): PreparedRuntimeNetworkSwitch {
+  if (activeNetworkTransition) throw new Error('STALE_NETWORK_SWITCH');
+  assertRuntimeVersion(source);
+  return {
+    [PREPARED_NETWORK_SWITCH]: {
+      source,
+      targetNetwork,
+      identity: source.network === null ? null : identityFromMnemonic(mnemonic, targetNetwork),
+      consumed: false,
+    },
+  };
+}
+
+/**
+ * Consume a prepared switch and synchronously fence its exact source session. Durable
+ * storage is committed by the network-switch coordinator before `install()` is called.
+ */
+export function beginRuntimeNetworkSwitch(
+  prepared: PreparedRuntimeNetworkSwitch,
+): RuntimeNetworkTransition {
+  const staged = prepared[PREPARED_NETWORK_SWITCH];
+  if (staged.consumed) throw new Error('STALE_NETWORK_SWITCH');
+  staged.consumed = true;
+  try {
+    assertRuntimeVersion(staged.source);
+  } catch (err) {
+    staged.identity = null;
+    throw err;
+  }
+
+  const previous = session;
+  session = null;
+  const fenceEpoch = ++epoch;
+  const disposal = disposeRuntimeSession(previous);
+  let finished = false;
+  let cancelled = false;
+  const active = {
+    fenceEpoch,
+    hadSession: previous !== null,
+    disposal,
+    cancel() {
+      staged.identity = null;
+      if (cancelled) return false;
+      cancelled = true;
+      return previous !== null;
+    },
+  };
+  activeNetworkTransition = active;
+
+  return {
+    hadSession: active.hadSession,
+    targetNetwork: staged.targetNetwork,
+    disposal,
+    install() {
+      if (finished) throw new Error('STALE_NETWORK_SWITCH');
+      finished = true;
+      if (
+        activeNetworkTransition !== active ||
+        session !== null ||
+        epoch !== active.fenceEpoch
+      ) {
+        staged.identity = null;
+        throw new Error('LOCKED');
+      }
+      activeNetworkTransition = null;
+      if (!staged.identity) return false;
+      session = createSession(staged.identity, staged.targetNetwork);
+      staged.identity = null;
+      return true;
+    },
+    abort() {
+      finished = true;
+      staged.identity = null;
+      if (activeNetworkTransition === active) activeNetworkTransition = null;
+    },
+  };
+}
+
+function assertRuntimeVersion(expected: RuntimeVersion): void {
+  const current = getRuntimeVersion();
+  if (current.epoch !== expected.epoch || current.network !== expected.network) {
+    throw new Error('STALE_NETWORK_SWITCH');
   }
 }
 
@@ -102,10 +236,16 @@ function createSession(identity: SeedIdentity, network: NetworkName): RuntimeSes
  */
 export function beginSessionLock(): { didLock: boolean; disposal: Promise<void> } {
   const previous = session;
-  if (!previous) return { didLock: false, disposal: Promise.resolve() };
-
+  const transition = activeNetworkTransition;
   session = null;
+  if (transition) {
+    // Keep the transition fence installed until its durable write settles. The lock
+    // cancels the staged target identity, while `openSession` remains blocked from
+    // reopening the old network against a soon-to-change vault/network pair.
+    return { didLock: transition.cancel(), disposal: transition.disposal };
+  }
   epoch++;
+  if (!previous) return { didLock: false, disposal: Promise.resolve() };
   return { didLock: true, disposal: disposeRuntimeSession(previous) };
 }
 

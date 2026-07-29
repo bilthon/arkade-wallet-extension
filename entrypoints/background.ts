@@ -5,7 +5,6 @@ import {
   importWallet,
   unlock,
   getMnemonicForBackup,
-  prepareNetworkSwitch,
 } from '@/src/keystore';
 import { armAutoLock, registerAutoLock } from '@/src/auto-lock';
 import { lockWallet } from '@/src/session-lock';
@@ -24,11 +23,7 @@ import {
   onboardBoarding,
   getTransactionHistory,
 } from '@/src/wallet';
-import {
-  invalidateSessionWallet,
-  ensureFreshVtxos,
-  isUnlocked,
-} from '@/src/wallet-runtime';
+import { ensureFreshVtxos } from '@/src/wallet-runtime';
 import { getSnapshot, setSnapshot, type WalletSnapshot } from '@/src/wallet-cache';
 import {
   registerRenewal,
@@ -36,7 +31,6 @@ import {
   RENEW_MARGIN_MS,
 } from '@/src/renewal';
 import {
-  disposeSwaps,
   hasPendingSwaps,
   reconcilePendingSwaps,
   createInvoice,
@@ -58,11 +52,11 @@ import {
   handleSignPsbt,
   requireRead,
   revokeSite,
-  emitToAllConnected,
   resolveApproval,
   onWindowClosed,
 } from '@/src/provider-handlers';
 import { withTimeout } from '@/src/async';
+import { switchWalletNetwork } from '@/src/network-switch';
 
 /**
  * Bounds the snapshot's address and balance reads.
@@ -81,7 +75,7 @@ const BALANCE_READ_TIMEOUT_MS = 8_000;
  * Request router. Holds one session-scoped `Wallet` in memory for as long as the
  * service worker stays unlocked on one network. Every read/send/renewal handler
  * shares this wallet via `getSessionContext()` instead of building its own. The wallet
- * is disposed only on lock or on a network switch, by `invalidateSessionWallet()`.
+ * is disposed only on lock or through the serialized network transition.
  * The live identity and active session network are owned by `wallet-runtime.ts`.
  *
  * None of that memory survives the service worker being killed. When the worker dies
@@ -146,26 +140,7 @@ export default defineBackground(() => {
   });
 
   onMessage('switchNetwork', async ({ data }) => {
-    // Check the password first. A wrong one throws here, before we touch either
-    // runtime, so a typo can't stop a Lightning swap that is mid-flight. `null`
-    // means we are already on this network, so there is nothing to do at all.
-    const prepared = await prepareNetworkSwitch(data.network, data.password);
-    if (!prepared) return { ok: true as const };
-
-    // Both runtimes are keyed by the network baked into their operator/Boltz config,
-    // so drop them around the write — nothing should keep building against a network
-    // storage is about to disagree with.
-    void invalidateSessionWallet();
-    void disposeSwaps();
-    await prepared.commit();
-    if (isUnlocked()) await armNewSession();
-    // Invalidate again: anything that started building during the write (a race, not
-    // the common case) must not survive into the new network either.
-    void invalidateSessionWallet();
-    void disposeSwaps();
-    // Operator network changed → notify connected sites so they don't keep acting on the
-    // old network (cached address/PSBTs would target the wrong operator).
-    await emitToAllConnected('networkChanged', { network: data.network });
+    await switchWalletNetwork(data.network, data.password);
     return { ok: true as const };
   });
 

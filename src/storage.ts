@@ -1,5 +1,6 @@
 import type { NetworkName } from '@arkade-os/sdk';
 import type { VaultBlob } from './crypto';
+import { WALLET_SNAPSHOT_KEY } from './wallet-cache';
 
 /**
  * Typed persistent `chrome.storage.local` I/O:
@@ -39,17 +40,32 @@ export async function getNetwork(): Promise<NetworkName> {
   return (got[NETWORK_KEY] as NetworkName | undefined) ?? DEFAULT_NETWORK;
 }
 
+/** Read the AAD-bound vault/network pair from one storage snapshot. */
+export async function getVaultAndNetwork(): Promise<{
+  vault: VaultBlob | null;
+  network: NetworkName;
+}> {
+  const got = await browser.storage.local.get([VAULT_KEY, NETWORK_KEY]);
+  return {
+    vault: (got[VAULT_KEY] as VaultBlob | undefined) ?? null,
+    network: (got[NETWORK_KEY] as NetworkName | undefined) ?? DEFAULT_NETWORK,
+  };
+}
+
 export async function setNetwork(network: NetworkName): Promise<void> {
   await browser.storage.local.set({ [NETWORK_KEY]: network });
 }
 
 /**
- * Atomically persist a re-encrypted vault together with its active network in ONE
- * write (network switching re-binds the vault's AES-GCM AAD to the network). A single
- * `storage.local.set` is all-or-nothing: it closes the window where the vault could be
- * bound to network A while the stored network said B — a mismatch that would fail the
- * next unlock (wrong AAD) and brick the wallet until a mnemonic re-import.
+ * Atomically persist a re-encrypted vault together with its active network and invalidate
+ * the public wallet snapshot in ONE write. A single `storage.local.set` closes the window
+ * where the vault could be bound to network A while storage said B, or an old-network
+ * address could remain cached as current.
  */
 export async function setVaultAndNetwork(blob: VaultBlob, network: NetworkName): Promise<void> {
-  await browser.storage.local.set({ [VAULT_KEY]: blob, [NETWORK_KEY]: network });
+  await browser.storage.local.set({
+    [VAULT_KEY]: blob,
+    [NETWORK_KEY]: network,
+    [WALLET_SNAPSHOT_KEY]: null,
+  });
 }

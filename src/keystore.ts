@@ -1,7 +1,20 @@
-import { decryptVault, encryptVault, generateMnemonic, validateMnemonic } from './crypto';
-import { getNetwork, getVault, hasVault, setVault, setVaultAndNetwork } from './storage';
-import { getSessionNetwork, isUnlocked, openSession } from './wallet-runtime';
-import { clearSnapshot } from './wallet-cache';
+import {
+  decryptVault,
+  encryptVault,
+  generateMnemonic,
+  validateMnemonic,
+  type VaultBlob,
+} from './crypto';
+import { getNetwork, getVault, getVaultAndNetwork, hasVault, setVault } from './storage';
+import {
+  getRuntimeVersion,
+  getSessionNetwork,
+  isUnlocked,
+  openSession,
+  prepareRuntimeNetworkSwitch,
+  type PreparedRuntimeNetworkSwitch,
+} from './wallet-runtime';
+import { networkConfig } from './wallet';
 import type { NetworkName } from '@arkade-os/sdk';
 
 /**
@@ -38,10 +51,9 @@ export async function getLockState(): Promise<LockState> {
  * mnemonic crosses the SW boundary, and only on an explicit user request.
  */
 export async function getMnemonicForBackup(password: string): Promise<string> {
-  const blob = await getVault();
-  if (!blob) throw new Error('getMnemonicForBackup: no vault');
-  const network = await getNetwork();
-  return decryptVault(blob, password, network); // throws on bad password/tamper
+  const { vault, network } = await getVaultAndNetwork();
+  if (!vault) throw new Error('getMnemonicForBackup: no vault');
+  return decryptVault(vault, password, network); // throws on bad password/tamper
 }
 
 /**
@@ -53,40 +65,45 @@ export async function getMnemonicForBackup(password: string): Promise<string> {
  * would leave the vault undecryptable on the new network. So we re-auth under the
  * CURRENT network, then re-encrypt the same mnemonic under the NEW network's AAD.
  *
- * Preparing and committing are separate because the caller has to tear down the
- * session wallet and the Lightning swap runtime around the switch, and those are
- * both live things a user may be relying on. Doing that before the password is
- * checked would stop a running Lightning swap over nothing more than a typo. Now
- * a wrong password throws here, before the caller touches either runtime.
+ * Preparation authenticates and stages the target data without touching either live
+ * runtime. The serialized network-switch coordinator fences those runtimes only after
+ * this returns, so a password typo cannot stop a Lightning swap in progress.
  *
  * Boundary: the mnemonic stays in the SW, only the password crosses in — same
  * contract as `getMnemonicForBackup`. A wrong password (or tamper) throws from
  * `decryptVault` and leaves the stored vault + network UNCHANGED (fail-closed).
  */
+export interface PreparedNetworkSwitch {
+  readonly sourceNetwork: NetworkName;
+  readonly targetNetwork: NetworkName;
+  readonly vault: VaultBlob;
+  readonly runtime: PreparedRuntimeNetworkSwitch;
+}
+
 export async function prepareNetworkSwitch(
   newNetwork: NetworkName,
   password: string,
-): Promise<{ commit: () => Promise<void> } | null> {
-  const blob = await getVault();
-  if (!blob) throw new Error('prepareNetworkSwitch: no vault');
-  const current = await getNetwork();
+): Promise<PreparedNetworkSwitch | null> {
+  networkConfig(newNetwork); // reject an unrecognized message payload before any mutation
+  const sourceRuntime = getRuntimeVersion();
+  const { vault, network: current } = await getVaultAndNetwork();
+  if (!vault) throw new Error('prepareNetworkSwitch: no vault');
+  if (sourceRuntime.network !== null && sourceRuntime.network !== current) {
+    throw new Error('prepareNetworkSwitch: runtime and stored networks disagree');
+  }
   if (newNetwork === current) return null; // no-op
   // Re-auth under the CURRENT network (fail-closed: wrong password/tamper throws from decryptVault).
-  const mnemonic = await decryptVault(blob, password, current);
+  const mnemonic = await decryptVault(vault, password, current);
   // Re-encrypt the SAME mnemonic under the NEW network's AAD. Nothing is stored until
-  // `commit` runs, so everything above is safe to abandon.
+  // the coordinator commits the prepared value, so everything above is safe to abandon.
   const newVault = await encryptVault(mnemonic, password, newNetwork);
+  const runtime = prepareRuntimeNetworkSwitch(mnemonic, newNetwork, sourceRuntime);
 
   return {
-    async commit() {
-      // Flip the vault and the stored network in ONE atomic write — they must never
-      // disagree, because a mismatch can't unlock.
-      await setVaultAndNetwork(newVault, newNetwork);
-      await clearSnapshot(); // per-network address/balance cache — drop the old one
-      // We proved the password and hold the mnemonic → keep it unlocked under the new
-      // network rather than forcing a re-unlock. If it was locked, stay locked.
-      if (isUnlocked()) await openSession(mnemonic, newNetwork);
-    },
+    sourceNetwork: current,
+    targetNetwork: newNetwork,
+    vault: newVault,
+    runtime,
   };
 }
 
@@ -127,10 +144,9 @@ export async function importWallet(mnemonic: string, password: string): Promise<
  * the derived identity and the auto-lock timer (re)starts.
  */
 export async function unlock(password: string): Promise<void> {
-  const blob = await getVault();
-  if (!blob) throw new Error('unlock: no vault');
-  const network = await getNetwork();
-  const mnemonic = await decryptVault(blob, password, network); // throws on bad password/tamper
+  const { vault, network } = await getVaultAndNetwork();
+  if (!vault) throw new Error('unlock: no vault');
+  const mnemonic = await decryptVault(vault, password, network); // throws on bad password/tamper
   if (isUnlocked()) {
     if (getSessionNetwork() !== network) {
       throw new Error('unlock: runtime and stored networks disagree');
