@@ -93,7 +93,12 @@ function fakeSigningWallet() {
     arkProvider: { getInfo: async () => ({ dust: 330n }) },
   } as never;
 }
-const buildWallet = async () => fakeSigningWallet();
+
+let activeWallet: ReturnType<typeof fakeSigningWallet>;
+const buildWallet = vi.fn(async () => {
+  if (!unlocked) throw new Error('LOCKED');
+  return activeWallet;
+});
 
 function codeOf(err: unknown): string | null {
   if (!(err instanceof Error)) return null;
@@ -133,6 +138,8 @@ beforeEach(async () => {
   local.clear();
   session.clear();
   unlocked = true;
+  activeWallet = fakeSigningWallet();
+  buildWallet.mockClear();
   browserMock.windows.create.mockClear();
   await setVault({ v: 1 } as never);
   await setNetwork('regtest');
@@ -189,6 +196,39 @@ describe('handleSignMessage', () => {
     const pending = await waitForPending();
     await resolveApproval(pending.requestId, { approved: false });
     await expect(promise).rejects.toSatisfy((e: unknown) => codeOf(e) === 'REJECTED');
+  });
+
+  it('rejects when the wallet session changes while resolving the approval', async () => {
+    const sign = vi.spyOn(userKey, 'sign');
+    const first = fakeSigningWallet();
+    const second = fakeSigningWallet();
+    let calls = 0;
+    const changingWallet = vi.fn(async () => (calls++ === 0 ? first : second));
+    const promise = handleSignMessage(HTTPS, 'hello', changingWallet);
+    const pending = await waitForPending();
+
+    await resolveApproval(pending.requestId, { approved: true });
+
+    await expect(promise).rejects.toSatisfy((e: unknown) => codeOf(e) === 'LOCKED');
+    expect(sign).not.toHaveBeenCalled();
+    sign.mockRestore();
+  });
+
+  it('does not sign when the network changes during post-approval authorization', async () => {
+    const sign = vi.spyOn(userKey, 'sign');
+    let calls = 0;
+    const changingNetwork = vi.fn(async () => {
+      if (calls++ === 1) await setNetwork('mutinynet');
+      return activeWallet;
+    });
+    const promise = handleSignMessage(HTTPS, 'hello', changingNetwork);
+    const pending = await waitForPending();
+
+    await resolveApproval(pending.requestId, { approved: true });
+
+    await expect(promise).rejects.toSatisfy((e: unknown) => codeOf(e) === 'LOCKED');
+    expect(sign).not.toHaveBeenCalled();
+    sign.mockRestore();
   });
 });
 
@@ -256,5 +296,49 @@ describe('handleSignPsbt', () => {
     expect(pending.payload.summary.signInputs[0].contract?.required).toBe(3);
     await resolveApproval(pending.requestId, { approved: false });
     await expect(promise).rejects.toSatisfy((e: unknown) => codeOf(e) === 'REJECTED');
+  });
+
+  it('does not sign when the wallet locks while approval is open', async () => {
+    const sign = vi.spyOn(userKey, 'sign');
+    const psbt = escrowPsbt();
+    const promise = handleSignPsbt(HTTPS, { psbt, inputIndexes: [0] }, buildWallet);
+    const pending = await waitForPending();
+
+    unlocked = false;
+    await resolveApproval(pending.requestId, { approved: true });
+
+    await expect(promise).rejects.toSatisfy((e: unknown) => codeOf(e) === 'LOCKED');
+    expect(sign).not.toHaveBeenCalled();
+    sign.mockRestore();
+  });
+
+  it('does not sign after a lock and unlock on the same network', async () => {
+    const sign = vi.spyOn(userKey, 'sign');
+    const psbt = escrowPsbt();
+    const promise = handleSignPsbt(HTTPS, { psbt, inputIndexes: [0] }, buildWallet);
+    const pending = await waitForPending();
+
+    unlocked = false;
+    activeWallet = fakeSigningWallet();
+    unlocked = true;
+    await resolveApproval(pending.requestId, { approved: true });
+
+    await expect(promise).rejects.toSatisfy((e: unknown) => codeOf(e) === 'LOCKED');
+    expect(sign).not.toHaveBeenCalled();
+    sign.mockRestore();
+  });
+
+  it('does not sign after the active network changes', async () => {
+    const sign = vi.spyOn(userKey, 'sign');
+    const psbt = escrowPsbt();
+    const promise = handleSignPsbt(HTTPS, { psbt, inputIndexes: [0] }, buildWallet);
+    const pending = await waitForPending();
+
+    await setNetwork('mutinynet');
+    await resolveApproval(pending.requestId, { approved: true });
+
+    await expect(promise).rejects.toSatisfy((e: unknown) => codeOf(e) === 'LOCKED');
+    expect(sign).not.toHaveBeenCalled();
+    sign.mockRestore();
   });
 });

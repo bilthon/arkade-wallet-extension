@@ -279,22 +279,23 @@ export async function handleSignMessage(
   // rejected outright, never shown as approvable.
   assertSignableMessage(message);
 
+  const session = await getSigningSession(buildWallet);
   const decision = await requestApprovalSafe({ kind: 'signMessage', message }, origin);
   if (!decision.approved) {
     providerError('REJECTED', 'The signature request was declined.');
   }
 
-  const wallet = await buildWallet();
-  const network = await getStoredNetwork();
-  try {
-    // Anchor the BIP322 signature to the wallet's ACTIVE network so a verifier checking
-    // against the user's real (testnet/regtest/mainnet) taproot address succeeds.
-    const signature = await signMessageBIP322(wallet.identity, message, networks[network]);
-    return { signature };
-  } catch (err) {
-    if (err instanceof SignMessageError) providerError('BAD_REQUEST', err.message);
-    throw err;
-  }
+  return withUnchangedSigningSession(session, buildWallet, async ({ wallet, network }) => {
+    try {
+      // Anchor the BIP322 signature to the wallet's ACTIVE network so a verifier checking
+      // against the user's real (testnet/regtest/mainnet) taproot address succeeds.
+      const signature = await signMessageBIP322(wallet.identity, message, networks[network]);
+      return { signature };
+    } catch (err) {
+      if (err instanceof SignMessageError) providerError('BAD_REQUEST', err.message);
+      throw err;
+    }
+  });
 }
 
 /**
@@ -344,10 +345,11 @@ export async function handleSignPsbt(
   }
   const allowHighFee = params?.allowHighFee === true;
 
-  // Build the wallet once: we need it both for the inspect context (own keys/scripts) and
-  // for the operator dust floor, and then for the actual signing on approve.
-  const wallet = await buildWallet();
-  const network = await getStoredNetwork();
+  // Capture one stable wallet/network pair for inspection. A second check after approval
+  // prevents this signer from surviving a lock, unlock, or network switch while the user
+  // has the approval window open.
+  const session = await getSigningSession(buildWallet);
+  const { wallet, network } = session;
   const dustSats = await operatorDust(wallet);
   const ctx = await buildInspectContext(wallet, network, dustSats);
 
@@ -367,10 +369,79 @@ export async function handleSignPsbt(
     providerError('REJECTED', 'The signing request was declined.');
   }
 
-  // Re-parse + sign from the SAME psbt string we inspected, add only our partial sig,
-  // return unfinalized.
-  const signedPsbt = await signPsbtPartial(wallet, psbt as string, inputIndexes as number[]);
-  return { psbt: signedPsbt };
+  return withUnchangedSigningSession(session, buildWallet, async ({ wallet: currentWallet }) => {
+    // Re-parse + sign from the SAME psbt string we inspected, add only our partial sig,
+    // return unfinalized.
+    const signedPsbt = await signPsbtPartial(
+      currentWallet,
+      psbt as string,
+      inputIndexes as number[],
+    );
+    return { psbt: signedPsbt };
+  });
+}
+
+interface SigningSession {
+  wallet: Wallet;
+  network: import('@arkade-os/sdk').NetworkName;
+}
+
+/**
+ * Capture a wallet and its active network without accepting a pair crossed by a concurrent
+ * network switch. Signing performs a second authorization after user approval.
+ */
+async function getSigningSession(
+  buildWallet: () => Promise<Wallet>,
+): Promise<SigningSession> {
+  const network = await getStoredNetwork();
+  const wallet = await requireCurrentWallet(buildWallet);
+  if ((await getStoredNetwork()) !== network) {
+    providerError('LOCKED', 'The wallet session changed. Try the request again.');
+  }
+  return { wallet, network };
+}
+
+/**
+ * Reauthorize after approval and invoke `action` in the same continuation as the final
+ * wallet/network check. Nothing may await between that check and starting the signer.
+ */
+async function withUnchangedSigningSession<T>(
+  expected: SigningSession,
+  buildWallet: () => Promise<Wallet>,
+  action: (current: SigningSession) => Promise<T>,
+): Promise<T> {
+  const networkBefore = await getStoredNetwork();
+  let currentWallet: Wallet;
+  try {
+    currentWallet = await buildWallet();
+  } catch (err) {
+    if (err instanceof Error && err.message === 'LOCKED') {
+      providerError('LOCKED', 'The Arkade wallet was locked. Unlock it and try again.');
+    }
+    throw err;
+  }
+  const networkAfter = await getStoredNetwork();
+  if (
+    !isUnlocked() ||
+    currentWallet !== expected.wallet ||
+    networkBefore !== expected.network ||
+    networkAfter !== expected.network
+  ) {
+    providerError('LOCKED', 'The wallet session changed. Try the request again.');
+  }
+  return action({ wallet: currentWallet, network: networkAfter });
+}
+
+/** Map a lock that lands after the approval gate to the provider's typed LOCKED error. */
+async function requireCurrentWallet(buildWallet: () => Promise<Wallet>): Promise<Wallet> {
+  try {
+    return await buildWallet();
+  } catch (err) {
+    if (err instanceof Error && err.message === 'LOCKED') {
+      providerError('LOCKED', 'The Arkade wallet was locked. Unlock it and try again.');
+    }
+    throw err;
+  }
 }
 
 /** The operator's dust floor in sats (`info.dust`), or a safe default if unreachable. */
