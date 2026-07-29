@@ -1,64 +1,67 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Wallet } from '@arkade-os/sdk';
+import type { SessionContext } from './wallet-runtime';
 
 const armAutoLock = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock('./auto-lock', () => ({ armAutoLock }));
 
 const state = vi.hoisted(() => ({ unlocked: true }));
 const wallet = vi.hoisted(() => ({}) as Wallet);
-const getSessionWallet = vi.hoisted(() =>
+const context = vi.hoisted(
+  () =>
+    ({
+      wallet,
+      network: 'regtest',
+      epoch: 1,
+      assertCurrent: vi.fn(),
+    }) as SessionContext,
+);
+const getSessionContext = vi.hoisted(() =>
   vi.fn(async () => {
     if (!state.unlocked) throw new Error('LOCKED');
-    return wallet;
+    return context;
   }),
 );
 vi.mock('./wallet-runtime', () => ({
   isUnlocked: () => state.unlocked,
-  getSessionWallet,
+  getSessionContext,
 }));
 
-import { getPopupWallet, getProviderWallet, requirePopupSession } from './session-access';
+import { getPopupContext, getProviderContext } from './session-access';
 
 beforeEach(() => {
   state.unlocked = true;
   armAutoLock.mockClear();
-  getSessionWallet.mockClear();
+  getSessionContext.mockClear();
 });
 
 describe('session access policy', () => {
   it('rearms before trusted popup wallet access', async () => {
-    await expect(getPopupWallet()).resolves.toBe(wallet);
+    await expect(getPopupContext()).resolves.toBe(context);
     expect(armAutoLock).toHaveBeenCalledOnce();
-    expect(getSessionWallet).toHaveBeenCalledOnce();
+    expect(getSessionContext).toHaveBeenCalledOnce();
     expect(armAutoLock.mock.invocationCallOrder[0]).toBeLessThan(
-      getSessionWallet.mock.invocationCallOrder[0],
+      getSessionContext.mock.invocationCallOrder[0],
     );
   });
 
-  it('rearms popup work that acquires its wallet internally', async () => {
-    await expect(requirePopupSession()).resolves.toBeUndefined();
-    expect(armAutoLock).toHaveBeenCalledOnce();
-    expect(getSessionWallet).not.toHaveBeenCalled();
-  });
-
   it('never lets provider access extend the idle deadline', async () => {
-    await expect(getProviderWallet()).resolves.toBe(wallet);
-    await expect(getProviderWallet()).resolves.toBe(wallet);
-    expect(getSessionWallet).toHaveBeenCalledTimes(2);
+    await expect(getProviderContext()).resolves.toBe(context);
+    await expect(getProviderContext()).resolves.toBe(context);
+    expect(getSessionContext).toHaveBeenCalledTimes(2);
     expect(armAutoLock).not.toHaveBeenCalled();
   });
 
   it('does not arm or acquire popup work while locked', async () => {
     state.unlocked = false;
-    await expect(getPopupWallet()).rejects.toThrow('LOCKED');
-    await expect(requirePopupSession()).rejects.toThrow('LOCKED');
+    await expect(getPopupContext()).rejects.toThrow('LOCKED');
     expect(armAutoLock).not.toHaveBeenCalled();
-    expect(getSessionWallet).not.toHaveBeenCalled();
+    expect(getSessionContext).not.toHaveBeenCalled();
   });
 
   it('rejects a locked provider without arming', async () => {
     state.unlocked = false;
-    await expect(getProviderWallet()).rejects.toThrow('LOCKED');
+    await expect(getProviderContext()).rejects.toThrow('LOCKED');
     expect(armAutoLock).not.toHaveBeenCalled();
   });
 });

@@ -1,6 +1,6 @@
 import { decryptVault, encryptVault, generateMnemonic, validateMnemonic } from './crypto';
 import { getNetwork, getVault, hasVault, setVault, setVaultAndNetwork } from './storage';
-import { isUnlocked, openSession } from './wallet-runtime';
+import { getSessionNetwork, isUnlocked, openSession } from './wallet-runtime';
 import { clearSnapshot } from './wallet-cache';
 import type { NetworkName } from '@arkade-os/sdk';
 
@@ -131,5 +131,11 @@ export async function unlock(password: string): Promise<void> {
   if (!blob) throw new Error('unlock: no vault');
   const network = await getNetwork();
   const mnemonic = await decryptVault(blob, password, network); // throws on bad password/tamper
+  if (isUnlocked()) {
+    if (getSessionNetwork() !== network) {
+      throw new Error('unlock: runtime and stored networks disagree');
+    }
+    return;
+  }
   await openSession(mnemonic, network);
 }

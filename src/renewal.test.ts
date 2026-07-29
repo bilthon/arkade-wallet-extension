@@ -34,10 +34,16 @@ vi.stubGlobal('browser', {
 const state = vi.hoisted(() => ({ unlocked: true }));
 
 const wallet = vi.hoisted(() => ({}) as Wallet);
-const getSessionWallet = vi.hoisted(() => vi.fn());
+const context = vi.hoisted(() => ({
+  wallet,
+  network: 'regtest' as const,
+  epoch: 1,
+  assertCurrent: vi.fn(),
+}));
+const getSessionContext = vi.hoisted(() => vi.fn());
 const ensureFreshVtxos = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock('./wallet-runtime', () => ({
-  getSessionWallet,
+  getSessionContext,
   ensureFreshVtxos,
   isUnlocked: () => state.unlocked,
 }));
@@ -64,8 +70,18 @@ import { runRenewalTick } from './renewal';
 
 beforeEach(() => {
   state.unlocked = true;
-  vi.resetAllMocks(); // clearAllMocks leaves mockImplementation in place, which leaks between cases
-  getSessionWallet.mockResolvedValue(wallet);
+  vi.resetAllMocks();
+  getSessionContext.mockResolvedValue(context);
+  ensureFreshVtxos.mockResolvedValue(undefined);
+  recoverExpiredVtxos.mockResolvedValue({ recovered: 0, sats: 0 });
+  renewExpiringVtxos.mockResolvedValue({ renewed: 0 });
+  getExpiredVtxoSummary.mockResolvedValue({
+    expiredSats: 0,
+    count: 0,
+    recoverableSats: 0,
+    recoverableCount: 0,
+    nextExpiryAtMs: null,
+  });
 });
 
 describe('runRenewalTick', () => {
@@ -73,7 +89,7 @@ describe('runRenewalTick', () => {
     const result = await runRenewalTick();
 
     expect(result.state).toBe('unlocked');
-    expect(getSessionWallet).toHaveBeenCalledOnce();
+    expect(getSessionContext).toHaveBeenCalledOnce();
     // The whole point of the maintenance path: the idle window must not move. The
     // auto-lock alarm is how it moves, so assert none was ever created.
     expect(alarmCreate).not.toHaveBeenCalled();
@@ -104,7 +120,7 @@ describe('runRenewalTick', () => {
     // Selection reads the contract repository, so a stale cache here risks feeding a
     // swept coin into a renew round. Recover must still come before renew.
     expect(order).toEqual(['refresh', 'recover', 'renew']);
-    expect(ensureFreshVtxos).toHaveBeenCalledWith(wallet);
+    expect(ensureFreshVtxos).toHaveBeenCalledWith(context);
   });
 
   it('never asks for a wallet while locked', async () => {
@@ -113,8 +129,16 @@ describe('runRenewalTick', () => {
     const result = await runRenewalTick();
 
     expect(result.state).toBe('locked');
-    expect(getSessionWallet).not.toHaveBeenCalled();
+    expect(getSessionContext).not.toHaveBeenCalled();
     expect(ensureFreshVtxos).not.toHaveBeenCalled();
     expect(alarmCreate).not.toHaveBeenCalled();
+  });
+
+  it('propagates LOCKED from a stale recovery context and skips renewal', async () => {
+    recoverExpiredVtxos.mockRejectedValue(new Error('LOCKED'));
+
+    await expect(runRenewalTick()).rejects.toThrow('LOCKED');
+
+    expect(renewExpiringVtxos).not.toHaveBeenCalled();
   });
 });

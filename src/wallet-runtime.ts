@@ -22,6 +22,19 @@ interface RuntimeSession {
   refreshPromise: Promise<void> | null;
 }
 
+/**
+ * An atomic capability for work performed by one live wallet session. Call
+ * `assertCurrent()` immediately before any SDK operation that can sign or persist a
+ * session-bound mutation; it rejects if a lock, unlock, or network transition replaced
+ * the captured session while earlier asynchronous validation was running.
+ */
+export interface SessionContext {
+  readonly wallet: Wallet;
+  readonly network: NetworkName;
+  readonly epoch: number;
+  assertCurrent(): void;
+}
+
 let session: RuntimeSession | null = null;
 let epoch = 0;
 
@@ -39,6 +52,12 @@ export function isUnlocked(): boolean {
 export function getSessionNetwork(): NetworkName {
   if (!session) throw new Error('LOCKED');
   return session.network;
+}
+
+/** Serializable identity of the current live session. */
+export function getSessionEpoch(): number {
+  if (!session) throw new Error('LOCKED');
+  return session.epoch;
 }
 
 /**
@@ -95,7 +114,7 @@ export function beginSessionLock(): { didLock: boolean; disposal: Promise<void> 
  * non-async: the pending promise is installed before any caller can reach an `await`, so
  * concurrent requests always share one build.
  */
-export function getSessionWallet(): Promise<Wallet> {
+function acquireSessionWallet(): Promise<Wallet> {
   const owner = session;
   if (!owner) return Promise.reject(new Error('LOCKED'));
   if (owner.wallet) return Promise.resolve(owner.wallet);
@@ -108,6 +127,33 @@ export function getSessionWallet(): Promise<Wallet> {
   };
   mine.then(clear, clear);
   return mine;
+}
+
+/** Capture one wallet/network/epoch tuple whose authority can be checked after awaits. */
+export function getSessionContext(): Promise<SessionContext> {
+  const owner = session;
+  if (!owner) return Promise.reject(new Error('LOCKED'));
+
+  return acquireSessionWallet().then((wallet) => {
+    assertSessionOwner(owner, wallet);
+    return Object.freeze({
+      wallet,
+      network: owner.network,
+      epoch: owner.epoch,
+      assertCurrent: () => assertSessionOwner(owner, wallet),
+    });
+  });
+}
+
+function assertSessionOwner(owner: RuntimeSession, wallet: Wallet): void {
+  if (
+    session !== owner ||
+    owner.wallet !== wallet ||
+    session.epoch !== owner.epoch ||
+    session.network !== owner.network
+  ) {
+    throw new Error('LOCKED');
+  }
 }
 
 /** Build a fresh wallet for one captured runtime session and cache it only if still current. */
@@ -180,13 +226,25 @@ async function disposeWallet(wallet: Wallet): Promise<void> {
  * Freshness and the in-flight refresh promise belong to one RuntimeSession, so neither can
  * leak into a later unlock or network.
  */
-export async function ensureFreshVtxos(wallet: Wallet, maxAgeMs = 10_000): Promise<void> {
+export async function ensureFreshVtxos(
+  context: SessionContext,
+  maxAgeMs = 10_000,
+): Promise<void> {
+  context.assertCurrent();
   const owner = session;
-  if (!owner || owner.wallet !== wallet) throw new Error('LOCKED');
+  const { wallet } = context;
+  if (
+    !owner ||
+    owner.wallet !== wallet ||
+    owner.network !== context.network ||
+    owner.epoch !== context.epoch
+  ) {
+    throw new Error('LOCKED');
+  }
   if (owner.refreshPromise) return owner.refreshPromise;
   if (Date.now() - owner.lastRefreshMs < maxAgeMs) return;
 
-  const mine = withTimeout(refreshVtxosNow(wallet), REFRESH_TIMEOUT_MS, 'vtxo refresh');
+  const mine = withTimeout(refreshVtxosNow(context), REFRESH_TIMEOUT_MS, 'vtxo refresh');
   owner.refreshPromise = mine;
   try {
     await mine;
@@ -198,7 +256,8 @@ export async function ensureFreshVtxos(wallet: Wallet, maxAgeMs = 10_000): Promi
   }
 }
 
-async function refreshVtxosNow(wallet: Wallet): Promise<void> {
-  const manager = await wallet.getContractManager();
+async function refreshVtxosNow(context: SessionContext): Promise<void> {
+  const manager = await context.wallet.getContractManager();
+  context.assertCurrent();
   await manager.refreshVtxos();
 }

@@ -10,7 +10,7 @@ import type { BoltzSwapStatus } from '@arkade-os/boltz-swap';
  *    'regtest'). './wallet' itself is NOT mocked: `networkConfig`/`NETWORK_CONFIG`
  *    are a pure lookup table, safe to run for real, and lightning.ts no longer
  *    builds a wallet through that module.
- *  • './wallet-runtime' → `getSessionWallet` is a fake that mirrors the real
+ *  • './wallet-runtime' → `getSessionContext` is a fake that mirrors the real
  *    module's memoization (one build per session, shared by concurrent callers,
  *    cleared by `invalidateSessionWallet`), so tests can exercise the same
  *    sharing behavior lightning.ts now relies on. `ensureFreshVtxos` is a bare mock.
@@ -39,14 +39,15 @@ const state = vi.hoisted(() => ({
   providerGetLimits: vi.fn(async () => ({ min: 1000, max: 4_000_000 })),
   // The fake wallet's Arkade send — payInvoice funds the swap's VHTLC with it.
   walletSend: vi.fn(async () => 'ark-funding-txid'),
-  // The fake session wallet's lifecycle, mirroring wallet-runtime.ts's own module
+  // The fake session context's lifecycle, mirroring wallet-runtime.ts's own module
   // memory: one resolved wallet, one in-flight build shared by concurrent callers,
   // and a count so tests can assert how many times a build actually happened.
-  currentWallet: null as FakeWallet | null,
-  pendingWallet: null as Promise<FakeWallet> | null,
+  currentContext: null as FakeSessionContext | null,
+  pendingContext: null as Promise<FakeSessionContext> | null,
+  sessionEpoch: 0,
   walletBuildCount: 0,
   invalidateSessionWalletMock: vi.fn(),
-  ensureFreshVtxosMock: vi.fn(async (_wallet: unknown) => {}),
+  ensureFreshVtxosMock: vi.fn(async (_context: unknown) => {}),
 }));
 
 /** The fake session wallet's shape — only the surface `lightning.ts` calls. Named
@@ -56,6 +57,13 @@ interface FakeWallet {
   fakeWallet: true;
   send: (...args: unknown[]) => Promise<string>;
   arkProvider: { getInfo: () => Promise<{ network: string; signerPubkey: string }> };
+}
+
+interface FakeSessionContext {
+  wallet: FakeWallet;
+  network: NetworkName;
+  epoch: number;
+  assertCurrent: () => void;
 }
 
 vi.mock('./storage', async (importOriginal) => {
@@ -78,18 +86,26 @@ function makeFakeWallet(): FakeWallet {
  * concurrent callers before that share the one in-flight build, so tests can pin
  * "only one Arkade wallet build" the same way the real runtime guarantees it.
  */
-function fakeGetSessionWallet() {
-  if (state.pendingWallet) return state.pendingWallet;
-  if (state.currentWallet) return Promise.resolve(state.currentWallet);
+function fakeGetSessionContext() {
+  if (state.pendingContext) return state.pendingContext;
+  if (state.currentContext) return Promise.resolve(state.currentContext);
   const mine = (async () => {
     state.walletBuildCount++;
     const wallet = makeFakeWallet();
-    state.currentWallet = wallet;
-    return wallet;
+    const context: FakeSessionContext = {
+      wallet,
+      network: state.network as NetworkName,
+      epoch: ++state.sessionEpoch,
+      assertCurrent: () => {
+        if (state.currentContext !== context) throw new Error('LOCKED');
+      },
+    };
+    state.currentContext = context;
+    return context;
   })();
-  state.pendingWallet = mine;
+  state.pendingContext = mine;
   const clear = () => {
-    if (state.pendingWallet === mine) state.pendingWallet = null;
+    if (state.pendingContext === mine) state.pendingContext = null;
   };
   mine.then(clear, clear);
   return mine;
@@ -97,14 +113,14 @@ function fakeGetSessionWallet() {
 
 async function fakeInvalidateSessionWallet() {
   state.invalidateSessionWalletMock();
-  state.currentWallet = null;
-  state.pendingWallet = null;
+  state.currentContext = null;
+  state.pendingContext = null;
 }
 
 vi.mock('./wallet-runtime', () => ({
-  getSessionWallet: () => fakeGetSessionWallet(),
+  getSessionContext: () => fakeGetSessionContext(),
   invalidateSessionWallet: () => fakeInvalidateSessionWallet(),
-  ensureFreshVtxos: (wallet: unknown) => state.ensureFreshVtxosMock(wallet),
+  ensureFreshVtxos: (context: unknown) => state.ensureFreshVtxosMock(context),
 }));
 
 vi.mock('@arkade-os/boltz-swap', async (importOriginal) => {
@@ -167,7 +183,7 @@ import {
   type LnPayStatus,
   type LnReceiveStatus,
 } from './lightning-utils';
-import { getSessionWallet, invalidateSessionWallet } from './wallet-runtime';
+import { getSessionContext, invalidateSessionWallet } from './wallet-runtime';
 
 // Real BOLT11 spec test vectors (decoded by the REAL `decodeInvoice`, which the
 // boltz-swap mock passes through via importOriginal):
@@ -242,9 +258,10 @@ beforeEach(async () => {
   state.providerGetLimits.mockResolvedValue({ min: 1000, max: 4_000_000 });
   state.walletSend.mockReset();
   state.walletSend.mockResolvedValue('ark-funding-txid');
-  // The fake session wallet must not leak across tests either.
-  state.currentWallet = null;
-  state.pendingWallet = null;
+  // The fake session context must not leak across tests either.
+  state.currentContext = null;
+  state.pendingContext = null;
+  state.sessionEpoch = 0;
   state.walletBuildCount = 0;
   state.invalidateSessionWalletMock.mockClear();
   state.ensureFreshVtxosMock.mockClear();
@@ -308,7 +325,8 @@ describe('createInvoice', () => {
     state.createArkadeSwaps.mockResolvedValue(
       fakeSwapInstance({ getLimits: vi.fn(async () => ({ min: 1000, max: 1_000_000 })) }),
     );
-    await expect(createInvoice({ amount: 500 })).rejects.toThrow(
+    const context = await getSessionContext();
+    await expect(createInvoice(context, { amount: 500 })).rejects.toThrow(
       /between 1000 and 1000000/i,
     );
   });
@@ -317,7 +335,8 @@ describe('createInvoice', () => {
     state.createArkadeSwaps.mockResolvedValue(
       fakeSwapInstance({ getLimits: vi.fn(async () => ({ min: 1000, max: 1_000_000 })) }),
     );
-    await expect(createInvoice({ amount: 2_000_000 })).rejects.toThrow(
+    const context = await getSessionContext();
+    await expect(createInvoice(context, { amount: 2_000_000 })).rejects.toThrow(
       /between 1000 and 1000000/i,
     );
   });
@@ -326,8 +345,9 @@ describe('createInvoice', () => {
     const instance = fakeSwapInstance();
     state.createArkadeSwaps.mockResolvedValue(instance);
 
+    const context = await getSessionContext();
     const before = Date.now();
-    const result = await createInvoice({ amount: 25_000 });
+    const result = await createInvoice(context, { amount: 25_000 });
     const after = Date.now();
 
     const { expiresAt, ...rest } = result;
@@ -344,6 +364,23 @@ describe('createInvoice', () => {
     expect(expiresAt).toBeLessThanOrEqual(after + 3_600_000);
     expect(result).not.toHaveProperty('preimage');
     expect(JSON.stringify(result)).not.toContain('super-secret-preimage');
+  });
+
+  it('does not create an invoice after its session becomes stale while loading limits', async () => {
+    const limitsGate = deferred<{ min: number; max: number }>();
+    const instance = fakeSwapInstance({
+      getLimits: vi.fn(() => limitsGate.promise),
+    });
+    state.createArkadeSwaps.mockResolvedValue(instance);
+    const context = await getSessionContext();
+
+    const creating = createInvoice(context, { amount: 25_000 });
+    await vi.waitFor(() => expect(instance.getLimits).toHaveBeenCalledOnce());
+    await invalidateSessionWallet();
+    limitsGate.resolve({ min: 1000, max: 1_000_000 });
+
+    await expect(creating).rejects.toThrow('LOCKED');
+    expect(instance.createLightningInvoice).not.toHaveBeenCalled();
   });
 });
 
@@ -410,7 +447,7 @@ describe('getSwaps — singleton lifecycle', () => {
     );
 
     state.network = 'mutinynet';
-    await disposeSwaps();
+    await Promise.all([invalidateSessionWallet(), disposeSwaps()]);
     expect(first.dispose).toHaveBeenCalledOnce();
 
     const b = await getSwaps();
@@ -445,6 +482,7 @@ describe('getSwaps — singleton lifecycle', () => {
     state.createArkadeSwaps.mockReturnValueOnce(gate.promise).mockResolvedValueOnce(second);
 
     const building = getSwaps(); // ArkadeSwaps.create is still pending (gate)
+    await vi.waitFor(() => expect(state.createArkadeSwaps).toHaveBeenCalledOnce());
 
     await disposeSwaps(); // a lock (or switchNetwork) races the in-flight build
 
@@ -473,10 +511,10 @@ describe('getSwaps — singleton lifecycle', () => {
 });
 
 describe('getSwaps / payInvoice — sharing the session Arkade wallet', () => {
-  it('builds ArkadeSwaps with the session wallet from getSessionWallet()', async () => {
+  it('builds ArkadeSwaps with the session wallet from getSessionContext()', async () => {
     state.createArkadeSwaps.mockResolvedValue(fakeSwapInstance());
 
-    const wallet = await getSessionWallet();
+    const { wallet } = await getSessionContext();
     await getSwaps();
 
     const config = state.createArkadeSwaps.mock.calls[0][0];
@@ -494,52 +532,55 @@ describe('getSwaps / payInvoice — sharing the session Arkade wallet', () => {
       return 'ark-funding-txid';
     });
 
-    await payInvoice({ invoice: INVOICE_250K, maxTotalSats: 250_350 });
+    const context = await getSessionContext();
+    await payInvoice(context, { invoice: INVOICE_250K, maxTotalSats: 250_350 });
 
     expect(order).toEqual(['refresh', 'send']);
     // One build total: the swap runtime and the funding send shared it.
     expect(state.walletBuildCount).toBe(1);
     const config = state.createArkadeSwaps.mock.calls[0][0];
-    const walletAfter = await getSessionWallet(); // memoized: same object payInvoice funded with
+    const contextAfter = await getSessionContext(); // memoized: same object payInvoice funded with
+    const walletAfter = contextAfter.wallet;
     expect(config.wallet).toBe(walletAfter);
-    expect(state.ensureFreshVtxosMock).toHaveBeenCalledExactlyOnceWith(walletAfter);
+    expect(state.ensureFreshVtxosMock).toHaveBeenCalledExactlyOnceWith(context);
   });
 
   it('concurrent Lightning and normal wallet access builds the Arkade wallet only once', async () => {
     state.createArkadeSwaps.mockResolvedValue(fakeSwapInstance());
 
-    const [, walletA, walletB] = await Promise.all([
+    const [, contextA, contextB] = await Promise.all([
       getSwaps(), // Lightning path
-      getSessionWallet(), // e.g. a regular send or balance read
-      getSessionWallet(),
+      getSessionContext(), // e.g. a regular send or balance read
+      getSessionContext(),
     ]);
 
     expect(state.walletBuildCount).toBe(1);
-    expect(walletA).toBe(walletB);
+    expect(contextA.wallet).toBe(contextB.wallet);
   });
 
   it('disposing the Lightning runtime does not touch the Arkade wallet', async () => {
     state.createArkadeSwaps.mockResolvedValue(fakeSwapInstance());
 
     await getSwaps();
-    const walletBefore = await getSessionWallet();
+    const walletBefore = (await getSessionContext()).wallet;
     await disposeSwaps();
-    const walletAfter = await getSessionWallet();
+    const walletAfter = (await getSessionContext()).wallet;
 
     expect(walletAfter).toBe(walletBefore);
     expect(state.invalidateSessionWalletMock).not.toHaveBeenCalled();
   });
 
-  it('memoizes independently of the wallet: invalidateSessionWallet() alone does not make getSwaps() rebuild', async () => {
+  it('refuses to reuse a Lightning runtime for a replacement session context', async () => {
     const instance = fakeSwapInstance();
     state.createArkadeSwaps.mockResolvedValue(instance);
 
     await getSwaps();
-    await invalidateSessionWallet(); // wallet-side invalidation only, no disposeSwaps()
+    await invalidateSessionWallet();
+    const replacement = await getSessionContext();
 
-    const s = await getSwaps();
-    expect(s).toBe(instance);
+    await expect(createInvoice(replacement, { amount: 25_000 })).rejects.toThrow('LOCKED');
     expect(state.createArkadeSwaps).toHaveBeenCalledOnce();
+    expect(instance.createLightningInvoice).not.toHaveBeenCalled();
   });
 
   it('a lock racing an in-flight build disposes the late ArkadeSwaps instance and does not leave a stale wallet cached', async () => {
@@ -552,7 +593,7 @@ describe('getSwaps / payInvoice — sharing the session Arkade wallet', () => {
     // Wait for the precondition itself rather than for a fixed number of microtask
     // turns: the wallet build has happened, and `ArkadeSwaps.create` is still gated.
     // Counting turns would silently run out if `createRuntime` ever grew another await.
-    await vi.waitFor(() => expect(state.walletBuildCount).toBe(1));
+    await vi.waitFor(() => expect(state.createArkadeSwaps).toHaveBeenCalledOnce());
 
     // The real lock/switchNetwork handlers fire both calls in the same
     // synchronous tick, invalidating the wallet before disposing the swap
@@ -789,9 +830,10 @@ describe('getPayQuote', () => {
 });
 
 describe('payInvoice', () => {
-  it('rejects an amountless invoice before building anything', async () => {
+  it('rejects an amountless invoice before building the swap runtime', async () => {
+    const context = await getSessionContext();
     await expect(
-      payInvoice({ invoice: INVOICE_AMOUNTLESS, maxTotalSats: 1_000_000 }),
+      payInvoice(context, { invoice: INVOICE_AMOUNTLESS, maxTotalSats: 1_000_000 }),
     ).rejects.toThrow(/no amount/i);
     expect(state.createArkadeSwaps).not.toHaveBeenCalled();
   });
@@ -802,10 +844,32 @@ describe('payInvoice', () => {
     });
     state.createArkadeSwaps.mockResolvedValue(instance);
 
+    const context = await getSessionContext();
     await expect(
-      payInvoice({ invoice: INVOICE_250K, maxTotalSats: 1_000_000 }),
+      payInvoice(context, { invoice: INVOICE_250K, maxTotalSats: 1_000_000 }),
     ).rejects.toThrow(/between 300000 and 4000000/i);
     expect(instance.createSubmarineSwap).not.toHaveBeenCalled();
+  });
+
+  it('does not create a submarine swap after its session becomes stale while loading limits', async () => {
+    const limitsGate = deferred<{ min: number; max: number }>();
+    const instance = fakeSwapInstance({
+      getLimits: vi.fn(() => limitsGate.promise),
+    });
+    state.createArkadeSwaps.mockResolvedValue(instance);
+    const context = await getSessionContext();
+
+    const paying = payInvoice(context, {
+      invoice: INVOICE_250K,
+      maxTotalSats: 250_350,
+    });
+    await vi.waitFor(() => expect(instance.getLimits).toHaveBeenCalledOnce());
+    await invalidateSessionWallet();
+    limitsGate.resolve({ min: 1000, max: 1_000_000 });
+
+    await expect(paying).rejects.toThrow('LOCKED');
+    expect(instance.createSubmarineSwap).not.toHaveBeenCalled();
+    expect(state.walletSend).not.toHaveBeenCalled();
   });
 
   it('aborts BEFORE funding when Boltz asks for more than the confirmed total (+slack)', async () => {
@@ -830,10 +894,11 @@ describe('payInvoice', () => {
     });
     state.createArkadeSwaps.mockResolvedValue(instance);
 
+    const context = await getSessionContext();
     // Quoted total 250 350; slack for 250 000 sats is max(10, 250) = 250 →
     // anything above 250 600 must abort. 300 000 is a real inflation.
     await expect(
-      payInvoice({ invoice: INVOICE_250K, maxTotalSats: 250_350 }),
+      payInvoice(context, { invoice: INVOICE_250K, maxTotalSats: 250_350 }),
     ).rejects.toThrow(/more than the quoted total/i);
     expect(state.walletSend).not.toHaveBeenCalled();
   });
@@ -845,8 +910,9 @@ describe('payInvoice', () => {
     });
     state.createArkadeSwaps.mockResolvedValue(instance);
 
+    const context = await getSessionContext();
     await expect(
-      payInvoice({ invoice: INVOICE_250K, maxTotalSats: 250_350 }),
+      payInvoice(context, { invoice: INVOICE_250K, maxTotalSats: 250_350 }),
     ).rejects.toThrow(/could not verify/i);
     expect(state.walletSend).not.toHaveBeenCalled();
     // Address verification strictly precedes the refresh — an unverified swap
@@ -858,7 +924,11 @@ describe('payInvoice', () => {
     const instance = fakeSwapInstance();
     state.createArkadeSwaps.mockResolvedValue(instance);
 
-    const result = await payInvoice({ invoice: INVOICE_250K, maxTotalSats: 250_350 });
+    const context = await getSessionContext();
+    const result = await payInvoice(context, {
+      invoice: INVOICE_250K,
+      maxTotalSats: 250_350,
+    });
 
     expect(state.walletSend).toHaveBeenCalledExactlyOnceWith({
       address: 'tark1lockup',
@@ -880,6 +950,25 @@ describe('payInvoice', () => {
       amountSats: 250_000,
       totalSats: 250_350,
     });
+  });
+
+  it('does not fund a swap after its session becomes stale during the VTXO refresh', async () => {
+    const refreshGate = deferred<void>();
+    const instance = fakeSwapInstance();
+    state.createArkadeSwaps.mockResolvedValue(instance);
+    state.ensureFreshVtxosMock.mockReturnValue(refreshGate.promise);
+    const context = await getSessionContext();
+
+    const paying = payInvoice(context, {
+      invoice: INVOICE_250K,
+      maxTotalSats: 250_350,
+    });
+    await vi.waitFor(() => expect(state.ensureFreshVtxosMock).toHaveBeenCalledOnce());
+    await invalidateSessionWallet();
+    refreshGate.resolve();
+
+    await expect(paying).rejects.toThrow('LOCKED');
+    expect(state.walletSend).not.toHaveBeenCalled();
   });
 
   it('tolerates rounding drift within the slack', async () => {
@@ -904,7 +993,11 @@ describe('payInvoice', () => {
     });
     state.createArkadeSwaps.mockResolvedValue(instance);
 
-    const result = await payInvoice({ invoice: INVOICE_250K, maxTotalSats: 250_350 });
+    const context = await getSessionContext();
+    const result = await payInvoice(context, {
+      invoice: INVOICE_250K,
+      maxTotalSats: 250_350,
+    });
     expect(result.totalSats).toBe(250_352);
   });
 
@@ -912,8 +1005,9 @@ describe('payInvoice', () => {
     state.createArkadeSwaps.mockResolvedValue(fakeSwapInstance());
     state.walletSend.mockRejectedValue(new Error('Insufficient funds'));
 
+    const context = await getSessionContext();
     await expect(
-      payInvoice({ invoice: INVOICE_250K, maxTotalSats: 250_350 }),
+      payInvoice(context, { invoice: INVOICE_250K, maxTotalSats: 250_350 }),
     ).rejects.toThrow(/not enough spendable balance/i);
   });
 });

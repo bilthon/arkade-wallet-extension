@@ -9,6 +9,7 @@ import {
 } from '@arkade-os/sdk';
 import { hex, base64 } from '@scure/base';
 import type { MessageSenderLike } from './origin';
+import type { SessionContext } from './wallet-runtime';
 
 /**
  * signMessage + signPsbt HANDLER gating. The end-to-end contract a
@@ -97,9 +98,34 @@ function fakeSigningWallet() {
 }
 
 let activeWallet: ReturnType<typeof fakeSigningWallet>;
-const buildWallet = vi.fn(async () => {
+let activeNetwork: SessionContext['network'] = 'regtest';
+let activeEpoch = 1;
+
+function sessionContext(
+  wallet = activeWallet,
+  network = activeNetwork,
+  epoch = activeEpoch,
+): SessionContext {
+  return {
+    wallet,
+    network,
+    epoch,
+    assertCurrent() {
+      if (
+        !unlocked ||
+        activeWallet !== wallet ||
+        activeNetwork !== network ||
+        activeEpoch !== epoch
+      ) {
+        throw new Error('LOCKED');
+      }
+    },
+  };
+}
+
+const getContext = vi.fn(async () => {
   if (!unlocked) throw new Error('LOCKED');
-  return activeWallet;
+  return sessionContext();
 });
 
 function codeOf(err: unknown): string | null {
@@ -141,7 +167,9 @@ beforeEach(async () => {
   session.clear();
   unlocked = true;
   activeWallet = fakeSigningWallet();
-  buildWallet.mockClear();
+  activeNetwork = 'regtest';
+  activeEpoch = 1;
+  getContext.mockClear();
   browserMock.windows.create.mockClear();
   await setVault({ v: 1 } as never);
   await setNetwork('regtest');
@@ -154,14 +182,14 @@ beforeEach(async () => {
 describe('signing gate', () => {
   it('rejects signMessage from an UNCONNECTED origin (NOT_CONNECTED), no prompt', async () => {
     await expect(
-      handleSignMessage({ origin: 'https://nope.example' }, 'hi', buildWallet),
+      handleSignMessage({ origin: 'https://nope.example' }, 'hi', getContext),
     ).rejects.toSatisfy((e: unknown) => codeOf(e) === 'NOT_CONNECTED');
     expect(browserMock.windows.create).not.toHaveBeenCalled();
   });
 
   it('rejects signMessage when the wallet is LOCKED', async () => {
     unlocked = false;
-    await expect(handleSignMessage(HTTPS, 'hi', buildWallet)).rejects.toSatisfy(
+    await expect(handleSignMessage(HTTPS, 'hi', getContext)).rejects.toSatisfy(
       (e: unknown) => codeOf(e) === 'LOCKED',
     );
   });
@@ -171,7 +199,7 @@ describe('signing gate', () => {
 
 describe('handleSignMessage', () => {
   it('rejects a sighash-shaped message BEFORE prompting (BAD_REQUEST)', async () => {
-    await expect(handleSignMessage(HTTPS, 'a'.repeat(64), buildWallet)).rejects.toSatisfy(
+    await expect(handleSignMessage(HTTPS, 'a'.repeat(64), getContext)).rejects.toSatisfy(
       (e: unknown) => codeOf(e) === 'BAD_REQUEST',
     );
     // never opened an approval window for the dangerous request
@@ -180,13 +208,13 @@ describe('handleSignMessage', () => {
 
   it('rejects a non-string message (BAD_REQUEST)', async () => {
     await expect(
-      handleSignMessage(HTTPS, { not: 'a string' }, buildWallet),
+      handleSignMessage(HTTPS, { not: 'a string' }, getContext),
     ).rejects.toSatisfy((e: unknown) => codeOf(e) === 'BAD_REQUEST');
   });
 
   it('prompts, then returns a BIP322 signature on approve', async () => {
     const { signature } = await approving(() =>
-      handleSignMessage(HTTPS, 'Sign in to Example', buildWallet),
+      handleSignMessage(HTTPS, 'Sign in to Example', getContext),
     );
     expect(browserMock.windows.create).toHaveBeenCalledOnce();
     expect(typeof signature).toBe('string');
@@ -194,7 +222,7 @@ describe('handleSignMessage', () => {
   });
 
   it('surfaces REJECTED when the user declines', async () => {
-    const promise = handleSignMessage(HTTPS, 'hello', buildWallet);
+    const promise = handleSignMessage(HTTPS, 'hello', getContext);
     const pending = await waitForPending();
     await resolveApproval(pending.requestId, { approved: false });
     await expect(promise).rejects.toSatisfy((e: unknown) => codeOf(e) === 'REJECTED');
@@ -202,7 +230,7 @@ describe('handleSignMessage', () => {
 
   it('surfaces LOCKED and never signs when session lock cancels the approval', async () => {
     const sign = vi.spyOn(userKey, 'sign');
-    const promise = handleSignMessage(HTTPS, 'hello', buildWallet);
+    const promise = handleSignMessage(HTTPS, 'hello', getContext);
     await waitForPending();
 
     await rejectPendingApproval('Wallet locked after inactivity.');
@@ -214,13 +242,11 @@ describe('handleSignMessage', () => {
 
   it('rejects when the wallet session changes while resolving the approval', async () => {
     const sign = vi.spyOn(userKey, 'sign');
-    const first = fakeSigningWallet();
-    const second = fakeSigningWallet();
-    let calls = 0;
-    const changingWallet = vi.fn(async () => (calls++ === 0 ? first : second));
-    const promise = handleSignMessage(HTTPS, 'hello', changingWallet);
+    const promise = handleSignMessage(HTTPS, 'hello', getContext);
     const pending = await waitForPending();
 
+    activeWallet = fakeSigningWallet();
+    activeEpoch++;
     await resolveApproval(pending.requestId, { approved: true });
 
     await expect(promise).rejects.toSatisfy((e: unknown) => codeOf(e) === 'LOCKED');
@@ -230,14 +256,11 @@ describe('handleSignMessage', () => {
 
   it('does not sign when the network changes during post-approval authorization', async () => {
     const sign = vi.spyOn(userKey, 'sign');
-    let calls = 0;
-    const changingNetwork = vi.fn(async () => {
-      if (calls++ === 1) await setNetwork('mutinynet');
-      return activeWallet;
-    });
-    const promise = handleSignMessage(HTTPS, 'hello', changingNetwork);
+    const promise = handleSignMessage(HTTPS, 'hello', getContext);
     const pending = await waitForPending();
 
+    activeNetwork = 'mutinynet';
+    activeEpoch++;
     await resolveApproval(pending.requestId, { approved: true });
 
     await expect(promise).rejects.toSatisfy((e: unknown) => codeOf(e) === 'LOCKED');
@@ -269,7 +292,7 @@ describe('handleSignPsbt', () => {
 
   it('rejects an undecodable PSBT BEFORE prompting (BAD_REQUEST)', async () => {
     await expect(
-      handleSignPsbt(HTTPS, { psbt: 'garbage', inputIndexes: [0] }, buildWallet),
+      handleSignPsbt(HTTPS, { psbt: 'garbage', inputIndexes: [0] }, getContext),
     ).rejects.toSatisfy((e: unknown) => codeOf(e) === 'BAD_REQUEST');
     expect(browserMock.windows.create).not.toHaveBeenCalled();
   });
@@ -279,7 +302,7 @@ describe('handleSignPsbt', () => {
     const psbt = escrowPsbt();
 
     const { psbt: out } = await approving(() =>
-      handleSignPsbt(HTTPS, { psbt, inputIndexes: [0] }, buildWallet),
+      handleSignPsbt(HTTPS, { psbt, inputIndexes: [0] }, getContext),
     );
     expect(browserMock.windows.create).toHaveBeenCalledOnce();
 
@@ -297,7 +320,7 @@ describe('handleSignPsbt', () => {
 
   it('the approval window payload carries the contract co-sign summary (1 of 3)', async () => {
     const psbt = escrowPsbt();
-    const promise = handleSignPsbt(HTTPS, { psbt, inputIndexes: [0] }, buildWallet);
+    const promise = handleSignPsbt(HTTPS, { psbt, inputIndexes: [0] }, getContext);
     const pending = (await waitForPending()) as {
       requestId: string;
       payload: {
@@ -315,7 +338,7 @@ describe('handleSignPsbt', () => {
   it('does not sign when the wallet locks while approval is open', async () => {
     const sign = vi.spyOn(userKey, 'sign');
     const psbt = escrowPsbt();
-    const promise = handleSignPsbt(HTTPS, { psbt, inputIndexes: [0] }, buildWallet);
+    const promise = handleSignPsbt(HTTPS, { psbt, inputIndexes: [0] }, getContext);
     const pending = await waitForPending();
 
     unlocked = false;
@@ -329,11 +352,12 @@ describe('handleSignPsbt', () => {
   it('does not sign after a lock and unlock on the same network', async () => {
     const sign = vi.spyOn(userKey, 'sign');
     const psbt = escrowPsbt();
-    const promise = handleSignPsbt(HTTPS, { psbt, inputIndexes: [0] }, buildWallet);
+    const promise = handleSignPsbt(HTTPS, { psbt, inputIndexes: [0] }, getContext);
     const pending = await waitForPending();
 
     unlocked = false;
     activeWallet = fakeSigningWallet();
+    activeEpoch++;
     unlocked = true;
     await resolveApproval(pending.requestId, { approved: true });
 
@@ -345,10 +369,11 @@ describe('handleSignPsbt', () => {
   it('does not sign after the active network changes', async () => {
     const sign = vi.spyOn(userKey, 'sign');
     const psbt = escrowPsbt();
-    const promise = handleSignPsbt(HTTPS, { psbt, inputIndexes: [0] }, buildWallet);
+    const promise = handleSignPsbt(HTTPS, { psbt, inputIndexes: [0] }, getContext);
     const pending = await waitForPending();
 
-    await setNetwork('mutinynet');
+    activeNetwork = 'mutinynet';
+    activeEpoch++;
     await resolveApproval(pending.requestId, { approved: true });
 
     await expect(promise).rejects.toSatisfy((e: unknown) => codeOf(e) === 'LOCKED');

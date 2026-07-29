@@ -68,7 +68,7 @@ describe('keystore handler round-trip (boundary)', () => {
     await keystore.createWallet(PASSWORD);
     await resetRuntime();
     expect(runtime.isUnlocked()).toBe(false);
-    await expect(runtime.getSessionWallet()).rejects.toThrow('LOCKED');
+    await expect(runtime.getSessionContext()).rejects.toThrow('LOCKED');
     expect([...session.entries()]).toEqual([]);
     // Vault stays at rest so the wallet can be unlocked again.
     expect(local.get('vault')).toBeTruthy();
@@ -84,6 +84,17 @@ describe('keystore handler round-trip (boundary)', () => {
     await keystore.unlock(PASSWORD);
     expect(runtime.isUnlocked()).toBe(true);
     expect([...session.entries()]).toEqual([]);
+  });
+
+  it('reauthenticates without replacing an already-live session', async () => {
+    await keystore.createWallet(PASSWORD);
+    const epoch = runtime.getSessionEpoch();
+
+    await expect(keystore.unlock('wrong-password')).rejects.toThrow();
+    await keystore.unlock(PASSWORD);
+
+    expect(runtime.getSessionEpoch()).toBe(epoch);
+    expect(runtime.getSessionNetwork()).toBe('regtest');
   });
 
   it('getMnemonicForBackup re-auths from the vault', async () => {

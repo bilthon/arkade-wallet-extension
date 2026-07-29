@@ -1,4 +1,4 @@
-import { getSessionWallet, ensureFreshVtxos, isUnlocked } from './wallet-runtime';
+import { getSessionContext, ensureFreshVtxos, isUnlocked } from './wallet-runtime';
 import { renewExpiringVtxos, recoverExpiredVtxos, getExpiredVtxoSummary } from './wallet';
 
 /**
@@ -115,33 +115,37 @@ export async function runRenewalTick(): Promise<
   // This is a scheduled tick, not user activity, so it goes straight to the shared
   // session wallet with no `armAutoLock()` anywhere on this path — a tick must not
   // keep extending the idle window on its own.
-  const wallet = await getSessionWallet();
+  const context = await getSessionContext();
+  const { wallet } = context;
   // Building the wallet used to give this an implicit sync; the shared wallet no
   // longer rebuilds every tick, so we ask for one explicitly before selecting
   // renewable coins.
-  await ensureFreshVtxos(wallet);
+  await ensureFreshVtxos(context);
 
   let recovered = 0;
   let txid: string | undefined;
   try {
-    const rec = await recoverExpiredVtxos(wallet);
+    const rec = await recoverExpiredVtxos(context);
     recovered = rec.recovered;
     txid = rec.txid;
   } catch (err) {
+    if (err instanceof Error && err.message === 'LOCKED') throw err;
     console.warn('[arkade] recovery leg failed', err);
   }
 
   let renewed = 0;
   try {
-    const r = await renewExpiringVtxos(wallet, RENEW_MARGIN_MS);
+    const r = await renewExpiringVtxos(context, RENEW_MARGIN_MS);
     renewed = r.renewed;
     txid ??= r.txid;
   } catch (err) {
+    if (err instanceof Error && err.message === 'LOCKED') throw err;
     console.warn('[arkade] renewal leg failed', err);
   }
 
   // Re-read post-settle so the warning reflects the new state (ideally cleared).
   const summary = await getExpiredVtxoSummary(wallet);
+  context.assertCurrent();
   const hasWork =
     summary.count > 0 ||
     summary.recoverableCount > 0 ||

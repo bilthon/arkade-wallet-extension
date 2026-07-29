@@ -17,6 +17,7 @@ import {
   type ArkTransaction,
 } from '@arkade-os/sdk';
 import { getNetwork as getStoredNetwork } from './storage';
+import type { SessionContext } from './wallet-runtime';
 import {
   adjustBalanceForExpiry,
   partitionVtxos,
@@ -430,17 +431,18 @@ export function validateAmount(amount: number, available: number): void {
  * `Ramps.offboard` / Boltz with their own approval UX (separate, later PRs).
  */
 export async function send(
-  wallet: Wallet,
+  context: SessionContext,
   { address, amount, outpoints }: { address: string; amount: number; outpoints?: string[] },
 ): Promise<{ txid: string }> {
-  const network = await getStoredNetwork();
+  context.assertCurrent();
+  const { wallet, network } = context;
   validateArkadeAddress(address, network);
 
   // Coin-control path: the caller picked exact inputs. Those coins are the only inputs
   // and their sum is the spend ceiling (classic coin control — no auto-top-up from
   // unselected coins). Handled separately below.
   if (outpoints && outpoints.length > 0) {
-    return sendSelected(wallet, address.trim(), amount, outpoints);
+    return sendSelected(context, address.trim(), amount, outpoints);
   }
 
   // Validate the amount against the LIVE *expiry-adjusted* available balance (not the
@@ -452,6 +454,7 @@ export async function send(
 
   // A single Recipient { address, amount } is the off-chain Arkade→Arkade case.
   try {
+    context.assertCurrent();
     const txid = await wallet.send({ address: address.trim(), amount });
     return { txid };
   } catch (err) {
@@ -479,11 +482,13 @@ export async function send(
  * its own coin selection and can't be constrained to a chosen set.
  */
 async function sendSelected(
-  wallet: Wallet,
+  context: SessionContext,
   address: string,
   amount: number,
   outpoints: string[],
 ): Promise<{ txid: string }> {
+  context.assertCurrent();
+  const { wallet } = context;
   // Re-fetch and resolve the outpoints against the LIVE spendable set. A coin renewed or
   // swept in the background since the popup listed it won't be found -> COIN_GONE_MESSAGE.
   const vtxos = await wallet.getVtxos({ withRecoverable: true });
@@ -492,6 +497,7 @@ async function sendSelected(
   validateAmount(amount, selectedSats);
 
   try {
+    context.assertCurrent();
     const txid = await wallet.sendBitcoin({ address, amount, selectedVtxos: selected });
     return { txid };
   } catch (err) {
@@ -517,10 +523,11 @@ async function sendSelected(
  * from the total internally.
  */
 export async function sendOnchain(
-  wallet: Wallet,
+  context: SessionContext,
   { address, amount }: { address: string; amount?: number },
 ): Promise<{ txid: string }> {
-  const network = await getStoredNetwork();
+  context.assertCurrent();
+  const { wallet, network } = context;
   validateOnchainAddress(address, network);
   if (amount !== undefined) {
     const balance = await getBalance(wallet);
@@ -550,6 +557,7 @@ export async function sendOnchain(
   }
 
   try {
+    context.assertCurrent();
     const txid = await new Ramps(wallet).offboard(
       address.trim(),
       info.fees,
@@ -660,9 +668,11 @@ export function selectRenewable(
  * renew" from the SDK is a no-op, not an error — return `{ renewed: 0 }`.
  */
 export async function renewExpiringVtxos(
-  wallet: Wallet,
+  context: SessionContext,
   marginMs: number,
 ): Promise<{ renewed: number; txid?: string }> {
+  context.assertCurrent();
+  const { wallet } = context;
   const vtxos = await wallet.getVtxos({ withRecoverable: true });
   const renewable = selectRenewable(vtxos, marginMs);
   // Nothing renewable → no-op. Critically, we never call renewVtxos when only expired/
@@ -672,6 +682,7 @@ export async function renewExpiringVtxos(
   // We never dispose this manager: it stays cached on `wallet` for reuse, and a
   // disposed manager can't safely be reused. The session runtime owns the wallet's
   // (and therefore the manager's) lifetime, not this function.
+  context.assertCurrent();
   const manager = await wallet.getVtxoManager();
   const thresholdSeconds = Math.max(1, Math.round(marginMs / 1000));
   try {
@@ -699,6 +710,7 @@ export async function renewExpiringVtxos(
     // newly-swept coin first), so no funds are stuck and no intent stays wedged.
     if (hasRecoverableOrExpired(vtxos)) {
       try {
+        context.assertCurrent();
         await manager.recoverVtxos();
       } catch (err) {
         // "No recoverable" means nothing to drain (race) — fine, proceed to renew.
@@ -709,6 +721,7 @@ export async function renewExpiringVtxos(
       }
     }
 
+    context.assertCurrent();
     const txid = await manager.renewVtxos(undefined, { thresholdSeconds });
     return { renewed: renewable.length, txid };
   } catch (err) {
@@ -756,8 +769,10 @@ export function hasRecoverableOrExpired(vtxos: ExtendedVirtualCoin[]): boolean {
  * The caller guarantees the wallet is unlocked (this signs).
  */
 export async function recoverExpiredVtxos(
-  wallet: Wallet,
+  context: SessionContext,
 ): Promise<{ recovered: number; sats: number; txid?: string }> {
+  context.assertCurrent();
+  const { wallet } = context;
   // Not disposed here — see the same note in renewExpiringVtxos.
   const manager = await wallet.getVtxoManager();
   try {
@@ -766,6 +781,7 @@ export async function recoverExpiredVtxos(
     if (recoverable.vtxoCount === 0 || recoverable.recoverable <= 0n) {
       return { recovered: 0, sats: 0 };
     }
+    context.assertCurrent();
     const txid = await manager.recoverVtxos();
     return {
       recovered: recoverable.vtxoCount,
@@ -804,12 +820,15 @@ export async function recoverExpiredVtxos(
  * The caller guarantees the wallet is unlocked (this signs).
  */
 export async function onboardBoarding(
-  wallet: Wallet,
+  context: SessionContext,
 ): Promise<{ onboarded: boolean; txid?: string }> {
+  context.assertCurrent();
+  const { wallet } = context;
   const balance = await wallet.getBalance();
   if (balance.boarding.confirmed <= 0) return { onboarded: false };
   const info = await wallet.arkProvider.getInfo();
   try {
+    context.assertCurrent();
     const txid = await new Ramps(wallet).onboard(info.fees);
     return { onboarded: true, txid };
   } catch (err) {

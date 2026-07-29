@@ -3,6 +3,7 @@ import {
   grantConnect,
   getGrant,
   revokeGrant,
+  revokeGrantIfCurrent,
   isConnected as originIsConnected,
   isMethodGranted,
   type GrantedMethod,
@@ -16,8 +17,8 @@ import {
   type PendingRequest,
   type ApprovalPayload,
 } from './approvals';
-import { getNetwork as getStoredNetwork, hasVault } from './storage';
-import { isUnlocked } from './wallet-runtime';
+import { hasVault } from './storage';
+import { getSessionNetwork, isUnlocked, type SessionContext } from './wallet-runtime';
 import { networkConfig } from './wallet';
 import { encodeProviderError, type ProviderEvent } from './provider-api';
 import { PROVIDER_EVENT_TYPE, type ProviderEventMessage } from './provider-events';
@@ -30,7 +31,7 @@ import {
   SignMessageError,
 } from './signing';
 import { PsbtRejectedError } from './psbt-inspect';
-import { networks, type Wallet } from '@arkade-os/sdk';
+import type { Wallet } from '@arkade-os/sdk';
 
 /**
  * Provider-facing handler logic. Every function here takes the message
@@ -38,20 +39,9 @@ import { networks, type Wallet } from '@arkade-os/sdk';
  * checks the per-origin grant and the wallet lock state, and returns public results
  * only. Mnemonics and temporary raw seeds never reach this layer.
  *
- * `buildWalletForRead` is injected by the background so this module stays free of SDK
+ * `getContext` is injected by the background so this module stays free of runtime
  * construction details and is unit-testable with a fake wallet + fake sender.
  */
-
-/**
- * The minimal wallet view `handleConnect` needs: the Arkade account address to record
- * in the grant + show on the approval screen. Kept narrow (just `getAddress`) so the
- * SDK `Wallet` satisfies it structurally and tests can supply a one-method fake. The
- * other read methods don't go through here — the background gates them and reads from
- * the SDK `Wallet` directly.
- */
-export interface ReadWallet {
-  getAddress(): Promise<string>;
-}
 
 /** Throw a typed provider error the content bridge passes through to the web app. */
 function providerError(
@@ -111,7 +101,7 @@ export async function openApprovalWindow(request: PendingRequest): Promise<numbe
  */
 export async function handleConnect(
   sender: MessageSenderLike | undefined,
-  buildWalletForRead: () => Promise<ReadWallet>,
+  getContext: () => Promise<SessionContext>,
 ): Promise<{ accounts: string[] }> {
   const origin = originFromSender(sender);
 
@@ -130,20 +120,31 @@ export async function handleConnect(
     providerError('BUSY', 'Another approval is already open. Try again in a moment.');
   }
 
-  // Wallet must be unlocked to derive the account address shown on the approval screen.
+  // Wallet must be unlocked to bind the eventual grant to this exact session/account.
   if (!isUnlocked()) {
     providerError('LOCKED', 'Unlock your Arkade wallet, then connect again.');
   }
 
-  const decision = await requestApprovalSafe({ kind: 'connect' }, origin);
+  const expected = await requireCurrentContext(getContext);
+  const address = await expected.wallet.getAddress();
+  assertProviderContext(expected);
+
+  const decision = await requestApprovalSafe({ kind: 'connect' }, origin, expected);
   if (!decision.approved) {
     providerError('REJECTED', 'The connection request was declined.');
   }
 
-  // Approved → derive the account address and persist the read-only grant.
-  const wallet = await buildWalletForRead();
-  const address = await wallet.getAddress();
+  const current = await requireUnchangedContext(expected, getContext);
+  assertProviderContext(current);
   const grant = await grantConnect(origin, [address]);
+  try {
+    current.assertCurrent();
+  } catch {
+    // A lock can finish revoking grants while the storage write above is still pending.
+    // Compensate for a write that lands afterward so a stale approval never reconnects.
+    await revokeGrantIfCurrent(origin, grant.id);
+    providerError('LOCKED', 'The wallet session changed. Try the request again.');
+  }
   return { accounts: grant.accounts };
 }
 
@@ -153,9 +154,16 @@ export async function handleConnect(
  * (connect / signMessage / signPsbt) so the one-window-at-a-time + typed-error contract
  * is identical across them.
  */
-async function requestApprovalSafe(payload: ApprovalPayload, origin: string) {
+async function requestApprovalSafe(
+  payload: ApprovalPayload,
+  origin: string,
+  context: SessionContext,
+) {
   try {
-    return await requestApproval(payload, origin, openApprovalWindow);
+    return await requestApproval(payload, origin, openApprovalWindow, {
+      epoch: context.epoch,
+      network: context.network,
+    });
   } catch (err) {
     if (err instanceof Error && 'code' in err && (err as { code?: string }).code === 'BUSY') {
       providerError('BUSY', 'Another approval is already open. Try again in a moment.');
@@ -232,7 +240,15 @@ export async function handleGetNetwork(
   sender: MessageSenderLike | undefined,
 ): Promise<{ network: import('@arkade-os/sdk').NetworkName; arkServerUrl: string }> {
   await requireRead(sender, 'getNetwork');
-  const network = await getStoredNetwork();
+  let network: import('@arkade-os/sdk').NetworkName;
+  try {
+    network = getSessionNetwork();
+  } catch (err) {
+    if (err instanceof Error && err.message === 'LOCKED') {
+      providerError('LOCKED', 'The Arkade wallet was locked. Unlock it and try again.');
+    }
+    throw err;
+  }
   return { network, arkServerUrl: networkConfig(network).arkServerUrl };
 }
 
@@ -269,7 +285,7 @@ async function requireForSigning(sender: MessageSenderLike | undefined): Promise
 export async function handleSignMessage(
   sender: MessageSenderLike | undefined,
   message: unknown,
-  buildWallet: () => Promise<Wallet>,
+  getContext: () => Promise<SessionContext>,
 ): Promise<{ signature: string }> {
   const origin = await requireForSigning(sender);
 
@@ -281,17 +297,17 @@ export async function handleSignMessage(
   // rejected outright, never shown as approvable.
   assertSignableMessage(message);
 
-  const session = await getSigningSession(buildWallet);
-  const decision = await requestApprovalSafe({ kind: 'signMessage', message }, origin);
+  const session = await requireCurrentContext(getContext);
+  const decision = await requestApprovalSafe({ kind: 'signMessage', message }, origin, session);
   if (!decision.approved) {
     providerError('REJECTED', 'The signature request was declined.');
   }
 
-  return withUnchangedSigningSession(session, buildWallet, async ({ wallet, network }) => {
+  return withUnchangedSigningSession(session, getContext, async (current) => {
     try {
       // Anchor the BIP322 signature to the wallet's ACTIVE network so a verifier checking
       // against the user's real (testnet/regtest/mainnet) taproot address succeeds.
-      const signature = await signMessageBIP322(wallet.identity, message, networks[network]);
+      const signature = await signMessageBIP322(current, message);
       return { signature };
     } catch (err) {
       if (err instanceof SignMessageError) providerError('BAD_REQUEST', err.message);
@@ -333,7 +349,7 @@ function assertSignableMessage(message: string): void {
 export async function handleSignPsbt(
   sender: MessageSenderLike | undefined,
   params: { psbt?: unknown; inputIndexes?: unknown; allowHighFee?: unknown },
-  buildWallet: () => Promise<Wallet>,
+  getContext: () => Promise<SessionContext>,
 ): Promise<{ psbt: string }> {
   const origin = await requireForSigning(sender);
 
@@ -350,10 +366,11 @@ export async function handleSignPsbt(
   // Capture one stable wallet/network pair for inspection. A second check after approval
   // prevents this signer from surviving a lock, unlock, or network switch while the user
   // has the approval window open.
-  const session = await getSigningSession(buildWallet);
-  const { wallet, network } = session;
+  const session = await requireCurrentContext(getContext);
+  const { wallet } = session;
   const dustSats = await operatorDust(wallet);
-  const ctx = await buildInspectContext(wallet, network, dustSats);
+  const ctx = await buildInspectContext(session, dustSats);
+  assertProviderContext(session);
 
   // SW-side validate → the summary is what the user approves (NOT a site claim).
   let summary;
@@ -366,41 +383,17 @@ export async function handleSignPsbt(
     throw err;
   }
 
-  const decision = await requestApprovalSafe({ kind: 'signPsbt', summary }, origin);
+  const decision = await requestApprovalSafe({ kind: 'signPsbt', summary }, origin, session);
   if (!decision.approved) {
     providerError('REJECTED', 'The signing request was declined.');
   }
 
-  return withUnchangedSigningSession(session, buildWallet, async ({ wallet: currentWallet }) => {
+  return withUnchangedSigningSession(session, getContext, async (current) => {
     // Re-parse + sign from the SAME psbt string we inspected, add only our partial sig,
     // return unfinalized.
-    const signedPsbt = await signPsbtPartial(
-      currentWallet,
-      psbt as string,
-      inputIndexes as number[],
-    );
+    const signedPsbt = await signPsbtPartial(current, psbt as string, inputIndexes as number[]);
     return { psbt: signedPsbt };
   });
-}
-
-interface SigningSession {
-  wallet: Wallet;
-  network: import('@arkade-os/sdk').NetworkName;
-}
-
-/**
- * Capture a wallet and its active network without accepting a pair crossed by a concurrent
- * network switch. Signing performs a second authorization after user approval.
- */
-async function getSigningSession(
-  buildWallet: () => Promise<Wallet>,
-): Promise<SigningSession> {
-  const network = await getStoredNetwork();
-  const wallet = await requireCurrentWallet(buildWallet);
-  if ((await getStoredNetwork()) !== network) {
-    providerError('LOCKED', 'The wallet session changed. Try the request again.');
-  }
-  return { wallet, network };
 }
 
 /**
@@ -408,39 +401,59 @@ async function getSigningSession(
  * wallet/network check. Nothing may await between that check and starting the signer.
  */
 async function withUnchangedSigningSession<T>(
-  expected: SigningSession,
-  buildWallet: () => Promise<Wallet>,
-  action: (current: SigningSession) => Promise<T>,
+  expected: SessionContext,
+  getContext: () => Promise<SessionContext>,
+  action: (current: SessionContext) => Promise<T>,
 ): Promise<T> {
-  const networkBefore = await getStoredNetwork();
-  let currentWallet: Wallet;
   try {
-    currentWallet = await buildWallet();
+    const current = await requireUnchangedContext(expected, getContext);
+    current.assertCurrent();
+    return await action(current);
+  } catch (err) {
+    if (err instanceof Error && err.message === 'LOCKED') {
+      providerError('LOCKED', 'The wallet session changed. Try the request again.');
+    }
+    throw err;
+  }
+}
+
+/** Map runtime session failures to the provider's typed LOCKED error. */
+async function requireCurrentContext(
+  getContext: () => Promise<SessionContext>,
+): Promise<SessionContext> {
+  try {
+    const context = await getContext();
+    context.assertCurrent();
+    return context;
   } catch (err) {
     if (err instanceof Error && err.message === 'LOCKED') {
       providerError('LOCKED', 'The Arkade wallet was locked. Unlock it and try again.');
     }
     throw err;
   }
-  const networkAfter = await getStoredNetwork();
+}
+
+async function requireUnchangedContext(
+  expected: SessionContext,
+  getContext: () => Promise<SessionContext>,
+): Promise<SessionContext> {
+  const current = await requireCurrentContext(getContext);
   if (
-    !isUnlocked() ||
-    currentWallet !== expected.wallet ||
-    networkBefore !== expected.network ||
-    networkAfter !== expected.network
+    current.epoch !== expected.epoch ||
+    current.network !== expected.network ||
+    current.wallet !== expected.wallet
   ) {
     providerError('LOCKED', 'The wallet session changed. Try the request again.');
   }
-  return action({ wallet: currentWallet, network: networkAfter });
+  return current;
 }
 
-/** Map a lock that lands after the approval gate to the provider's typed LOCKED error. */
-async function requireCurrentWallet(buildWallet: () => Promise<Wallet>): Promise<Wallet> {
+function assertProviderContext(context: SessionContext): void {
   try {
-    return await buildWallet();
+    context.assertCurrent();
   } catch (err) {
     if (err instanceof Error && err.message === 'LOCKED') {
-      providerError('LOCKED', 'The Arkade wallet was locked. Unlock it and try again.');
+      providerError('LOCKED', 'The wallet session changed. Try the request again.');
     }
     throw err;
   }

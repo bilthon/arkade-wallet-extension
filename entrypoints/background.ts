@@ -9,11 +9,7 @@ import {
 } from '@/src/keystore';
 import { armAutoLock, registerAutoLock } from '@/src/auto-lock';
 import { lockWallet } from '@/src/session-lock';
-import {
-  getPopupWallet,
-  getProviderWallet,
-  requirePopupSession,
-} from '@/src/session-access';
+import { getPopupContext, getProviderContext } from '@/src/session-access';
 import { hasVault, getNetwork as getStoredNetwork } from '@/src/storage';
 import {
   getAddress,
@@ -84,7 +80,7 @@ const BALANCE_READ_TIMEOUT_MS = 8_000;
 /**
  * Request router. Holds one session-scoped `Wallet` in memory for as long as the
  * service worker stays unlocked on one network. Every read/send/renewal handler
- * shares this wallet via `getSessionWallet()` instead of building its own. The wallet
+ * shares this wallet via `getSessionContext()` instead of building its own. The wallet
  * is disposed only on lock or on a network switch, by `invalidateSessionWallet()`.
  * The live identity and active session network are owned by `wallet-runtime.ts`.
  *
@@ -175,18 +171,18 @@ export default defineBackground(() => {
 
   // ── Read methods (public results only) ─────────────────────────────────────
   onMessage('getAddress', async () => {
-    const wallet = await getPopupWallet();
-    return { address: await getAddress(wallet) };
+    const context = await getPopupContext();
+    return { address: await getAddress(context.wallet) };
   });
 
   onMessage('getBoardingAddress', async () => {
-    const wallet = await getPopupWallet();
-    return { boardingAddress: await getBoardingAddress(wallet) };
+    const context = await getPopupContext();
+    return { boardingAddress: await getBoardingAddress(context.wallet) };
   });
 
   onMessage('getBalance', async () => {
-    const wallet = await getPopupWallet();
-    return getBalance(wallet);
+    const context = await getPopupContext();
+    return getBalance(context.wallet);
   });
 
   onMessage('getNetwork', async () => {
@@ -201,31 +197,26 @@ export default defineBackground(() => {
 
   // Live reconciliation: read operator, persist + return fresh snapshot. Concurrent
   // callers (the popup's 15s poll racing a manual refresh, or another poll tick)
-  // join the same `getSessionWallet`/`ensureFreshVtxos` calls rather than each
+  // join the same session wallet build / `ensureFreshVtxos` calls rather than each
   // starting their own build or reconciliation. Those two steps are bounded inside
   // the runtime. The balance read below is not part of either, so it carries its
   // own timeout.
   onMessage('refreshWalletSnapshot', async () => {
     // Capture the network we're refreshing so we can tell, once the reads finish,
     // whether it moved underneath us.
-    const network = await getStoredNetwork();
-    const wallet = await getPopupWallet();
+    const context = await getPopupContext();
+    const { network, wallet } = context;
     // maxAgeMs 0 forces a real reconciliation: an explicit user-facing refresh must
     // not be answered from the freshness window, though it still joins a
     // reconciliation already in flight from another caller.
-    await ensureFreshVtxos(wallet, 0);
+    await ensureFreshVtxos(context, 0);
     const [address, boardingAddress, balance] = await withTimeout(
       Promise.all([getAddress(wallet), getBoardingAddress(wallet), getBalance(wallet)]),
       BALANCE_READ_TIMEOUT_MS,
       'balance read',
     );
 
-    if ((await getStoredNetwork()) !== network) {
-      // A network switch landed while this refresh was running. The wallet and
-      // reads above belong to the network we started on, not the current one, so
-      // they must never be written as the current per-network cache entry.
-      throw new Error('Network changed during refresh');
-    }
+    context.assertCurrent();
 
     const snapshot: WalletSnapshot = {
       network,
@@ -242,30 +233,30 @@ export default defineBackground(() => {
   // coin-control screen. Read-only; only public DTOs cross back. The shared wallet no
   // longer gets an implicit sync from construction, so ask for one before reading.
   onMessage('listCoins', async () => {
-    const wallet = await getPopupWallet();
-    await ensureFreshVtxos(wallet);
-    return listCoins(wallet);
+    const context = await getPopupContext();
+    await ensureFreshVtxos(context);
+    return listCoins(context.wallet);
   });
 
   // ── Off-chain send ─────────────────────────────────────────────────────────
-  // Gated on unlock via getPopupWallet (re-arms auto-lock). The SW validates
+  // Gated on unlock via getPopupContext (re-arms auto-lock). The SW validates
   // address + amount and signs; only the txid crosses back. A thrown
   // SendValidationError / 'LOCKED' / operator error reaches the popup as its message.
   // `data.outpoints` (coin control) restricts the send to an exact coin selection.
   onMessage('send', async ({ data }) => {
-    const wallet = await getPopupWallet();
-    await ensureFreshVtxos(wallet); // coin selection needs a live view of what's spendable
-    return send(wallet, data);
+    const context = await getPopupContext();
+    await ensureFreshVtxos(context); // coin selection needs a live view of what's spendable
+    return send(context, data);
   });
 
   onMessage('sendOnchain', async ({ data }) => {
-    const wallet = await getPopupWallet();
-    await ensureFreshVtxos(wallet); // coin selection needs a live view of what's spendable
-    return sendOnchain(wallet, data);
+    const context = await getPopupContext();
+    await ensureFreshVtxos(context); // coin selection needs a live view of what's spendable
+    return sendOnchain(context, data);
   });
 
   // ── Renewal + recovery + onboarding ────────────────────────────────────────
-  // All sign, so all go through getPopupWallet (unlock-gated; throws 'LOCKED').
+  // All sign, so all go through getPopupContext (unlock-gated; throws 'LOCKED').
   // renewNow and recoverNow both pick their coins by state, and both report back
   // how many they acted on. A stale cache makes them answer "nothing to do" when
   // there is something to do, so both reconcile first. They pass maxAgeMs 0 rather
@@ -273,22 +264,22 @@ export default defineBackground(() => {
   // at the operator right now. onboardNow is not in this list: it works on boarding
   // UTXOs read from the onchain provider, which ensureFreshVtxos does not touch.
   onMessage('renewNow', async () => {
-    const wallet = await getPopupWallet();
-    await ensureFreshVtxos(wallet, 0);
-    return renewExpiringVtxos(wallet, RENEW_MARGIN_MS);
+    const context = await getPopupContext();
+    await ensureFreshVtxos(context, 0);
+    return renewExpiringVtxos(context, RENEW_MARGIN_MS);
   });
 
   // Recover swept/already-expired coins — the operator re-issues them (distinct from
   // renewal, which only refreshes still-valid coins).
   onMessage('recoverNow', async () => {
-    const wallet = await getPopupWallet();
-    await ensureFreshVtxos(wallet, 0);
-    return recoverExpiredVtxos(wallet);
+    const context = await getPopupContext();
+    await ensureFreshVtxos(context, 0);
+    return recoverExpiredVtxos(context);
   });
 
   onMessage('onboardNow', async () => {
-    const wallet = await getPopupWallet();
-    return onboardBoarding(wallet);
+    const context = await getPopupContext();
+    return onboardBoarding(context);
   });
 
   // Read-only, safe while locked — just returns cached counts for the UI.
@@ -296,7 +287,10 @@ export default defineBackground(() => {
     return { warning: await getRenewalWarning() };
   });
 
-  onMessage('getTransactionHistory', async () => getTransactionHistory(await getPopupWallet()));
+  onMessage('getTransactionHistory', async () => {
+    const context = await getPopupContext();
+    return getTransactionHistory(context.wallet);
+  });
 
   // ── Lightning receive (reverse swap via Boltz) ─────────────────────────────
   // Safe while locked — reads Boltz's public fee/limit endpoints directly.
@@ -304,8 +298,7 @@ export default defineBackground(() => {
 
   // Unlock-gated: creating the swap runtime needs the wallet's claim key.
   onMessage('createLightningInvoice', async ({ data }) => {
-    await requirePopupSession();
-    return createInvoice(data);
+    return createInvoice(await getPopupContext(), data);
   });
 
   // Read-only poll; no unlock gate — works even before the singleton exists.
@@ -319,8 +312,7 @@ export default defineBackground(() => {
 
   // Unlock-gated: funding the swap's VHTLC signs an Arkade send.
   onMessage('payLightningInvoice', async ({ data }) => {
-    await requirePopupSession();
-    return payInvoice(data);
+    return payInvoice(await getPopupContext(), data);
   });
 
   // Read-only poll; no unlock gate — works even before the singleton exists.
@@ -335,29 +327,41 @@ export default defineBackground(() => {
   // any work. `connect` opens the approval window; the reads are grant + unlock gated
   // and return typed LOCKED/NOT_CONNECTED/BAD_ORIGIN the web app can handle.
 
-  onMessage('providerConnect', ({ sender }) => handleConnect(sender, getProviderWallet));
+  onMessage('providerConnect', ({ sender }) => handleConnect(sender, getProviderContext));
   onMessage('providerDisconnect', ({ sender }) => handleDisconnect(sender));
   onMessage('providerIsConnected', ({ sender }) => handleIsConnected(sender));
   onMessage('providerGetAccounts', ({ sender }) => handleGetAccounts(sender));
 
   onMessage('providerGetAddress', async ({ sender }) => {
     await requireRead(sender, 'getAddress');
-    return { address: await getAddress(await getProviderWallet()) };
+    const context = await getProviderContext();
+    const address = await getAddress(context.wallet);
+    context.assertCurrent();
+    return { address };
   });
 
   onMessage('providerGetBoardingAddress', async ({ sender }) => {
     await requireRead(sender, 'getBoardingAddress');
-    return { boardingAddress: await getBoardingAddress(await getProviderWallet()) };
+    const context = await getProviderContext();
+    const boardingAddress = await getBoardingAddress(context.wallet);
+    context.assertCurrent();
+    return { boardingAddress };
   });
 
   onMessage('providerGetPublicKey', async ({ sender }) => {
     await requireRead(sender, 'getPublicKey');
-    return getPublicKey(await getProviderWallet());
+    const context = await getProviderContext();
+    const publicKey = await getPublicKey(context.wallet);
+    context.assertCurrent();
+    return publicKey;
   });
 
   onMessage('providerGetBalance', async ({ sender }) => {
     await requireRead(sender, 'getBalance');
-    return getBalance(await getProviderWallet());
+    const context = await getProviderContext();
+    const balance = await getBalance(context.wallet);
+    context.assertCurrent();
+    return balance;
   });
 
   onMessage('providerGetNetwork', ({ sender }) => handleGetNetwork(sender));
@@ -365,10 +369,10 @@ export default defineBackground(() => {
   // Signing — never auto-granted by connect; each opens its own approval window. The SW
   // validates the request, signs only on approve, and returns only the public result.
   onMessage('providerSignMessage', ({ sender, data }) =>
-    handleSignMessage(sender, data.message, getProviderWallet),
+    handleSignMessage(sender, data.message, getProviderContext),
   );
   onMessage('providerSignPsbt', ({ sender, data }) =>
-    handleSignPsbt(sender, data, getProviderWallet),
+    handleSignPsbt(sender, data, getProviderContext),
   );
 
   // ── Approval window ↔ background (trusted extension page) ──────────────────

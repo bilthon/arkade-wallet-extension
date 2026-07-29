@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, vi } from 'vitest';
 import {
   SingleKey,
   VtxoScript,
@@ -8,6 +8,7 @@ import {
   BIP322,
 } from '@arkade-os/sdk';
 import { hex, base64 } from '@scure/base';
+import type { SessionContext } from './wallet-runtime';
 import {
   isSighashShaped,
   signMessageBIP322,
@@ -28,6 +29,15 @@ const otherKey = SingleKey.fromHex('33'.repeat(32));
 let O: Uint8Array;
 let U: Uint8Array;
 let X: Uint8Array;
+
+function context(identity = userKey, assertCurrent = () => {}): SessionContext {
+  return {
+    wallet: { identity } as never,
+    network: 'bitcoin',
+    epoch: 1,
+    assertCurrent,
+  };
+}
 
 beforeAll(async () => {
   O = await oKey.xOnlyPublicKey();
@@ -55,24 +65,24 @@ describe('isSighashShaped — blind-sign defence', () => {
 
 describe('signMessageBIP322', () => {
   it('rejects an empty message', async () => {
-    await expect(signMessageBIP322(userKey, '   ')).rejects.toMatchObject({
+    await expect(signMessageBIP322(context(), '   ')).rejects.toMatchObject({
       name: 'SignMessageError',
       code: 'EMPTY',
     });
   });
 
   it('rejects a sighash-shaped message (SIGHASH_SHAPED)', async () => {
-    await expect(signMessageBIP322(userKey, 'a'.repeat(64))).rejects.toMatchObject({
+    await expect(signMessageBIP322(context(), 'a'.repeat(64))).rejects.toMatchObject({
       code: 'SIGHASH_SHAPED',
     });
-    await expect(signMessageBIP322(userKey, 'a'.repeat(64))).rejects.toBeInstanceOf(
+    await expect(signMessageBIP322(context(), 'a'.repeat(64))).rejects.toBeInstanceOf(
       SignMessageError,
     );
   });
 
   it('signs a real human message and the signature verifies', async () => {
     const msg = 'Sign in to Example — nonce 12345';
-    const sig = await signMessageBIP322(userKey, msg);
+    const sig = await signMessageBIP322(context(), msg);
     expect(typeof sig).toBe('string');
     expect(sig.length).toBeGreaterThan(0);
     // round-trip verify against the user key's P2TR address
@@ -80,6 +90,17 @@ describe('signMessageBIP322', () => {
     expect(BIP322.verify(msg, sig, addr)).toBe(true);
     // and a different message does NOT verify under the same signature
     expect(BIP322.verify('a different message', sig, addr)).toBe(false);
+  });
+
+  it('rejects a stale context before invoking the BIP322 signer', async () => {
+    await expect(
+      signMessageBIP322(
+        context(userKey, () => {
+          throw new Error('LOCKED');
+        }),
+        'hello',
+      ),
+    ).rejects.toThrow('LOCKED');
   });
 });
 
@@ -91,8 +112,7 @@ describe('signPsbtPartial — adds only our sig, returns unfinalized', () => {
     const psbtB64 = buildEscrowSpendPsbt([O, U, X]);
 
     // wrap the user key as a minimal Wallet-like { identity }
-    const fakeWallet = { identity: userKey } as unknown as Parameters<typeof signPsbtPartial>[0];
-    const out = await signPsbtPartial(fakeWallet, psbtB64, [0]);
+    const out = await signPsbtPartial(context(), psbtB64, [0]);
 
     const signed = Transaction.fromPSBT(base64.decode(out), {
       allowUnknown: true,
@@ -104,6 +124,22 @@ describe('signPsbtPartial — adds only our sig, returns unfinalized', () => {
     expect(sigs.length).toBe(1); // only ours
     expect(hex.encode(sigs[0][0].pubKey)).toBe(hex.encode(U)); // and it IS ours
     expect(signed.isFinal).toBe(false); // UNFINALIZED — others co-sign next
+  });
+
+  it('rejects a stale context before invoking the identity signer', async () => {
+    const sign = vi.fn();
+    const psbt = buildEscrowSpendPsbt([O, U, X]);
+
+    await expect(
+      signPsbtPartial(
+        context({ sign } as never, () => {
+          throw new Error('LOCKED');
+        }),
+        psbt,
+        [0],
+      ),
+    ).rejects.toThrow('LOCKED');
+    expect(sign).not.toHaveBeenCalled();
   });
 });
 

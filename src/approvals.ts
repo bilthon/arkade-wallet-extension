@@ -23,6 +23,7 @@
  * persisted record is cleaned up on resolution or when a stale window is detected.
  */
 
+import type { NetworkName } from '@arkade-os/sdk';
 import type { PsbtSummary } from './psbt-inspect';
 
 export type ApprovalKind = 'connect' | 'signMessage' | 'signPsbt';
@@ -48,6 +49,8 @@ export interface PendingRequest {
   /** SW-derived origin (origin.ts). The approval UI shows THIS, verbatim. */
   origin: string;
   createdAt: number;
+  /** Public identity of the runtime session that originated this approval. */
+  session: { epoch: number; network: NetworkName };
   /** Kind-specific render data (the message / the PSBT summary). */
   payload: ApprovalPayload;
 }
@@ -117,6 +120,7 @@ export async function requestApproval(
   payload: ApprovalPayload,
   origin: string,
   openWindow: (request: PendingRequest) => Promise<number | null>,
+  session: PendingRequest['session'],
 ): Promise<ApprovalDecision> {
   if (inFlight) {
     throw new ApprovalError(
@@ -130,6 +134,7 @@ export async function requestApproval(
     kind: payload.kind,
     origin,
     createdAt: Date.now(),
+    session,
     payload,
   };
 

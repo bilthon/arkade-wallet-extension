@@ -1,6 +1,13 @@
 import { describe, it, expect, vi } from 'vitest';
-import type { ExtendedVirtualCoin, Wallet } from '@arkade-os/sdk';
-import { NETWORK_CONFIG, networkConfig, renewExpiringVtxos } from './wallet';
+import { ArkAddress, type ExtendedVirtualCoin, type Wallet } from '@arkade-os/sdk';
+import {
+  NETWORK_CONFIG,
+  networkConfig,
+  recoverExpiredVtxos,
+  renewExpiringVtxos,
+  send,
+} from './wallet';
+import type { SessionContext } from './wallet-runtime';
 
 /**
  * The network → operator/esplora/derivation mapping is the one piece
@@ -82,13 +89,91 @@ function mockWallet(vtxos: ExtendedVirtualCoin[]) {
   return { wallet, manager, calls };
 }
 
+function context(wallet: Wallet, assertCurrent: () => void = vi.fn()): SessionContext {
+  return { wallet, network: 'regtest', epoch: 1, assertCurrent };
+}
+
+const TARK = new ArkAddress(new Uint8Array(32).fill(2), new Uint8Array(32).fill(3), 'tark')
+  .encode();
+
+describe('wallet mutation authorization', () => {
+  it('does not start a normal send after its balance read invalidates the context', async () => {
+    let current = true;
+    const sendMutation = vi.fn();
+    const wallet = {
+      getBalance: vi.fn(async () => ({
+        boarding: { confirmed: 0, unconfirmed: 0, total: 0 },
+        settled: 10_000,
+        preconfirmed: 0,
+        available: 10_000,
+        recoverable: 0,
+        pendingRecovery: 0,
+        total: 10_000,
+        assets: [],
+      })),
+      getVtxos: vi.fn(async () => {
+        current = false;
+        return [];
+      }),
+      send: sendMutation,
+    } as unknown as Wallet;
+    const ctx = context(wallet, () => {
+      if (!current) throw new Error('LOCKED');
+    });
+
+    await expect(send(ctx, { address: TARK, amount: 1_000 })).rejects.toThrow('LOCKED');
+    expect(sendMutation).not.toHaveBeenCalled();
+  });
+
+  it('does not start a coin-control send after coin selection invalidates the context', async () => {
+    let current = true;
+    const sendBitcoin = vi.fn();
+    const selected = coin({ expiryMs: NOW + HOUR, txid: 'selected' });
+    const wallet = {
+      getVtxos: vi.fn(async () => {
+        current = false;
+        return [selected];
+      }),
+      sendBitcoin,
+    } as unknown as Wallet;
+    const ctx = context(wallet, () => {
+      if (!current) throw new Error('LOCKED');
+    });
+
+    await expect(
+      send(ctx, { address: TARK, amount: 1_000, outpoints: ['selected:0'] }),
+    ).rejects.toThrow('LOCKED');
+    expect(sendBitcoin).not.toHaveBeenCalled();
+  });
+
+  it('does not start recovery after its balance probe invalidates the context', async () => {
+    let current = true;
+    const recoverVtxos = vi.fn();
+    const wallet = {
+      getVtxoManager: vi.fn(async () => ({
+        getRecoverableBalance: vi.fn(async () => {
+          current = false;
+          return { vtxoCount: 1, recoverable: 5_000n };
+        }),
+        recoverVtxos,
+      })),
+    } as unknown as Wallet;
+    const ctx = context(wallet, () => {
+      if (!current) throw new Error('LOCKED');
+    });
+
+    await expect(recoverExpiredVtxos(ctx)).rejects.toThrow('LOCKED');
+    expect(recoverVtxos).not.toHaveBeenCalled();
+  });
+});
+
 describe('renewExpiringVtxos — recover-before-renew ordering', () => {
   it('recovers FIRST, then renews, when a poisoning coin coexists with a renewable one', async () => {
     const renewable = coin({ expiryMs: NOW + 5 * 60 * 1000, txid: 'soon' });
     const expired = coin({ expiryMs: NOW - HOUR, txid: 'expired' }); // poisons renew
     const { wallet, manager, calls } = mockWallet([renewable, expired]);
 
-    const res = await renewExpiringVtxos(wallet, MARGIN);
+    const res = await renewExpiringVtxos(context(wallet), MARGIN);
 
     expect(calls).toEqual(['recover', 'renew']); // order is load-bearing
     expect(manager.recoverVtxos).toHaveBeenCalledOnce();
@@ -103,7 +188,7 @@ describe('renewExpiringVtxos — recover-before-renew ordering', () => {
     const live = coin({ expiryMs: NOW + 5 * HOUR, txid: 'live' });
     const { wallet, manager, calls } = mockWallet([renewable, live]);
 
-    await renewExpiringVtxos(wallet, MARGIN);
+    await renewExpiringVtxos(context(wallet), MARGIN);
 
     expect(calls).toEqual(['renew']); // no recover round needed
     expect(manager.recoverVtxos).not.toHaveBeenCalled();
@@ -113,10 +198,23 @@ describe('renewExpiringVtxos — recover-before-renew ordering', () => {
     const expired = coin({ expiryMs: NOW - HOUR, txid: 'expired' });
     const { wallet, manager } = mockWallet([expired]);
 
-    const res = await renewExpiringVtxos(wallet, MARGIN);
+    const res = await renewExpiringVtxos(context(wallet), MARGIN);
 
     expect(res.renewed).toBe(0);
     expect(manager.recoverVtxos).not.toHaveBeenCalled();
+    expect(manager.renewVtxos).not.toHaveBeenCalled();
+  });
+
+  it('propagates LOCKED without starting a renewal round for a stale context', async () => {
+    const renewable = coin({ expiryMs: NOW + 5 * 60 * 1000, txid: 'soon' });
+    const { wallet, manager } = mockWallet([renewable]);
+    const assertCurrent = vi.fn(() => {
+      throw new Error('LOCKED');
+    });
+
+    await expect(renewExpiringVtxos(context(wallet, assertCurrent), MARGIN)).rejects.toThrow(
+      'LOCKED',
+    );
     expect(manager.renewVtxos).not.toHaveBeenCalled();
   });
 });

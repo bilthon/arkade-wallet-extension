@@ -13,11 +13,12 @@ vi.mock('./wallet', () => ({
 import {
   beginSessionLock,
   ensureFreshVtxos,
+  getSessionContext,
   getSessionNetwork,
-  getSessionWallet,
   invalidateSessionWallet,
   isUnlocked,
   openSession,
+  type SessionContext,
 } from './wallet-runtime';
 
 const MNEMONIC = 'runtime test mnemonic';
@@ -42,9 +43,9 @@ function fakeWallet(overrides: Record<string, unknown> = {}) {
   } as unknown as Wallet;
 }
 
-async function installWallet(wallet: Wallet): Promise<Wallet> {
+async function installContext(wallet: Wallet): Promise<SessionContext> {
   buildWalletMock.mockResolvedValueOnce(wallet);
-  return getSessionWallet();
+  return getSessionContext();
 }
 
 beforeEach(async () => {
@@ -83,20 +84,44 @@ describe('runtime session ownership', () => {
     const wallet = fakeWallet();
     buildWalletMock.mockResolvedValueOnce(wallet);
 
-    await expect(getSessionWallet()).resolves.toBe(wallet);
+    await expect(getSessionContext()).resolves.toMatchObject({ wallet });
 
     expect(buildWalletMock).toHaveBeenCalledWith(expect.any(SeedIdentity), 'regtest');
     expect(buildWalletMock.mock.calls[0][0]).not.toBe(temporarySeed);
   });
 
+  it('revokes a captured context when the session locks', async () => {
+    const context = await installContext(fakeWallet());
+
+    const transition = beginSessionLock();
+    expect(() => context.assertCurrent()).toThrow('LOCKED');
+    await transition.disposal;
+  });
+
+  it('revokes a captured context when the wallet is invalidated', async () => {
+    const context = await installContext(fakeWallet());
+
+    await invalidateSessionWallet();
+
+    expect(() => context.assertCurrent()).toThrow('LOCKED');
+  });
+
+  it('revokes a captured context when the same network is reopened', async () => {
+    const context = await installContext(fakeWallet());
+
+    await openSession(MNEMONIC, 'regtest');
+
+    expect(() => context.assertCurrent()).toThrow('LOCKED');
+  });
+
   it('revokes synchronously and is idempotent', async () => {
     const wallet = fakeWallet();
-    await installWallet(wallet);
+    await installContext(wallet);
 
     const first = beginSessionLock();
     expect(first.didLock).toBe(true);
     expect(isUnlocked()).toBe(false);
-    await expect(getSessionWallet()).rejects.toThrow('LOCKED');
+    await expect(getSessionContext()).rejects.toThrow('LOCKED');
     await first.disposal;
 
     const second = beginSessionLock();
@@ -106,17 +131,18 @@ describe('runtime session ownership', () => {
   });
 });
 
-describe('getSessionWallet', () => {
+describe('getSessionContext', () => {
   it('builds exactly once for concurrent callers', async () => {
     const wallet = fakeWallet();
     const gate = deferred<Wallet>();
     buildWalletMock.mockReturnValueOnce(gate.promise);
 
-    const first = getSessionWallet();
-    const second = getSessionWallet();
+    const first = getSessionContext();
+    const second = getSessionContext();
     gate.resolve(wallet);
 
-    await expect(Promise.all([first, second])).resolves.toEqual([wallet, wallet]);
+    const contexts = await Promise.all([first, second]);
+    expect(contexts.map((context) => context.wallet)).toEqual([wallet, wallet]);
     expect(buildWalletMock).toHaveBeenCalledOnce();
   });
 
@@ -124,8 +150,8 @@ describe('getSessionWallet', () => {
     const wallet = fakeWallet();
     buildWalletMock.mockResolvedValueOnce(wallet);
 
-    expect(await getSessionWallet()).toBe(wallet);
-    expect(await getSessionWallet()).toBe(wallet);
+    expect((await getSessionContext()).wallet).toBe(wallet);
+    expect((await getSessionContext()).wallet).toBe(wallet);
     expect(buildWalletMock).toHaveBeenCalledOnce();
   });
 
@@ -134,8 +160,8 @@ describe('getSessionWallet', () => {
     const wallet = fakeWallet();
     buildWalletMock.mockResolvedValueOnce(wallet);
 
-    await expect(getSessionWallet()).rejects.toThrow('operator unreachable');
-    await expect(getSessionWallet()).resolves.toBe(wallet);
+    await expect(getSessionContext()).rejects.toThrow('operator unreachable');
+    await expect(getSessionContext()).resolves.toMatchObject({ wallet });
     expect(buildWalletMock).toHaveBeenCalledTimes(2);
   });
 
@@ -143,14 +169,14 @@ describe('getSessionWallet', () => {
     vi.useFakeTimers();
     try {
       buildWalletMock.mockReturnValueOnce(new Promise<Wallet>(() => {}));
-      const timedOut = getSessionWallet();
+      const timedOut = getSessionContext();
       const assertion = expect(timedOut).rejects.toThrow(/timed out/i);
       await vi.advanceTimersByTimeAsync(8_000);
       await assertion;
 
       const wallet = fakeWallet();
       buildWalletMock.mockResolvedValueOnce(wallet);
-      await expect(getSessionWallet()).resolves.toBe(wallet);
+      await expect(getSessionContext()).resolves.toMatchObject({ wallet });
       expect(buildWalletMock).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
@@ -164,7 +190,7 @@ describe('getSessionWallet', () => {
       const gate = deferred<Wallet>();
       buildWalletMock.mockReturnValueOnce(gate.promise);
 
-      const timedOut = getSessionWallet();
+      const timedOut = getSessionContext();
       const assertion = expect(timedOut).rejects.toThrow(/timed out/i);
       await vi.advanceTimersByTimeAsync(8_000);
       await assertion;
@@ -184,7 +210,7 @@ describe('getSessionWallet', () => {
     const gate = deferred<Wallet>();
     buildWalletMock.mockReturnValueOnce(gate.promise);
 
-    const building = getSessionWallet();
+    const building = getSessionContext();
     await vi.waitFor(() => expect(buildWalletMock).toHaveBeenCalledOnce());
     const transition = beginSessionLock();
     expect(isUnlocked()).toBe(false);
@@ -200,30 +226,31 @@ describe('getSessionWallet', () => {
   it('keeps a new session build isolated from a late old build', async () => {
     const oldGate = deferred<Wallet>();
     buildWalletMock.mockReturnValueOnce(oldGate.promise);
-    const oldBuild = getSessionWallet();
+    const oldBuild = getSessionContext();
     await vi.waitFor(() => expect(buildWalletMock).toHaveBeenCalledOnce());
 
     await openSession(MNEMONIC, 'regtest');
     const newGate = deferred<Wallet>();
     buildWalletMock.mockReturnValueOnce(newGate.promise);
-    const newBuild = getSessionWallet();
+    const newBuild = getSessionContext();
     await vi.waitFor(() => expect(buildWalletMock).toHaveBeenCalledTimes(2));
 
     const late = fakeWallet();
     oldGate.resolve(late);
     await expect(oldBuild).rejects.toThrow('LOCKED');
 
-    const joiningCaller = getSessionWallet();
+    const joiningCaller = getSessionContext();
     const current = fakeWallet();
     newGate.resolve(current);
-    await expect(Promise.all([newBuild, joiningCaller])).resolves.toEqual([current, current]);
+    const contexts = await Promise.all([newBuild, joiningCaller]);
+    expect(contexts.map((context) => context.wallet)).toEqual([current, current]);
     expect(buildWalletMock).toHaveBeenCalledTimes(2);
     expect(late.dispose).toHaveBeenCalledOnce();
   });
 
   it('replaces the wallet and identity when a new network session opens', async () => {
     const oldWallet = fakeWallet();
-    await installWallet(oldWallet);
+    await installContext(oldWallet);
     const oldIdentity = buildWalletMock.mock.calls[0][0];
 
     await openSession(MNEMONIC, 'mutinynet');
@@ -232,28 +259,28 @@ describe('getSessionWallet', () => {
 
     const newWallet = fakeWallet();
     buildWalletMock.mockResolvedValueOnce(newWallet);
-    await expect(getSessionWallet()).resolves.toBe(newWallet);
+    await expect(getSessionContext()).resolves.toMatchObject({ wallet: newWallet });
     expect(buildWalletMock).toHaveBeenLastCalledWith(expect.any(SeedIdentity), 'mutinynet');
     expect(buildWalletMock.mock.calls[1][0]).not.toBe(oldIdentity);
   });
 
   it('does not retain a wallet whose disposal fails', async () => {
     const oldWallet = fakeWallet({ dispose: vi.fn(async () => Promise.reject(new Error('boom'))) });
-    await installWallet(oldWallet);
+    await installContext(oldWallet);
 
     await expect(invalidateSessionWallet()).resolves.toBeUndefined();
     const current = fakeWallet();
-    await expect(installWallet(current)).resolves.toBe(current);
+    await expect(installContext(current)).resolves.toMatchObject({ wallet: current });
   });
 
   it('keeps a disposed wallet dead for stale holders', async () => {
     const wallet = fakeWallet();
-    const held = await installWallet(wallet);
+    const held = await installContext(wallet);
 
     await invalidateSessionWallet();
 
-    await expect(held.getContractManager()).rejects.toThrow('LOCKED');
-    await expect(held.getVtxoManager()).rejects.toThrow('LOCKED');
+    await expect(held.wallet.getContractManager()).rejects.toThrow('LOCKED');
+    await expect(held.wallet.getVtxoManager()).rejects.toThrow('LOCKED');
     expect(wallet.dispose).toHaveBeenCalledOnce();
   });
 });
@@ -263,10 +290,10 @@ describe('ensureFreshVtxos', () => {
     const gate = deferred<void>();
     const refreshVtxos = vi.fn(() => gate.promise);
     const wallet = fakeWallet({ getContractManager: vi.fn(async () => ({ refreshVtxos })) });
-    await installWallet(wallet);
+    const context = await installContext(wallet);
 
-    const first = ensureFreshVtxos(wallet);
-    const second = ensureFreshVtxos(wallet);
+    const first = ensureFreshVtxos(context);
+    const second = ensureFreshVtxos(context);
     gate.resolve();
     await Promise.all([first, second]);
     expect(refreshVtxos).toHaveBeenCalledOnce();
@@ -277,9 +304,9 @@ describe('ensureFreshVtxos', () => {
     const first = fakeWallet({
       getContractManager: vi.fn(async () => ({ refreshVtxos: firstRefresh })),
     });
-    await installWallet(first);
-    await ensureFreshVtxos(first, 10_000);
-    await ensureFreshVtxos(first, 10_000);
+    const firstContext = await installContext(first);
+    await ensureFreshVtxos(firstContext, 10_000);
+    await ensureFreshVtxos(firstContext, 10_000);
     expect(firstRefresh).toHaveBeenCalledOnce();
 
     await invalidateSessionWallet();
@@ -287,8 +314,8 @@ describe('ensureFreshVtxos', () => {
     const second = fakeWallet({
       getContractManager: vi.fn(async () => ({ refreshVtxos: secondRefresh })),
     });
-    await installWallet(second);
-    await ensureFreshVtxos(second, 10_000);
+    const secondContext = await installContext(second);
+    await ensureFreshVtxos(secondContext, 10_000);
     expect(secondRefresh).toHaveBeenCalledOnce();
   });
 
@@ -298,10 +325,10 @@ describe('ensureFreshVtxos', () => {
       .mockRejectedValueOnce(new Error('indexer down'))
       .mockResolvedValueOnce(undefined);
     const wallet = fakeWallet({ getContractManager: vi.fn(async () => ({ refreshVtxos })) });
-    await installWallet(wallet);
+    const context = await installContext(wallet);
 
-    await expect(ensureFreshVtxos(wallet, 0)).rejects.toThrow('indexer down');
-    await expect(ensureFreshVtxos(wallet, 0)).resolves.toBeUndefined();
+    await expect(ensureFreshVtxos(context, 0)).rejects.toThrow('indexer down');
+    await expect(ensureFreshVtxos(context, 0)).resolves.toBeUndefined();
     expect(refreshVtxos).toHaveBeenCalledTimes(2);
   });
 
@@ -313,13 +340,13 @@ describe('ensureFreshVtxos', () => {
         .mockReturnValueOnce(new Promise<void>(() => {}))
         .mockResolvedValueOnce(undefined);
       const wallet = fakeWallet({ getContractManager: vi.fn(async () => ({ refreshVtxos })) });
-      await installWallet(wallet);
+      const context = await installContext(wallet);
 
-      const stuck = ensureFreshVtxos(wallet, 0);
+      const stuck = ensureFreshVtxos(context, 0);
       const assertion = expect(stuck).rejects.toThrow(/timed out/i);
       await vi.advanceTimersByTimeAsync(60_000);
       await assertion;
-      await expect(ensureFreshVtxos(wallet, 0)).resolves.toBeUndefined();
+      await expect(ensureFreshVtxos(context, 0)).resolves.toBeUndefined();
       expect(refreshVtxos).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
@@ -332,16 +359,16 @@ describe('ensureFreshVtxos', () => {
       const stalled = deferred<void>();
       const refreshVtxos = vi.fn().mockReturnValueOnce(stalled.promise).mockResolvedValue(undefined);
       const wallet = fakeWallet({ getContractManager: vi.fn(async () => ({ refreshVtxos })) });
-      await installWallet(wallet);
+      const context = await installContext(wallet);
 
-      const stuck = ensureFreshVtxos(wallet);
+      const stuck = ensureFreshVtxos(context);
       const assertion = expect(stuck).rejects.toThrow(/timed out/i);
       await vi.advanceTimersByTimeAsync(60_000);
       await assertion;
       stalled.resolve();
       await vi.advanceTimersByTimeAsync(0);
 
-      await ensureFreshVtxos(wallet);
+      await ensureFreshVtxos(context);
       expect(refreshVtxos).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
@@ -353,8 +380,8 @@ describe('ensureFreshVtxos', () => {
     const oldWallet = fakeWallet({
       getContractManager: vi.fn(async () => ({ refreshVtxos: vi.fn(() => gate.promise) })),
     });
-    await installWallet(oldWallet);
-    const inFlight = ensureFreshVtxos(oldWallet, 0);
+    const oldContext = await installContext(oldWallet);
+    const inFlight = ensureFreshVtxos(oldContext, 0);
     await vi.waitFor(() => expect(oldWallet.getContractManager).toHaveBeenCalled());
 
     await invalidateSessionWallet();
@@ -363,12 +390,30 @@ describe('ensureFreshVtxos', () => {
 
     const refreshVtxos = vi.fn(async () => {});
     const newWallet = fakeWallet({ getContractManager: vi.fn(async () => ({ refreshVtxos })) });
-    await installWallet(newWallet);
-    await ensureFreshVtxos(newWallet, 10_000);
+    const newContext = await installContext(newWallet);
+    await ensureFreshVtxos(newContext, 10_000);
     expect(refreshVtxos).toHaveBeenCalledOnce();
   });
 
-  it('rejects a wallet not owned by the current session', async () => {
-    await expect(ensureFreshVtxos(fakeWallet())).rejects.toThrow('LOCKED');
+  it('rejects a context not owned by the current session', async () => {
+    const stale = await installContext(fakeWallet());
+    await invalidateSessionWallet();
+
+    await expect(ensureFreshVtxos(stale)).rejects.toThrow('LOCKED');
+  });
+
+  it('does not refresh after invalidation while manager acquisition is pending', async () => {
+    const managerGate = deferred<{ refreshVtxos: () => Promise<void> }>();
+    const refreshVtxos = vi.fn(async () => {});
+    const wallet = fakeWallet({ getContractManager: vi.fn(() => managerGate.promise) });
+    const context = await installContext(wallet);
+
+    const inFlight = ensureFreshVtxos(context, 0);
+    await vi.waitFor(() => expect(wallet.getContractManager).toHaveBeenCalledOnce());
+    await invalidateSessionWallet();
+    managerGate.resolve({ refreshVtxos });
+
+    await expect(inFlight).rejects.toThrow('LOCKED');
+    expect(refreshVtxos).not.toHaveBeenCalled();
   });
 });
