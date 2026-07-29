@@ -64,7 +64,12 @@ import { handleSignMessage, handleSignPsbt } from './provider-handlers';
 import { grantConnect } from './permissions';
 import { setVault, setNetwork } from './storage';
 import { decodeProviderError } from './provider-api';
-import { resolveApproval, rejectApprovalForOrigin, currentInFlight } from './approvals';
+import {
+  resolveApproval,
+  rejectApprovalForOrigin,
+  rejectPendingApproval,
+  currentInFlight,
+} from './approvals';
 
 const HTTPS: MessageSenderLike = { origin: 'https://site.example' };
 
@@ -193,6 +198,18 @@ describe('handleSignMessage', () => {
     const pending = await waitForPending();
     await resolveApproval(pending.requestId, { approved: false });
     await expect(promise).rejects.toSatisfy((e: unknown) => codeOf(e) === 'REJECTED');
+  });
+
+  it('surfaces LOCKED and never signs when session lock cancels the approval', async () => {
+    const sign = vi.spyOn(userKey, 'sign');
+    const promise = handleSignMessage(HTTPS, 'hello', buildWallet);
+    await waitForPending();
+
+    await rejectPendingApproval('Wallet locked after inactivity.');
+
+    await expect(promise).rejects.toSatisfy((e: unknown) => codeOf(e) === 'LOCKED');
+    expect(sign).not.toHaveBeenCalled();
+    sign.mockRestore();
   });
 
   it('rejects when the wallet session changes while resolving the approval', async () => {

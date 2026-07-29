@@ -380,7 +380,7 @@ describe('getSwaps — singleton lifecycle', () => {
     const a = await getSwaps();
     const staleWallet = state.createArkadeSwaps.mock.calls[0][0].wallet;
 
-    // The real onLock/switchNetwork handlers invalidate the wallet before disposing
+    // The real lock/switchNetwork handlers invalidate the wallet before disposing
     // the swap runtime; mirror that order here.
     await invalidateSessionWallet();
     await disposeSwaps();
@@ -554,7 +554,7 @@ describe('getSwaps / payInvoice — sharing the session Arkade wallet', () => {
     // Counting turns would silently run out if `createRuntime` ever grew another await.
     await vi.waitFor(() => expect(state.walletBuildCount).toBe(1));
 
-    // The real onLock/switchNetwork handlers fire both calls in the same
+    // The real lock/switchNetwork handlers fire both calls in the same
     // synchronous tick, invalidating the wallet before disposing the swap
     // runtime. Mirror that: no await between the two, so nothing can run in
     // between them, then wait for both together.

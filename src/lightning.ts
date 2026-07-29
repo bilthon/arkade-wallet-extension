@@ -130,12 +130,12 @@ async function createRuntime(gen: number): Promise<ArkadeSwaps> {
 }
 
 /**
- * Called from onLock and switchNetwork. Safe to call when nothing is up.
+ * Called from the lock coordinator and switchNetwork. Safe to call when nothing is up.
  *
  * Bumps `generation` FIRST, before touching any other state — this is what
  * lets an in-flight `createRuntime` build (started before this call) detect,
  * once it resolves, that it's now stale and dispose itself instead of
- * outliving the seed it was built from.
+ * outliving the identity it was built from.
  *
  * `ArkadeSwaps.dispose()` only stops the SwapManager (WebSocket + timers) — it
  * does NOT close the swap repository's IndexedDB connection, and neither do

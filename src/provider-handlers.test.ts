@@ -66,6 +66,7 @@ import {
   revokeSite,
   resolveApproval,
 } from './provider-handlers';
+import { rejectPendingApproval } from './approvals';
 import { setVault, setNetwork } from './storage';
 import { isMethodGranted } from './permissions';
 import { decodeProviderError } from './provider-api';
@@ -88,8 +89,12 @@ const fakeWallet = () =>
 /** Drive a connect to approval, auto-approving via resolveApproval. */
 async function connectApproving(s: MessageSenderLike) {
   const promise = handleConnect(s, fakeWallet);
-  // Let requestApproval persist + open the window, then approve.
-  for (let i = 0; i < 6; i++) await Promise.resolve();
+  // A real response can only arrive after the approval window exists. Wait for both
+  // halves instead of resolving directly from an early storage write.
+  await vi.waitFor(() => {
+    expect(browserMock.windows.create).toHaveBeenCalled();
+    expect(session.get('pendingApproval')).toBeTruthy();
+  });
   const pending = session.get('pendingApproval') as { requestId: string } | undefined;
   if (pending) await resolveApproval(pending.requestId, { approved: true });
   return promise;
@@ -148,10 +153,20 @@ describe('handleConnect — approval + grant', () => {
 
   it('rejects with REJECTED when the user declines', async () => {
     const promise = handleConnect(HTTPS, fakeWallet);
-    for (let i = 0; i < 6; i++) await Promise.resolve();
+    await vi.waitFor(() => expect(browserMock.windows.create).toHaveBeenCalled());
     const pending = session.get('pendingApproval') as { requestId: string };
     await resolveApproval(pending.requestId, { approved: false });
     await expect(promise).rejects.toSatisfy((e: unknown) => codeOf(e) === 'REJECTED');
+  });
+
+  it('rejects with LOCKED when session lock cancels the pending connect', async () => {
+    const promise = handleConnect(HTTPS, fakeWallet);
+    await vi.waitFor(() => expect(browserMock.windows.create).toHaveBeenCalled());
+
+    await rejectPendingApproval('Wallet locked by the user.');
+
+    await expect(promise).rejects.toSatisfy((e: unknown) => codeOf(e) === 'LOCKED');
+    expect(await isMethodGranted('https://site.example', 'getBalance')).toBe(false);
   });
 
   it('is idempotent — a second connect from an already-granted origin does not re-prompt', async () => {

@@ -68,7 +68,7 @@ export interface ProtocolMap {
 
   // ─── Off-chain send (the first write/spend path) ───────────────────────────
   /**
-   * In-wallet off-chain Arkade→Arkade send. Gated on unlock (`requireWallet`).
+   * In-wallet off-chain Arkade→Arkade send. Gated on a live popup wallet session.
    * The SW validates the address (well-formed Arkade address for the ACTIVE
    * network — rejects on-chain/malformed/cross-network) and the amount (integer,
    * > 0, ≥ dust, ≤ live available balance) BEFORE signing, then calls the SDK's

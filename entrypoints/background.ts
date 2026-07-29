@@ -1,17 +1,19 @@
-import type { Wallet } from '@arkade-os/sdk';
 import { onMessage } from '@/src/messaging';
 import {
-  registerAutoLock,
-  armAutoLock,
   getLockState,
   createWallet,
   importWallet,
   unlock,
-  lock,
-  onLock,
   getMnemonicForBackup,
   prepareNetworkSwitch,
 } from '@/src/keystore';
+import { armAutoLock, registerAutoLock } from '@/src/auto-lock';
+import { lockWallet } from '@/src/session-lock';
+import {
+  getPopupWallet,
+  getProviderWallet,
+  requirePopupSession,
+} from '@/src/session-access';
 import { hasVault, getNetwork as getStoredNetwork } from '@/src/storage';
 import {
   getAddress,
@@ -27,7 +29,6 @@ import {
   getTransactionHistory,
 } from '@/src/wallet';
 import {
-  getSessionWallet,
   invalidateSessionWallet,
   ensureFreshVtxos,
   isUnlocked,
@@ -96,21 +97,9 @@ const BALANCE_READ_TIMEOUT_MS = 8_000;
  */
 export default defineBackground(() => {
   // Arm the idle auto-lock alarm handler (Strict posture).
-  registerAutoLock();
+  registerAutoLock(() => void lockWallet('idle'));
   // Arm the recurring VTXO-renewal alarm (renew-while-unlocked fallback).
   registerRenewal();
-  // On lock (manual or auto), notify connected sites their session ended.
-  // Reads need the wallet unlocked, so a lock effectively disconnects them.
-  onLock(() => {
-    void emitToAllConnected('disconnect');
-    // Neither the session wallet nor the Lightning swap runtime may outlive the seed
-    // they were built from. `invalidateSessionWallet` disposes the wallet's contract
-    // manager/watcher; without also dropping the Lightning runtime here, a surviving
-    // `ArkadeSwaps` would silently rebuild them on its next call.
-    void invalidateSessionWallet();
-    void disposeSwaps();
-  });
-
   // ── Messaging smoke-test (proves the provider→content→background chain) ──────
   onMessage('ping', ({ data }) => {
     return { pong: true as const, timestamp: Date.now(), echo: data?.echo };
@@ -122,16 +111,19 @@ export default defineBackground(() => {
 
   onMessage('createWallet', async ({ data }) => {
     const mnemonic = await createWallet(data.password, data.strength);
+    await armNewSession();
     return { mnemonic };
   });
 
   onMessage('importWallet', async ({ data }) => {
     await importWallet(data.mnemonic, data.password);
+    await armNewSession();
     return { ok: true as const };
   });
 
   onMessage('unlock', async ({ data }) => {
     await unlock(data.password);
+    await armNewSession();
     // Lightning reconcile is best-effort recovery, not part of unlocking itself —
     // a swap-repo read failure must never stop a correct password from unlocking.
     try {
@@ -148,7 +140,7 @@ export default defineBackground(() => {
   });
 
   onMessage('lock', async () => {
-    await lock();
+    await lockWallet('manual');
     return { ok: true as const };
   });
 
@@ -170,6 +162,7 @@ export default defineBackground(() => {
     void invalidateSessionWallet();
     void disposeSwaps();
     await prepared.commit();
+    if (isUnlocked()) await armNewSession();
     // Invalidate again: anything that started building during the write (a race, not
     // the common case) must not survive into the new network either.
     void invalidateSessionWallet();
@@ -182,17 +175,17 @@ export default defineBackground(() => {
 
   // ── Read methods (public results only) ─────────────────────────────────────
   onMessage('getAddress', async () => {
-    const wallet = await requireWallet();
+    const wallet = await getPopupWallet();
     return { address: await getAddress(wallet) };
   });
 
   onMessage('getBoardingAddress', async () => {
-    const wallet = await requireWallet();
+    const wallet = await getPopupWallet();
     return { boardingAddress: await getBoardingAddress(wallet) };
   });
 
   onMessage('getBalance', async () => {
-    const wallet = await requireWallet();
+    const wallet = await getPopupWallet();
     return getBalance(wallet);
   });
 
@@ -216,7 +209,7 @@ export default defineBackground(() => {
     // Capture the network we're refreshing so we can tell, once the reads finish,
     // whether it moved underneath us.
     const network = await getStoredNetwork();
-    const wallet = await requireWallet();
+    const wallet = await getPopupWallet();
     // maxAgeMs 0 forces a real reconciliation: an explicit user-facing refresh must
     // not be answered from the freshness window, though it still joins a
     // reconciliation already in flight from another caller.
@@ -249,30 +242,30 @@ export default defineBackground(() => {
   // coin-control screen. Read-only; only public DTOs cross back. The shared wallet no
   // longer gets an implicit sync from construction, so ask for one before reading.
   onMessage('listCoins', async () => {
-    const wallet = await requireWallet();
+    const wallet = await getPopupWallet();
     await ensureFreshVtxos(wallet);
     return listCoins(wallet);
   });
 
   // ── Off-chain send ─────────────────────────────────────────────────────────
-  // Gated on unlock via requireWallet (re-arms auto-lock). The SW validates
+  // Gated on unlock via getPopupWallet (re-arms auto-lock). The SW validates
   // address + amount and signs; only the txid crosses back. A thrown
   // SendValidationError / 'LOCKED' / operator error reaches the popup as its message.
   // `data.outpoints` (coin control) restricts the send to an exact coin selection.
   onMessage('send', async ({ data }) => {
-    const wallet = await requireWallet();
+    const wallet = await getPopupWallet();
     await ensureFreshVtxos(wallet); // coin selection needs a live view of what's spendable
     return send(wallet, data);
   });
 
   onMessage('sendOnchain', async ({ data }) => {
-    const wallet = await requireWallet();
+    const wallet = await getPopupWallet();
     await ensureFreshVtxos(wallet); // coin selection needs a live view of what's spendable
     return sendOnchain(wallet, data);
   });
 
   // ── Renewal + recovery + onboarding ────────────────────────────────────────
-  // All sign, so all go through requireWallet (unlock-gated; throws 'LOCKED').
+  // All sign, so all go through getPopupWallet (unlock-gated; throws 'LOCKED').
   // renewNow and recoverNow both pick their coins by state, and both report back
   // how many they acted on. A stale cache makes them answer "nothing to do" when
   // there is something to do, so both reconcile first. They pass maxAgeMs 0 rather
@@ -280,7 +273,7 @@ export default defineBackground(() => {
   // at the operator right now. onboardNow is not in this list: it works on boarding
   // UTXOs read from the onchain provider, which ensureFreshVtxos does not touch.
   onMessage('renewNow', async () => {
-    const wallet = await requireWallet();
+    const wallet = await getPopupWallet();
     await ensureFreshVtxos(wallet, 0);
     return renewExpiringVtxos(wallet, RENEW_MARGIN_MS);
   });
@@ -288,13 +281,13 @@ export default defineBackground(() => {
   // Recover swept/already-expired coins — the operator re-issues them (distinct from
   // renewal, which only refreshes still-valid coins).
   onMessage('recoverNow', async () => {
-    const wallet = await requireWallet();
+    const wallet = await getPopupWallet();
     await ensureFreshVtxos(wallet, 0);
     return recoverExpiredVtxos(wallet);
   });
 
   onMessage('onboardNow', async () => {
-    const wallet = await requireWallet();
+    const wallet = await getPopupWallet();
     return onboardBoarding(wallet);
   });
 
@@ -303,7 +296,7 @@ export default defineBackground(() => {
     return { warning: await getRenewalWarning() };
   });
 
-  onMessage('getTransactionHistory', async () => getTransactionHistory(await requireWallet()));
+  onMessage('getTransactionHistory', async () => getTransactionHistory(await getPopupWallet()));
 
   // ── Lightning receive (reverse swap via Boltz) ─────────────────────────────
   // Safe while locked — reads Boltz's public fee/limit endpoints directly.
@@ -311,7 +304,7 @@ export default defineBackground(() => {
 
   // Unlock-gated: creating the swap runtime needs the wallet's claim key.
   onMessage('createLightningInvoice', async ({ data }) => {
-    await requireUnlocked();
+    await requirePopupSession();
     return createInvoice(data);
   });
 
@@ -326,7 +319,7 @@ export default defineBackground(() => {
 
   // Unlock-gated: funding the swap's VHTLC signs an Arkade send.
   onMessage('payLightningInvoice', async ({ data }) => {
-    await requireUnlocked();
+    await requirePopupSession();
     return payInvoice(data);
   });
 
@@ -342,29 +335,29 @@ export default defineBackground(() => {
   // any work. `connect` opens the approval window; the reads are grant + unlock gated
   // and return typed LOCKED/NOT_CONNECTED/BAD_ORIGIN the web app can handle.
 
-  onMessage('providerConnect', ({ sender }) => handleConnect(sender, requireWallet));
+  onMessage('providerConnect', ({ sender }) => handleConnect(sender, getProviderWallet));
   onMessage('providerDisconnect', ({ sender }) => handleDisconnect(sender));
   onMessage('providerIsConnected', ({ sender }) => handleIsConnected(sender));
   onMessage('providerGetAccounts', ({ sender }) => handleGetAccounts(sender));
 
   onMessage('providerGetAddress', async ({ sender }) => {
     await requireRead(sender, 'getAddress');
-    return { address: await getAddress(await requireWallet()) };
+    return { address: await getAddress(await getProviderWallet()) };
   });
 
   onMessage('providerGetBoardingAddress', async ({ sender }) => {
     await requireRead(sender, 'getBoardingAddress');
-    return { boardingAddress: await getBoardingAddress(await requireWallet()) };
+    return { boardingAddress: await getBoardingAddress(await getProviderWallet()) };
   });
 
   onMessage('providerGetPublicKey', async ({ sender }) => {
     await requireRead(sender, 'getPublicKey');
-    return getPublicKey(await requireWallet());
+    return getPublicKey(await getProviderWallet());
   });
 
   onMessage('providerGetBalance', async ({ sender }) => {
     await requireRead(sender, 'getBalance');
-    return getBalance(await requireWallet());
+    return getBalance(await getProviderWallet());
   });
 
   onMessage('providerGetNetwork', ({ sender }) => handleGetNetwork(sender));
@@ -372,9 +365,11 @@ export default defineBackground(() => {
   // Signing — never auto-granted by connect; each opens its own approval window. The SW
   // validates the request, signs only on approve, and returns only the public result.
   onMessage('providerSignMessage', ({ sender, data }) =>
-    handleSignMessage(sender, data.message, requireWallet),
+    handleSignMessage(sender, data.message, getProviderWallet),
   );
-  onMessage('providerSignPsbt', ({ sender, data }) => handleSignPsbt(sender, data, requireWallet));
+  onMessage('providerSignPsbt', ({ sender, data }) =>
+    handleSignPsbt(sender, data, getProviderWallet),
+  );
 
   // ── Approval window ↔ background (trusted extension page) ──────────────────
   onMessage('getApprovalRequest', async ({ data }) => {
@@ -404,26 +399,12 @@ export default defineBackground(() => {
   console.log('[arkade] background ready');
 });
 
-/**
- * Throw if locked, otherwise re-arm auto-lock so an active session keeps the
- * idle window fresh. Throwing 'LOCKED' lets the popup route to the unlock
- * screen rather than show a broken read. Used by the Lightning handlers, which
- * need a live runtime session but acquire their wallet internally.
- */
-async function requireUnlocked(): Promise<void> {
-  if (!isUnlocked()) throw new Error('LOCKED');
-  await armAutoLock();
-}
-
-/**
- * The shared session wallet, or throw if locked. Re-arms auto-lock first so an
- * active session keeps the idle window fresh — every route through here counts
- * as user activity. No seed or network re-derivation happens at this call site;
- * `getSessionWallet()` owns both, so a lock or network switch racing this call
- * is caught there rather than re-implemented here.
- */
-async function requireWallet(): Promise<Wallet> {
-  if (!isUnlocked()) throw new Error('LOCKED');
-  await armAutoLock();
-  return getSessionWallet();
+/** A new live identity must never remain unlocked without an idle deadline. */
+async function armNewSession(): Promise<void> {
+  try {
+    await armAutoLock();
+  } catch (err) {
+    await lockWallet('idle');
+    throw err;
+  }
 }

@@ -1,6 +1,6 @@
 import { decryptVault, encryptVault, generateMnemonic, validateMnemonic } from './crypto';
 import { getNetwork, getVault, hasVault, setVault, setVaultAndNetwork } from './storage';
-import { beginSessionLock, isUnlocked, openSession } from './wallet-runtime';
+import { isUnlocked, openSession } from './wallet-runtime';
 import { clearSnapshot } from './wallet-cache';
 import type { NetworkName } from '@arkade-os/sdk';
 
@@ -12,21 +12,6 @@ import type { NetworkName } from '@arkade-os/sdk';
  * which constructs the live identity and owns unlock state. No plaintext mnemonic or raw
  * seed is retained here.
  */
-
-// Observers notified AFTER the wallet locks (manual, auto, or any future path). The
-// background uses this to emit a `disconnect` provider event to connected web apps so a
-// lock drops their session — without the keystore importing the web app layer (one-way
-// dependency: web app-handlers depends on keystore, never the reverse).
-const lockListeners = new Set<() => void>();
-
-/** Register a callback fired after each successful `lock()`. Returns an unsubscribe. */
-export function onLock(listener: () => void): () => void {
-  lockListeners.add(listener);
-  return () => lockListeners.delete(listener);
-}
-
-const ALARM_AUTO_LOCK = 'arkade:auto-lock';
-const DEFAULT_AUTO_LOCK_MINUTES = 10;
 
 /**
  * Lock state for the popup router. `hasVault` decides welcome-vs-unlock; `unlocked`
@@ -100,7 +85,7 @@ export async function prepareNetworkSwitch(
       await clearSnapshot(); // per-network address/balance cache — drop the old one
       // We proved the password and hold the mnemonic → keep it unlocked under the new
       // network rather than forcing a re-unlock. If it was locked, stay locked.
-      if (isUnlocked()) await openRuntimeSession(mnemonic, newNetwork);
+      if (isUnlocked()) await openSession(mnemonic, newNetwork);
     },
   };
 }
@@ -121,7 +106,7 @@ export async function createWallet(
   const mnemonic = generateMnemonic(strength);
   const network = await getNetwork();
   await setVault(await encryptVault(mnemonic, password, network));
-  await openRuntimeSession(mnemonic, network);
+  await openSession(mnemonic, network);
   return mnemonic;
 }
 
@@ -131,10 +116,10 @@ export async function importWallet(mnemonic: string, password: string): Promise<
   if (!validateMnemonic(mnemonic)) throw new Error('importWallet: invalid mnemonic');
   const network = await getNetwork();
   await setVault(await encryptVault(mnemonic, password, network));
-  await openRuntimeSession(mnemonic, network);
+  await openSession(mnemonic, network);
 }
 
-// ─── Lock / unlock ───────────────────────────────────────────────────────────
+// ─── Unlock ──────────────────────────────────────────────────────────────────
 
 /**
  * Unlock by decrypting the stored vault. A wrong password (or a tampered vault)
@@ -146,53 +131,5 @@ export async function unlock(password: string): Promise<void> {
   if (!blob) throw new Error('unlock: no vault');
   const network = await getNetwork();
   const mnemonic = await decryptVault(blob, password, network); // throws on bad password/tamper
-  await openRuntimeSession(mnemonic, network);
-}
-
-/**
- * Lock the runtime synchronously, then perform the listener and alarm cleanup. These
- * policy concerns remain here only until the dedicated lifecycle coordinator takes over.
- */
-export async function lock(): Promise<void> {
-  const transition = beginSessionLock();
-  await browser.alarms.clear(ALARM_AUTO_LOCK);
-  await transition.disposal;
-  if (!transition.didLock) return;
-  // Notify observers (the background emits `disconnect` to connected web apps). Listener
-  // errors must not break the lock — swallow them.
-  for (const listener of [...lockListeners]) {
-    try {
-      listener();
-    } catch {
-      /* a faulty observer must never prevent locking */
-    }
-  }
-}
-
-/** Install the runtime identity locally, dispose any prior wallet, and arm auto-lock. */
-function openRuntimeSession(mnemonic: string, network: NetworkName): Promise<void> {
-  const disposal = openSession(mnemonic, network);
-  return Promise.all([disposal, armAutoLock()]).then(() => undefined);
-}
-
-// ─── Auto-lock (chrome.alarms) ───────────────────────────────────────────────
-
-/**
- * (Re)arm the idle auto-lock alarm. Call on unlock and on each sensitive action to
- * reset the idle window. `chrome.alarms` is the only timer that survives the SW
- * being suspended; if the SW is killed first, the live identity is already gone so the
- * effect — a locked wallet — is the same.
- */
-export async function armAutoLock(minutes: number = DEFAULT_AUTO_LOCK_MINUTES): Promise<void> {
-  await browser.alarms.create(ALARM_AUTO_LOCK, { delayInMinutes: minutes });
-}
-
-/**
- * Register the auto-lock handler. Call once from the background entrypoint. Locks
- * the wallet when the idle alarm fires.
- */
-export function registerAutoLock(): void {
-  browser.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === ALARM_AUTO_LOCK) void lock();
-  });
+  await openSession(mnemonic, network);
 }

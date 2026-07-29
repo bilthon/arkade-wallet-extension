@@ -30,11 +30,6 @@ const browserMock = {
       remove: vi.fn(async (key: string) => void session.delete(key)),
     },
   },
-  alarms: {
-    create: vi.fn(async () => {}),
-    clear: vi.fn(async () => {}),
-    onAlarm: { addListener: vi.fn() },
-  },
 };
 vi.stubGlobal('browser', browserMock);
 
@@ -44,11 +39,15 @@ const runtime = await import('./wallet-runtime');
 
 const PASSWORD = 'correct horse battery staple';
 
+async function resetRuntime(): Promise<void> {
+  await runtime.beginSessionLock().disposal;
+}
+
 describe('keystore handler round-trip (boundary)', () => {
   beforeEach(async () => {
     local.clear();
     session.clear();
-    await keystore.lock(); // ensure clean in-memory state between cases
+    await resetRuntime();
   });
 
   it('create → runtime unlocked, vault persisted, nothing written to session storage', async () => {
@@ -67,7 +66,7 @@ describe('keystore handler round-trip (boundary)', () => {
 
   it('lock revokes the runtime wallet while retaining the encrypted vault', async () => {
     await keystore.createWallet(PASSWORD);
-    await keystore.lock();
+    await resetRuntime();
     expect(runtime.isUnlocked()).toBe(false);
     await expect(runtime.getSessionWallet()).rejects.toThrow('LOCKED');
     expect([...session.entries()]).toEqual([]);
@@ -81,7 +80,7 @@ describe('keystore handler round-trip (boundary)', () => {
     expect(runtime.isUnlocked()).toBe(true);
     expect([...session.entries()]).toEqual([]);
 
-    await keystore.lock();
+    await resetRuntime();
     await keystore.unlock(PASSWORD);
     expect(runtime.isUnlocked()).toBe(true);
     expect([...session.entries()]).toEqual([]);
@@ -99,7 +98,7 @@ describe('prepareNetworkSwitch', () => {
   beforeEach(async () => {
     local.clear();
     session.clear();
-    await keystore.lock();
+    await resetRuntime();
   });
 
   it('switches network: vault decryptable under new network, stored network updated', async () => {
@@ -117,7 +116,7 @@ describe('prepareNetworkSwitch', () => {
     expect(local.get('network')).toBe('mutinynet');
 
     // unlock succeeds under the new network (vault was re-encrypted under mutinynet AAD).
-    await keystore.lock();
+    await resetRuntime();
     await expect(keystore.unlock(PASSWORD)).resolves.not.toThrow();
     expect(runtime.isUnlocked()).toBe(true);
     expect(runtime.getSessionNetwork()).toBe('mutinynet');
@@ -187,7 +186,7 @@ describe('prepareNetworkSwitch', () => {
     await keystore.createWallet(PASSWORD);
     const prepared = await keystore.prepareNetworkSwitch('mutinynet', PASSWORD);
 
-    await keystore.lock();
+    await resetRuntime();
     await prepared!.commit();
 
     expect(runtime.isUnlocked()).toBe(false);

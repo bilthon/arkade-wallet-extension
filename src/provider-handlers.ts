@@ -160,6 +160,9 @@ async function requestApprovalSafe(payload: ApprovalPayload, origin: string) {
     if (err instanceof Error && 'code' in err && (err as { code?: string }).code === 'BUSY') {
       providerError('BUSY', 'Another approval is already open. Try again in a moment.');
     }
+    if (err instanceof Error && 'code' in err && (err as { code?: string }).code === 'LOCKED') {
+      providerError('LOCKED', err.message);
+    }
     // A rejected pending request (revoke/close) reaches here too — surface as REJECTED.
     providerError('REJECTED', err instanceof Error ? err.message : 'Request was cancelled.');
   }
