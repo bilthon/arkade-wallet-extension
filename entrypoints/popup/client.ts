@@ -3,8 +3,9 @@ import type { NetworkName } from '@arkade-os/sdk';
 
 /**
  * Thin popup → background client. Every call is a typed `sendMessage` to the SW
- * (the only place the seed/wallet live). The popup itself holds no secrets and
- * builds no wallet — it renders results.
+ * (the only place the live signing identity and wallet exist). The popup builds no
+ * wallet and retains no signing capability; create/import/backup screens handle a
+ * mnemonic only for their explicit user-facing flow.
  */
 export const client = {
   hasVault: () => sendMessage('hasVault', undefined),

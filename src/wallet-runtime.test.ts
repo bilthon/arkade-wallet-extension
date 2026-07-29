@@ -15,7 +15,6 @@ import {
   ensureFreshVtxos,
   getSessionContext,
   getSessionNetwork,
-  invalidateSessionWallet,
   isUnlocked,
   openSession,
   type SessionContext,
@@ -96,14 +95,6 @@ describe('runtime session ownership', () => {
     const transition = beginSessionLock();
     expect(() => context.assertCurrent()).toThrow('LOCKED');
     await transition.disposal;
-  });
-
-  it('revokes a captured context when the wallet is invalidated', async () => {
-    const context = await installContext(fakeWallet());
-
-    await invalidateSessionWallet();
-
-    expect(() => context.assertCurrent()).toThrow('LOCKED');
   });
 
   it('revokes a captured context when the same network is reopened', async () => {
@@ -268,7 +259,7 @@ describe('getSessionContext', () => {
     const oldWallet = fakeWallet({ dispose: vi.fn(async () => Promise.reject(new Error('boom'))) });
     await installContext(oldWallet);
 
-    await expect(invalidateSessionWallet()).resolves.toBeUndefined();
+    await expect(openSession(MNEMONIC, 'regtest')).resolves.toBeUndefined();
     const current = fakeWallet();
     await expect(installContext(current)).resolves.toMatchObject({ wallet: current });
   });
@@ -277,7 +268,7 @@ describe('getSessionContext', () => {
     const wallet = fakeWallet();
     const held = await installContext(wallet);
 
-    await invalidateSessionWallet();
+    await openSession(MNEMONIC, 'regtest');
 
     await expect(held.wallet.getContractManager()).rejects.toThrow('LOCKED');
     await expect(held.wallet.getVtxoManager()).rejects.toThrow('LOCKED');
@@ -309,7 +300,7 @@ describe('ensureFreshVtxos', () => {
     await ensureFreshVtxos(firstContext, 10_000);
     expect(firstRefresh).toHaveBeenCalledOnce();
 
-    await invalidateSessionWallet();
+    await openSession(MNEMONIC, 'regtest');
     const secondRefresh = vi.fn(async () => {});
     const second = fakeWallet({
       getContractManager: vi.fn(async () => ({ refreshVtxos: secondRefresh })),
@@ -384,7 +375,7 @@ describe('ensureFreshVtxos', () => {
     const inFlight = ensureFreshVtxos(oldContext, 0);
     await vi.waitFor(() => expect(oldWallet.getContractManager).toHaveBeenCalled());
 
-    await invalidateSessionWallet();
+    await openSession(MNEMONIC, 'regtest');
     gate.resolve();
     await inFlight;
 
@@ -397,12 +388,12 @@ describe('ensureFreshVtxos', () => {
 
   it('rejects a context not owned by the current session', async () => {
     const stale = await installContext(fakeWallet());
-    await invalidateSessionWallet();
+    await openSession(MNEMONIC, 'regtest');
 
     await expect(ensureFreshVtxos(stale)).rejects.toThrow('LOCKED');
   });
 
-  it('does not refresh after invalidation while manager acquisition is pending', async () => {
+  it('does not refresh after session replacement while manager acquisition is pending', async () => {
     const managerGate = deferred<{ refreshVtxos: () => Promise<void> }>();
     const refreshVtxos = vi.fn(async () => {});
     const wallet = fakeWallet({ getContractManager: vi.fn(() => managerGate.promise) });
@@ -410,7 +401,7 @@ describe('ensureFreshVtxos', () => {
 
     const inFlight = ensureFreshVtxos(context, 0);
     await vi.waitFor(() => expect(wallet.getContractManager).toHaveBeenCalledOnce());
-    await invalidateSessionWallet();
+    await openSession(MNEMONIC, 'regtest');
     managerGate.resolve({ refreshVtxos });
 
     await expect(inFlight).rejects.toThrow('LOCKED');

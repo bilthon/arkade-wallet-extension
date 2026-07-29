@@ -89,14 +89,27 @@ describe('keystore handler round-trip (boundary)', () => {
     expect([...session.entries()]).toEqual([]);
   });
 
+  it('starts locked and unlocks an existing vault on its persisted network', async () => {
+    const mnemonic = crypto.generateMnemonic();
+    local.set('vault', await crypto.encryptVault(mnemonic, PASSWORD, 'bitcoin'));
+    local.set('network', 'bitcoin');
+
+    expect(await keystore.getLockState()).toEqual({ hasVault: true, unlocked: false });
+    await keystore.unlock(PASSWORD);
+
+    expect(runtime.getSessionNetwork()).toBe('bitcoin');
+    expect(await keystore.getMnemonicForBackup(PASSWORD)).toBe(mnemonic);
+    expect([...session.entries()]).toEqual([]);
+  });
+
   it('reauthenticates without replacing an already-live session', async () => {
     await keystore.createWallet(PASSWORD);
-    const epoch = runtime.getSessionEpoch();
+    const epoch = runtime.getRuntimeVersion().epoch;
 
     await expect(keystore.unlock('wrong-password')).rejects.toThrow();
     await keystore.unlock(PASSWORD);
 
-    expect(runtime.getSessionEpoch()).toBe(epoch);
+    expect(runtime.getRuntimeVersion().epoch).toBe(epoch);
     expect(runtime.getSessionNetwork()).toBe('regtest');
   });
 
@@ -118,19 +131,16 @@ describe('prepareNetworkSwitch', () => {
   it('stages a target-network vault without changing durable or runtime state', async () => {
     const mnemonic = await keystore.createWallet(PASSWORD);
     const vaultBefore = local.get('vault');
-    const epochBefore = runtime.getSessionEpoch();
+    const epochBefore = runtime.getRuntimeVersion().epoch;
 
     const prepared = await keystore.prepareNetworkSwitch('mutinynet', PASSWORD);
 
-    expect(prepared).toMatchObject({
-      sourceNetwork: 'regtest',
-      targetNetwork: 'mutinynet',
-    });
+    expect(prepared).toMatchObject({ targetNetwork: 'mutinynet' });
     expect(await crypto.decryptVault(prepared!.vault, PASSWORD, 'mutinynet')).toBe(mnemonic);
     await expect(crypto.decryptVault(prepared!.vault, PASSWORD, 'regtest')).rejects.toThrow();
     expect(local.get('vault')).toEqual(vaultBefore);
     expect(local.get('network')).toBeUndefined();
-    expect(runtime.getSessionEpoch()).toBe(epochBefore);
+    expect(runtime.getRuntimeVersion().epoch).toBe(epochBefore);
     expect(runtime.getSessionNetwork()).toBe('regtest');
   });
 
@@ -160,19 +170,19 @@ describe('prepareNetworkSwitch', () => {
     expect(await keystore.prepareNetworkSwitch('regtest', PASSWORD)).toBeNull();
 
     expect(local.get('vault')).toEqual(vaultBefore);
-    expect(local.get('network')).toBeUndefined(); // setNetwork was never called
+    expect(local.get('network')).toBeUndefined(); // configured network remains unchanged
   });
 
   it('preparing changes nothing until the coordinator commits it', async () => {
     await keystore.createWallet(PASSWORD);
     const vaultBefore = local.get('vault');
-    const epochBefore = runtime.getSessionEpoch();
+    const epochBefore = runtime.getRuntimeVersion().epoch;
 
     const prepared = await keystore.prepareNetworkSwitch('mutinynet', PASSWORD);
     expect(prepared).not.toBeNull();
     expect(local.get('vault')).toEqual(vaultBefore);
     expect(local.get('network')).toBeUndefined();
-    expect(runtime.getSessionEpoch()).toBe(epochBefore);
+    expect(runtime.getRuntimeVersion().epoch).toBe(epochBefore);
     expect(runtime.getSessionNetwork()).toBe('regtest');
   });
 });

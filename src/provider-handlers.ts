@@ -280,7 +280,7 @@ async function requireForSigning(sender: MessageSenderLike | undefined): Promise
  * window every call; never granted by connect). The approval window shows the message
  * verbatim + the SW-derived origin. We reject sighash-shaped input (a bare 32-byte hash)
  * BEFORE prompting, so the user never sees — and can never approve — a blind tx sign.
- * Returns the base64 BIP322 signature. The seed never leaves the SW.
+ * Returns the base64 BIP322 signature. Signing key material never leaves the SW.
  */
 export async function handleSignMessage(
   sender: MessageSenderLike | undefined,

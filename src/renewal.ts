@@ -7,8 +7,8 @@ import { renewExpiringVtxos, recoverExpiredVtxos, getExpiredVtxoSummary } from '
  * This is a *scheduling* problem under MV3, not a "build a renewer" problem — the SDK
  * does the actual renewal (`VtxoManager.renewVtxos`). A `chrome.alarms` wake is the
  * only timer that survives the SW being suspended. On each tick:
- *   • locked  → WARN only. We cannot sign without the seed, so we just record how many
- *               coins are expiring (the popup reads it and prompts "unlock to renew").
+ *   • locked  → WARN only. There is no live signing session, so we just retain the last
+ *               warning for the popup to show with an "unlock to renew" prompt.
  *               No signing, ever, while locked (the encrypt-at-rest invariant).
  *   • unlocked → renew every VTXO within RENEW_MARGIN_MS of its batch expiry via the
  *                deliberate `renewExpiringVtxos` path (settlementConfig stays false;

@@ -12,7 +12,7 @@ import type { BoltzSwapStatus } from '@arkade-os/boltz-swap';
  *    builds a wallet through that module.
  *  • './wallet-runtime' → `getSessionContext` is a fake that mirrors the real
  *    module's memoization (one build per session, shared by concurrent callers,
- *    cleared by `invalidateSessionWallet`), so tests can exercise the same
+ *    cleared by the test-local session replacement), so tests can exercise the same
  *    sharing behavior lightning.ts now relies on. `ensureFreshVtxos` is a bare mock.
  *  • '@arkade-os/boltz-swap' → `ArkadeSwaps.create`, `BoltzSwapProvider`, and
  *    `IndexedDbSwapRepository` are replaced with lightweight fakes (no WebSocket,
@@ -46,7 +46,6 @@ const state = vi.hoisted(() => ({
   pendingContext: null as Promise<FakeSessionContext> | null,
   sessionEpoch: 0,
   walletBuildCount: 0,
-  invalidateSessionWalletMock: vi.fn(),
   ensureFreshVtxosMock: vi.fn(async (_context: unknown) => {}),
 }));
 
@@ -111,15 +110,13 @@ function fakeGetSessionContext() {
   return mine;
 }
 
-async function fakeInvalidateSessionWallet() {
-  state.invalidateSessionWalletMock();
+function replaceTestSession(): void {
   state.currentContext = null;
   state.pendingContext = null;
 }
 
 vi.mock('./wallet-runtime', () => ({
   getSessionContext: () => fakeGetSessionContext(),
-  invalidateSessionWallet: () => fakeInvalidateSessionWallet(),
   ensureFreshVtxos: (context: unknown) => state.ensureFreshVtxosMock(context),
 }));
 
@@ -183,7 +180,7 @@ import {
   type LnPayStatus,
   type LnReceiveStatus,
 } from './lightning-utils';
-import { getSessionContext, invalidateSessionWallet } from './wallet-runtime';
+import { getSessionContext } from './wallet-runtime';
 
 // Real BOLT11 spec test vectors (decoded by the REAL `decodeInvoice`, which the
 // boltz-swap mock passes through via importOriginal):
@@ -263,7 +260,6 @@ beforeEach(async () => {
   state.pendingContext = null;
   state.sessionEpoch = 0;
   state.walletBuildCount = 0;
-  state.invalidateSessionWalletMock.mockClear();
   state.ensureFreshVtxosMock.mockClear();
 });
 
@@ -376,7 +372,7 @@ describe('createInvoice', () => {
 
     const creating = createInvoice(context, { amount: 25_000 });
     await vi.waitFor(() => expect(instance.getLimits).toHaveBeenCalledOnce());
-    await invalidateSessionWallet();
+    replaceTestSession();
     limitsGate.resolve({ min: 1000, max: 1_000_000 });
 
     await expect(creating).rejects.toThrow('LOCKED');
@@ -417,25 +413,25 @@ describe('getSwaps — singleton lifecycle', () => {
     const a = await getSwaps();
     const staleWallet = state.createArkadeSwaps.mock.calls[0][0].wallet;
 
-    // The real lock/switchNetwork handlers invalidate the wallet before disposing
+    // A lock or network transition replaces the wallet session before disposing
     // the swap runtime; mirror that order here.
-    await invalidateSessionWallet();
+    replaceTestSession();
     await disposeSwaps();
     expect(first.dispose).toHaveBeenCalledOnce();
 
     const b = await getSwaps();
     expect(b).toBe(second);
     expect(b).not.toBe(a);
-    // This test owns both halves of a lock/switchNetwork rebuild: the ArkadeSwaps
+    // This test owns both halves of a lock/network-transition rebuild: the ArkadeSwaps
     // instance above, and the wallet it was built with here — the rebuild must not
     // reuse the wallet the disposed session held.
     const freshWallet = state.createArkadeSwaps.mock.calls[1][0].wallet;
     expect(freshWallet).not.toBe(staleWallet);
   });
 
-  it('rebuilds against the new network after a network change + disposeSwaps (the real switchNetwork flow)', async () => {
+  it('rebuilds against the new network after the network-switch disposal flow', async () => {
     // getSwaps no longer re-checks the network per call — a network change is
-    // only ever observed via the switchNetwork handler's disposeSwaps() call.
+    // only ever observed after the network-switch coordinator calls disposeSwaps().
     const first = fakeSwapInstance();
     const second = fakeSwapInstance();
     state.createArkadeSwaps.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
@@ -447,7 +443,8 @@ describe('getSwaps — singleton lifecycle', () => {
     );
 
     state.network = 'mutinynet';
-    await Promise.all([invalidateSessionWallet(), disposeSwaps()]);
+    replaceTestSession();
+    await disposeSwaps();
     expect(first.dispose).toHaveBeenCalledOnce();
 
     const b = await getSwaps();
@@ -484,7 +481,7 @@ describe('getSwaps — singleton lifecycle', () => {
     const building = getSwaps(); // ArkadeSwaps.create is still pending (gate)
     await vi.waitFor(() => expect(state.createArkadeSwaps).toHaveBeenCalledOnce());
 
-    await disposeSwaps(); // a lock (or switchNetwork) races the in-flight build
+    await disposeSwaps(); // a lock or network transition races the in-flight build
 
     gate.resolve(first); // the build finishes AFTER the dispose already landed
     await expect(building).rejects.toThrow('LOCKED');
@@ -567,7 +564,6 @@ describe('getSwaps / payInvoice — sharing the session Arkade wallet', () => {
     const walletAfter = (await getSessionContext()).wallet;
 
     expect(walletAfter).toBe(walletBefore);
-    expect(state.invalidateSessionWalletMock).not.toHaveBeenCalled();
   });
 
   it('refuses to reuse a Lightning runtime for a replacement session context', async () => {
@@ -575,7 +571,7 @@ describe('getSwaps / payInvoice — sharing the session Arkade wallet', () => {
     state.createArkadeSwaps.mockResolvedValue(instance);
 
     await getSwaps();
-    await invalidateSessionWallet();
+    replaceTestSession();
     const replacement = await getSessionContext();
 
     await expect(createInvoice(replacement, { amount: 25_000 })).rejects.toThrow('LOCKED');
@@ -595,13 +591,11 @@ describe('getSwaps / payInvoice — sharing the session Arkade wallet', () => {
     // Counting turns would silently run out if `createRuntime` ever grew another await.
     await vi.waitFor(() => expect(state.createArkadeSwaps).toHaveBeenCalledOnce());
 
-    // The real lock/switchNetwork handlers fire both calls in the same
-    // synchronous tick, invalidating the wallet before disposing the swap
-    // runtime. Mirror that: no await between the two, so nothing can run in
-    // between them, then wait for both together.
-    const invalidated = invalidateSessionWallet();
+    // The real lock/network transition replaces the session and starts swap disposal
+    // in the same synchronous tick. Mirror that with no await between the two calls.
+    replaceTestSession();
     const disposed = disposeSwaps();
-    await Promise.all([invalidated, disposed]);
+    await disposed;
 
     gate.resolve(first); // the build finishes AFTER both dropped
     await expect(building).rejects.toThrow('LOCKED');
@@ -609,7 +603,7 @@ describe('getSwaps / payInvoice — sharing the session Arkade wallet', () => {
 
     const b = await getSwaps();
     expect(b).toBe(second);
-    // The wallet was invalidated too, so the rebuild gets a fresh one, not the
+    // The wallet session was replaced too, so the rebuild gets a fresh one, not the
     // one the disposed-of first build used.
     expect(state.walletBuildCount).toBe(2);
   });
@@ -864,7 +858,7 @@ describe('payInvoice', () => {
       maxTotalSats: 250_350,
     });
     await vi.waitFor(() => expect(instance.getLimits).toHaveBeenCalledOnce());
-    await invalidateSessionWallet();
+    replaceTestSession();
     limitsGate.resolve({ min: 1000, max: 1_000_000 });
 
     await expect(paying).rejects.toThrow('LOCKED');
@@ -964,7 +958,7 @@ describe('payInvoice', () => {
       maxTotalSats: 250_350,
     });
     await vi.waitFor(() => expect(state.ensureFreshVtxosMock).toHaveBeenCalledOnce());
-    await invalidateSessionWallet();
+    replaceTestSession();
     refreshGate.resolve();
 
     await expect(paying).rejects.toThrow('LOCKED');

@@ -51,7 +51,7 @@ const browserMock = {
 vi.stubGlobal('browser', browserMock);
 if (!globalThis.crypto) vi.stubGlobal('crypto', webcrypto);
 
-// hasVault/getNetwork read storage (set in beforeEach). Runtime state is the lock gate.
+// hasVault reads storage (set in beforeEach). Runtime state is the lock gate.
 let unlocked = true;
 let activeEpoch = 1;
 vi.mock('./wallet-runtime', () => ({ isUnlocked: () => unlocked }));
@@ -70,7 +70,7 @@ import {
   resolveApproval,
 } from './provider-handlers';
 import { rejectPendingApproval } from './approvals';
-import { setVault, setNetwork } from './storage';
+import { setVault } from './storage';
 import { getGrant, isMethodGranted } from './permissions';
 import { decodeProviderError } from './provider-api';
 
@@ -129,7 +129,6 @@ beforeEach(async () => {
   browserMock.windows.create.mockClear();
   browserMock.tabs.sendMessage.mockClear();
   await setVault({ v: 1 } as never); // hasVault() → true
-  await setNetwork('regtest');
 });
 
 describe('handleConnect — origin gating', () => {

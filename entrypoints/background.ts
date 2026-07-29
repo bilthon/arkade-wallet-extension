@@ -82,8 +82,8 @@ const BALANCE_READ_TIMEOUT_MS = 8_000;
  * the identity dies with it, so the wallet is locked again and the next sensitive action
  * asks for the password.
  *
- * Boundary rule: keystore ops run entirely here; the seed/mnemonic NEVER leaves
- * the SW except the explicit, user-initiated `getMnemonicForBackup` reveal.
+ * Boundary rule: the live identity never leaves this service worker. Mnemonics cross the
+ * popup boundary only for explicit create, import, and password-gated backup flows.
  */
 export default defineBackground(() => {
   // Arm the idle auto-lock alarm handler (Strict posture).

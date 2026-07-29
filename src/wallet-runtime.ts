@@ -50,7 +50,6 @@ export interface PreparedRuntimeNetworkSwitch {
 
 export interface RuntimeNetworkTransition {
   readonly hadSession: boolean;
-  readonly targetNetwork: NetworkName;
   readonly disposal: Promise<void>;
   install(): boolean;
   abort(): void;
@@ -87,12 +86,6 @@ export function isUnlocked(): boolean {
 export function getSessionNetwork(): NetworkName {
   if (!session) throw new Error('LOCKED');
   return session.network;
-}
-
-/** Serializable identity of the current live session. */
-export function getSessionEpoch(): number {
-  if (!session) throw new Error('LOCKED');
-  return session.epoch;
 }
 
 /** Capture runtime state without constructing the SDK wallet. */
@@ -184,7 +177,6 @@ export function beginRuntimeNetworkSwitch(
 
   return {
     hadSession: active.hadSession,
-    targetNetwork: staged.targetNetwork,
     disposal,
     install() {
       if (finished) throw new Error('STALE_NETWORK_SWITCH');
@@ -325,19 +317,6 @@ async function buildSessionWallet(owner: RuntimeSession): Promise<Wallet> {
 
   owner.wallet = wallet;
   return wallet;
-}
-
-/**
- * Invalidate the SDK wallet while retaining the live identity and network. This temporary
- * API preserves the current network-switch choreography; the serialized switch transition
- * will replace it with an explicit session fence later in this refactor.
- */
-export function invalidateSessionWallet(): Promise<void> {
-  const previous = session;
-  if (!previous) return Promise.resolve();
-
-  session = createSession(previous.identity, previous.network);
-  return disposeRuntimeSession(previous);
 }
 
 async function disposeRuntimeSession(owner: RuntimeSession | null): Promise<void> {

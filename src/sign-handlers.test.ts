@@ -17,7 +17,7 @@ import type { SessionContext } from './wallet-runtime';
  *   • signing requires a CONNECTED origin + unlocked wallet; an unconnected origin is
  *     NOT_CONNECTED, a locked wallet is LOCKED.
  *   • signMessage rejects a sighash-shaped message BEFORE prompting (BAD_REQUEST).
- *   • a declined approval surfaces REJECTED; the seed never crosses (only the result).
+ *   • a declined approval surfaces REJECTED; signing key material never crosses.
  *   • signPsbt validates SW-side, opens the approval with the inspector summary, and on
  *     approve returns the UNFINALIZED PSBT carrying ONLY our partial sig.
  * Exercises the real SDK crypto for the PSBT/co-sign path.
@@ -63,7 +63,7 @@ vi.mock('./wallet', () => ({
 
 import { handleSignMessage, handleSignPsbt } from './provider-handlers';
 import { grantConnect } from './permissions';
-import { setVault, setNetwork } from './storage';
+import { setVault } from './storage';
 import { decodeProviderError } from './provider-api';
 import {
   resolveApproval,
@@ -172,7 +172,6 @@ beforeEach(async () => {
   getContext.mockClear();
   browserMock.windows.create.mockClear();
   await setVault({ v: 1 } as never);
-  await setNetwork('regtest');
   // The site is connected (read-only grant). Signing is NOT in the grant — it re-prompts.
   await grantConnect('https://site.example', ['tark1acct']);
 });

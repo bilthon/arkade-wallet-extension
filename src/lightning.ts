@@ -63,9 +63,9 @@ interface LightningRuntime {
 let activeRuntime: LightningRuntime | null = null;
 let runtimePromise: Promise<LightningRuntime> | null = null;
 // Bumped by disposeSwaps. Lets a build that was already in flight when a
-// lock/switchNetwork happened detect it landed too late and self-destruct
+// lock/network transition happened detect it landed too late and self-destruct
 // instead of leaking a live SwapManager (WebSocket + auto-claimer) past the
-// seed it was built from. See createRuntime's post-create check.
+// session it belongs to. See createRuntime's post-create check.
 let generation = 0;
 
 /** Per-network swap repository name, matching the wallet's own per-network DBs. */
@@ -115,13 +115,10 @@ function getRuntime(requestedContext?: SessionContext): Promise<LightningRuntime
  * Does the actual build for `getSwaps`. Split out so the memoization above
  * stays synchronous — `createRuntime` is where all the `await`s live.
  *
- * Deliberately does NOT re-read/compare the active network per call the way
- * the old version did: the only code path that ever changes the stored
- * network is the switchNetwork message handler, and it always calls
- * `disposeSwaps()` in the same handler — so a network change is always
- * paired with a generation bump + memo clear, never silently observed by a
- * stale in-flight build. (Confirmed: `setNetwork`/`setVaultAndNetwork` has no
- * other production caller.)
+ * Deliberately does NOT re-read the stored network: the serialized network-switch
+ * coordinator fences the wallet session and calls `disposeSwaps()` before persisting a
+ * change. A transition is therefore paired with both session revocation and a Lightning
+ * generation bump, never silently observed by an in-flight build.
  */
 async function createRuntime(
   gen: number,
@@ -146,12 +143,8 @@ async function createRuntime(
     if (gen !== generation) throw new Error('LOCKED');
     context.assertCurrent();
   } catch (err) {
-    // A lock (or switchNetwork) landed while `ArkadeSwaps.create` was in
-    // flight — this instance may have just been built from a now-zeroed seed
-    // or a now-stale network. Self-destruct rather than leak its SwapManager.
-    // 'LOCKED' is slightly imprecise for the switchNetwork case, but harmless:
-    // the popup routes to unlock, and a network switch requires the password
-    // anyway.
+    // A lock or network transition landed while `ArkadeSwaps.create` was in flight.
+    // Self-destruct rather than leak a SwapManager owned by a revoked session.
     await instance.dispose();
     throw err;
   }
@@ -171,7 +164,7 @@ function assertRuntimeCurrent(runtime: LightningRuntime): void {
 }
 
 /**
- * Called from the lock coordinator and switchNetwork. Safe to call when nothing is up.
+ * Called from the lock and network-switch coordinators. Safe to call when nothing is up.
  *
  * Bumps `generation` FIRST, before touching any other state — this is what
  * lets an in-flight `createRuntime` build (started before this call) detect,

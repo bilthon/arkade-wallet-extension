@@ -16,7 +16,6 @@ import {
   type ExtendedVirtualCoin,
   type ArkTransaction,
 } from '@arkade-os/sdk';
-import { getNetwork as getStoredNetwork } from './storage';
 import type { SessionContext } from './wallet-runtime';
 import {
   adjustBalanceForExpiry,
@@ -232,21 +231,6 @@ export async function listCoins(wallet: Wallet): Promise<{ coins: CoinInfo[] }> 
     ],
   };
 }
-
-/** The active network name (from storage; addresses are operator-bound to it). */
-export function getNetwork(): Promise<NetworkName> {
-  // The wallet's operator is fixed by this at build time; re-exposed here so the
-  // provider/messaging layer reads the network through the wallet read-method surface.
-  return getStoredNetwork();
-}
-
-/**
- * Persist the active network. The next `buildWallet` picks up the new operator →
- * a different Arkade address (operator is baked into the address).
- * ponytail: no interactive picker UI yet (read-only pill); this exists for later
- * renewal and the settings screen to call, and for completeness of the wallet surface.
- */
-export { setNetwork } from './storage';
 
 /**
  * Raw user key as hex — x-only (32B) + compressed (33B). Exposed for web apps that

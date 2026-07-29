@@ -74,7 +74,6 @@ export async function getMnemonicForBackup(password: string): Promise<string> {
  * `decryptVault` and leaves the stored vault + network UNCHANGED (fail-closed).
  */
 export interface PreparedNetworkSwitch {
-  readonly sourceNetwork: NetworkName;
   readonly targetNetwork: NetworkName;
   readonly vault: VaultBlob;
   readonly runtime: PreparedRuntimeNetworkSwitch;
@@ -100,7 +99,6 @@ export async function prepareNetworkSwitch(
   const runtime = prepareRuntimeNetworkSwitch(mnemonic, newNetwork, sourceRuntime);
 
   return {
-    sourceNetwork: current,
     targetNetwork: newNetwork,
     vault: newVault,
     runtime,

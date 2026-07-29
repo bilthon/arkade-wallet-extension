@@ -17,8 +17,8 @@ import { decodeProviderError, type ProviderEvent } from '@/src/provider-api';
  *
  * It talks to the ISOLATED content bridge over window.postMessage (per-call id); the
  * content bridge is the only half that touches `browser.runtime`. The provider is a
- * THIN pass-through — it never holds keys, never sees the seed, and forwards each call
- * by name. The background is where origin + grant gating happens; the provider just
+ * THIN pass-through — it never holds signing keys or identity material. It forwards each
+ * call by name. The background is where origin + grant gating happens; the provider just
  * surfaces typed errors back to the web app.
  */
 export default defineUnlistedScript(() => {

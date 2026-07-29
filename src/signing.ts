@@ -21,8 +21,8 @@ import {
  *    get a signature valid over a real tx ("blind-sign" confusion). Arkade is Schnorr-only,
  *    so the `'ecdsa'` path is never offered.
  *  • `signPsbt` adds ONLY our partial Schnorr `tapScriptSig` (via `Identity.sign`) and
- *    returns the PSBT UNFINALIZED — other parties co-sign in sequence. The seed never
- *    leaves the SW; only the signed PSBT (public) crosses back to the page.
+ *    returns the PSBT UNFINALIZED — other parties co-sign in sequence. Signing key material
+ *    never leaves the SW; only the signed PSBT (public) crosses back to the page.
  */
 
 /** A signMessage validation failure surfaced to the page (its `.message` is user-facing). */

@@ -52,10 +52,6 @@ export async function getVaultAndNetwork(): Promise<{
   };
 }
 
-export async function setNetwork(network: NetworkName): Promise<void> {
-  await browser.storage.local.set({ [NETWORK_KEY]: network });
-}
-
 /**
  * Atomically persist a re-encrypted vault together with its active network and invalidate
  * the public wallet snapshot in ONE write. A single `storage.local.set` closes the window

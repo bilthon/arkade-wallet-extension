@@ -42,8 +42,3 @@ export async function getSnapshot(network: NetworkName): Promise<WalletSnapshot 
 export async function setSnapshot(snap: WalletSnapshot): Promise<void> {
   await browser.storage.local.set({ [WALLET_SNAPSHOT_KEY]: snap });
 }
-
-/** Drop the snapshot (e.g. on wallet reset). */
-export async function clearSnapshot(): Promise<void> {
-  await browser.storage.local.remove(WALLET_SNAPSHOT_KEY);
-}
