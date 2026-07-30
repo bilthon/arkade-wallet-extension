@@ -1,5 +1,4 @@
-import { isUnlocked, getUnlockedSeed } from './keystore';
-import { getSessionWallet, ensureFreshVtxos } from './wallet-runtime';
+import { getSessionContext, ensureFreshVtxos, isUnlocked } from './wallet-runtime';
 import { renewExpiringVtxos, recoverExpiredVtxos, getExpiredVtxoSummary } from './wallet';
 
 /**
@@ -8,8 +7,8 @@ import { renewExpiringVtxos, recoverExpiredVtxos, getExpiredVtxoSummary } from '
  * This is a *scheduling* problem under MV3, not a "build a renewer" problem — the SDK
  * does the actual renewal (`VtxoManager.renewVtxos`). A `chrome.alarms` wake is the
  * only timer that survives the SW being suspended. On each tick:
- *   • locked  → WARN only. We cannot sign without the seed, so we just record how many
- *               coins are expiring (the popup reads it and prompts "unlock to renew").
+ *   • locked  → WARN only. There is no live signing session, so we just retain the last
+ *               warning for the popup to show with an "unlock to renew" prompt.
  *               No signing, ever, while locked (the encrypt-at-rest invariant).
  *   • unlocked → renew every VTXO within RENEW_MARGIN_MS of its batch expiry via the
  *                deliberate `renewExpiringVtxos` path (settlementConfig stays false;
@@ -93,10 +92,10 @@ export async function runRenewalTick(): Promise<
   | { state: 'locked'; warning: RenewalWarning | null }
   | { state: 'unlocked'; renewed: number; recovered: number; txid?: string }
 > {
-  if (!getUnlockedSeed() || !isUnlocked()) {
+  if (!isUnlocked()) {
     // Locked: warn only. Build a read-only view of expiry from the cached VTXO set.
-    // We cannot read the live operator without a wallet, but the IndexedDB-backed
-    // wallet build needs the seed — so when locked we have no fresh read. Fall back
+    // We cannot read the live operator without a wallet, and wallet construction needs
+    // the live runtime identity — so when locked we have no fresh read. Fall back
     // to leaving any prior warning in place (it was written while unlocked; the popup
     // ages the copy via `isWarningStale` so a respawn-while-locked snapshot reads as
     // "last known", not current).
@@ -116,33 +115,37 @@ export async function runRenewalTick(): Promise<
   // This is a scheduled tick, not user activity, so it goes straight to the shared
   // session wallet with no `armAutoLock()` anywhere on this path — a tick must not
   // keep extending the idle window on its own.
-  const wallet = await getSessionWallet();
+  const context = await getSessionContext();
+  const { wallet } = context;
   // Building the wallet used to give this an implicit sync; the shared wallet no
   // longer rebuilds every tick, so we ask for one explicitly before selecting
   // renewable coins.
-  await ensureFreshVtxos(wallet);
+  await ensureFreshVtxos(context);
 
   let recovered = 0;
   let txid: string | undefined;
   try {
-    const rec = await recoverExpiredVtxos(wallet);
+    const rec = await recoverExpiredVtxos(context);
     recovered = rec.recovered;
     txid = rec.txid;
   } catch (err) {
+    if (err instanceof Error && err.message === 'LOCKED') throw err;
     console.warn('[arkade] recovery leg failed', err);
   }
 
   let renewed = 0;
   try {
-    const r = await renewExpiringVtxos(wallet, RENEW_MARGIN_MS);
+    const r = await renewExpiringVtxos(context, RENEW_MARGIN_MS);
     renewed = r.renewed;
     txid ??= r.txid;
   } catch (err) {
+    if (err instanceof Error && err.message === 'LOCKED') throw err;
     console.warn('[arkade] renewal leg failed', err);
   }
 
   // Re-read post-settle so the warning reflects the new state (ideally cleared).
   const summary = await getExpiredVtxoSummary(wallet);
+  context.assertCurrent();
   const hasWork =
     summary.count > 0 ||
     summary.recoverableCount > 0 ||

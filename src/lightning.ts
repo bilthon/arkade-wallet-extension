@@ -22,7 +22,11 @@ import type { NetworkName } from '@arkade-os/sdk';
 import { hex } from '@scure/base';
 import { getNetwork as getStoredNetwork } from './storage';
 import { networkConfig } from './wallet';
-import { getSessionWallet, ensureFreshVtxos } from './wallet-runtime';
+import {
+  getSessionContext,
+  ensureFreshVtxos,
+  type SessionContext,
+} from './wallet-runtime';
 import { submarineFeeForAmount, type LnPayStatus, type LnReceiveStatus } from './lightning-utils';
 
 /**
@@ -30,19 +34,18 @@ import { submarineFeeForAmount, type LnPayStatus, type LnReceiveStatus } from '.
  * Lightning payments (Arkade → Lightning) via Boltz submarine swaps.
  *
  * `ArkadeSwaps` is built on the same shared session wallet every other read
- * and send uses, via `getSessionWallet()` (see `wallet-runtime.ts`). We still
+ * and send uses, via `getSessionContext()` (see `wallet-runtime.ts`). We still
  * keep a SEPARATE Lightning singleton on top of it, though: `ArkadeSwaps`
  * starts a `SwapManager` (WebSocket + failsafe polling) that auto-claims a
  * reverse swap's VHTLC the moment Boltz funds it, and that WebSocket and its
  * timers are not part of the Arkade wallet at all. They need their own
  * lifecycle: built lazily on first use, kept alive for as long as the wallet
- * stays unlocked, and disposed on lock and on network switch. This mirrors
- * how the seed itself lives in `keystore.ts` module memory: SW alive +
- * unlocked → singleton alive; SW killed → gone, rebuilt on next unlock if
- * needed.
+ * stays unlocked, and disposed on lock and on network switch. This mirrors the
+ * runtime-owned identity: SW alive + unlocked → singleton alive; SW killed →
+ * gone, rebuilt on the next unlock if needed.
  *
- * Claiming needs the unlocked wallet (our strict lock posture zeroes the seed
- * with the SW), so it only happens while the wallet is unlocked and the SW is
+ * Claiming needs the unlocked wallet (our strict lock posture revokes the live
+ * identity with the SW), so it only happens while the wallet is unlocked and the SW is
  * alive — in practice while the popup showing the invoice is open. If the
  * user closes the popup before the payment lands, nothing is lost: the swap
  * sits in the per-network `IndexedDbSwapRepository`, and `reconcilePendingSwaps`
@@ -52,12 +55,17 @@ import { submarineFeeForAmount, type LnPayStatus, type LnReceiveStatus } from '.
 
 // ─── Singleton, scoped to (unlocked, network) ────────────────────────────────
 
-let swaps: ArkadeSwaps | null = null; // the RESOLVED instance, for dispose
-let swapsPromise: Promise<ArkadeSwaps> | null = null; // the in-flight/settled build, memoized
+interface LightningRuntime {
+  swaps: ArkadeSwaps;
+  context: SessionContext;
+}
+
+let activeRuntime: LightningRuntime | null = null;
+let runtimePromise: Promise<LightningRuntime> | null = null;
 // Bumped by disposeSwaps. Lets a build that was already in flight when a
-// lock/switchNetwork happened detect it landed too late and self-destruct
+// lock/network transition happened detect it landed too late and self-destruct
 // instead of leaking a live SwapManager (WebSocket + auto-claimer) past the
-// seed it was built from. See createRuntime's post-create check.
+// session it belongs to. See createRuntime's post-create check.
 let generation = 0;
 
 /** Per-network swap repository name, matching the wallet's own per-network DBs. */
@@ -65,48 +73,64 @@ const repoName = (network: NetworkName) => `arkade-swaps-${network}`;
 
 /**
  * Build (or reuse) the `ArkadeSwaps` runtime. The lock check is not the caller's job
- * any more: `getSessionWallet()` reads the unlocked seed itself and throws LOCKED, so
+ * any more: `getSessionContext()` reads the live runtime session and throws LOCKED, so
  * a caller that races a lock gets the rejection from there.
  *
  * Memoizes the IN-FLIGHT promise, not just the resolved instance, via a
- * synchronous check-and-assign (no `await` before `swapsPromise` is set) —
+ * synchronous check-and-assign (no `await` before `runtimePromise` is set) —
  * two callers racing this (e.g. the unlock handler's fire-and-forget
  * `reconcilePendingSwaps` racing a user's `createLightningInvoice`) always
  * observe the same in-flight build and get the same instance, rather than
  * both calling `ArkadeSwaps.create` and leaking the loser's SwapManager.
  */
 export function getSwaps(): Promise<ArkadeSwaps> {
-  if (!swapsPromise) {
-    const mine = createRuntime(generation);
-    swapsPromise = mine;
+  return getRuntime().then((runtime) => {
+    assertRuntimeCurrent(runtime);
+    return runtime.swaps;
+  });
+}
+
+function getRuntime(requestedContext?: SessionContext): Promise<LightningRuntime> {
+  if (!runtimePromise) {
+    const mine = createRuntime(generation, requestedContext);
+    runtimePromise = mine;
     // A failed build must not poison the memo forever — clear it so the next
     // getSwaps retries. Guarded so we never clobber a NEWER promise that a
     // dispose + rebuild (or another failed-then-retried build) may have
     // already installed by the time this settles.
     mine.catch(() => {
-      if (swapsPromise === mine) swapsPromise = null;
+      if (runtimePromise === mine) runtimePromise = null;
     });
   }
-  return swapsPromise;
+  return runtimePromise.then((runtime) => {
+    assertRuntimeCurrent(runtime);
+    if (requestedContext && !sameSession(runtime.context, requestedContext)) {
+      throw new Error('LOCKED');
+    }
+    return runtime;
+  });
 }
 
 /**
  * Does the actual build for `getSwaps`. Split out so the memoization above
  * stays synchronous — `createRuntime` is where all the `await`s live.
  *
- * Deliberately does NOT re-read/compare the active network per call the way
- * the old version did: the only code path that ever changes the stored
- * network is the switchNetwork message handler, and it always calls
- * `disposeSwaps()` in the same handler — so a network change is always
- * paired with a generation bump + memo clear, never silently observed by a
- * stale in-flight build. (Confirmed: `setNetwork`/`setVaultAndNetwork` has no
- * other production caller.)
+ * Deliberately does NOT re-read the stored network: the serialized network-switch
+ * coordinator fences the wallet session and calls `disposeSwaps()` before persisting a
+ * change. A transition is therefore paired with both session revocation and a Lightning
+ * generation bump, never silently observed by an in-flight build.
  */
-async function createRuntime(gen: number): Promise<ArkadeSwaps> {
-  const network = await getStoredNetwork();
+async function createRuntime(
+  gen: number,
+  requestedContext?: SessionContext,
+): Promise<LightningRuntime> {
+  const context = requestedContext ?? (await getSessionContext());
+  const { network, wallet } = context;
   const cfg = networkConfig(network);
   if (!cfg.boltzApiUrl) throw new Error('LIGHTNING_UNAVAILABLE');
-  const wallet = await getSessionWallet();
+
+  if (gen !== generation) throw new Error('LOCKED');
+  context.assertCurrent();
   const instance = await ArkadeSwaps.create({
     wallet,
     swapProvider: new BoltzSwapProvider({ apiUrl: cfg.boltzApiUrl, network }),
@@ -115,28 +139,37 @@ async function createRuntime(gen: number): Promise<ArkadeSwaps> {
     // Boltz funds the VHTLC — no separate wire-up needed here.
   });
 
-  if (gen !== generation) {
-    // A lock (or switchNetwork) landed while `ArkadeSwaps.create` was in
-    // flight — this instance may have just been built from a now-zeroed seed
-    // or a now-stale network. Self-destruct rather than leak its SwapManager.
-    // 'LOCKED' is slightly imprecise for the switchNetwork case, but harmless:
-    // the popup routes to unlock, and a network switch requires the password
-    // anyway.
+  try {
+    if (gen !== generation) throw new Error('LOCKED');
+    context.assertCurrent();
+  } catch (err) {
+    // A lock or network transition landed while `ArkadeSwaps.create` was in flight.
+    // Self-destruct rather than leak a SwapManager owned by a revoked session.
     await instance.dispose();
-    throw new Error('LOCKED');
+    throw err;
   }
 
-  swaps = instance;
-  return instance;
+  const runtime = { swaps: instance, context };
+  activeRuntime = runtime;
+  return runtime;
+}
+
+function sameSession(a: SessionContext, b: SessionContext): boolean {
+  return a.epoch === b.epoch && a.network === b.network && a.wallet === b.wallet;
+}
+
+function assertRuntimeCurrent(runtime: LightningRuntime): void {
+  if (activeRuntime !== runtime) throw new Error('LOCKED');
+  runtime.context.assertCurrent();
 }
 
 /**
- * Called from onLock and switchNetwork. Safe to call when nothing is up.
+ * Called from the lock and network-switch coordinators. Safe to call when nothing is up.
  *
  * Bumps `generation` FIRST, before touching any other state — this is what
  * lets an in-flight `createRuntime` build (started before this call) detect,
  * once it resolves, that it's now stale and dispose itself instead of
- * outliving the seed it was built from.
+ * outliving the identity it was built from.
  *
  * `ArkadeSwaps.dispose()` only stops the SwapManager (WebSocket + timers) — it
  * does NOT close the swap repository's IndexedDB connection, and neither do
@@ -144,10 +177,10 @@ async function createRuntime(gen: number): Promise<ArkadeSwaps> {
  */
 export async function disposeSwaps(): Promise<void> {
   generation++;
-  const s = swaps;
-  swaps = null;
-  swapsPromise = null;
-  if (s) await s.dispose();
+  const runtime = activeRuntime;
+  activeRuntime = null;
+  runtimePromise = null;
+  if (runtime) await runtime.swaps.dispose();
 }
 
 /**
@@ -203,15 +236,18 @@ export async function hasPendingSwaps(network: NetworkName): Promise<boolean> {
  */
 export async function reconcilePendingSwaps(): Promise<void> {
   try {
-    const network = await getStoredNetwork();
-    const repo = new IndexedDbSwapRepository(repoName(network)); // never disposed — see hasPendingSwaps
+    const runtime = await getRuntime();
+    const repo = new IndexedDbSwapRepository(repoName(runtime.context.network)); // never disposed — see hasPendingSwaps
     const stranded = (await repo.getAllSwaps()).filter(
       (s): s is BoltzSubmarineSwap =>
         isSubmarineSwapRefundable(s) && isSubmarineFinalStatus(s.status),
     );
-    const s = await getSwaps(); // starting the manager already loads pending swaps
-    if (stranded.length > 0) await s.recoverAllSubmarineFunds(stranded);
-    await s.refreshSwapsStatus(); // catch swaps that settled while we were closed
+    if (stranded.length > 0) {
+      assertRuntimeCurrent(runtime);
+      await runtime.swaps.recoverAllSubmarineFunds(stranded);
+    }
+    assertRuntimeCurrent(runtime);
+    await runtime.swaps.refreshSwapsStatus(); // catch swaps that settled while we were closed
   } catch {
     /* best-effort recovery — nothing is watching this fire-and-forget call */
   }
@@ -255,19 +291,23 @@ export async function getLightningInfo(): Promise<{
  * amount — mirrors the library). Unlock-gated: building the swap runtime
  * needs the wallet's claim key.
  */
-export async function createInvoice({ amount }: { amount: number }): Promise<{
+export async function createInvoice(
+  context: SessionContext,
+  { amount }: { amount: number },
+): Promise<{
   invoice: string;
   paymentHash: string;
   swapId: string;
   receiveAmount: number;
   expiresAt: number;
 }> {
-  const s = await getSwaps();
-  const limits = await s.getLimits();
+  const runtime = await getRuntime(context);
+  const limits = await runtime.swaps.getLimits();
   if (amount < limits.min || amount > limits.max) {
     throw new Error(`Amount must be between ${limits.min} and ${limits.max} sats.`);
   }
-  const r = await s.createLightningInvoice({ amount });
+  assertRuntimeCurrent(runtime);
+  const r = await runtime.swaps.createLightningInvoice({ amount });
   return {
     invoice: r.invoice,
     paymentHash: r.paymentHash,
@@ -414,13 +454,16 @@ export function payTotalSlack(amountSats: number): number {
  * swaps the SW didn't live to see through. No preimage crosses back — the
  * popup only ever needs the status.
  */
-export async function payInvoice({
-  invoice,
-  maxTotalSats,
-}: {
-  invoice: string;
-  maxTotalSats: number;
-}): Promise<{ swapId: string; txid: string; amountSats: number; totalSats: number }> {
+export async function payInvoice(
+  requestedContext: SessionContext,
+  {
+    invoice,
+    maxTotalSats,
+  }: {
+    invoice: string;
+    maxTotalSats: number;
+  },
+): Promise<{ swapId: string; txid: string; amountSats: number; totalSats: number }> {
   let decoded: ReturnType<typeof decodeInvoice>;
   try {
     decoded = decodeInvoice(invoice);
@@ -434,7 +477,8 @@ export async function payInvoice({
     );
   }
 
-  const s = await getSwaps();
+  const runtime = await getRuntime(requestedContext);
+  const { swaps: s, context } = runtime;
   const limits = await s.getLimits();
   if (decoded.amountSats < limits.min || decoded.amountSats > limits.max) {
     throw new Error(
@@ -445,6 +489,7 @@ export async function payInvoice({
   // Persisted by the library before we see it, and registered with the running
   // SwapManager — so even if everything after this line dies, reconciliation
   // knows about the swap (an unfunded one is harmless: it just expires).
+  assertRuntimeCurrent(runtime);
   const pendingSwap = await s.createSubmarineSwap({ invoice });
   const totalSats = pendingSwap.response.expectedAmount;
   if (!pendingSwap.response.address || !totalSats) {
@@ -457,7 +502,7 @@ export async function payInvoice({
     );
   }
 
-  const wallet = await getSessionWallet();
+  const { wallet } = context;
 
   // Verify the lockup address before we fund it. Boltz returns a VHTLC address for us to send
   // to, but nothing so far proves that address commits to OUR refund key. If it does not, the
@@ -487,10 +532,11 @@ export async function payInvoice({
   // Coin selection needs a live view of what's spendable. Building the wallet used to
   // give us that for free, because construction ran a delta sync. The shared session
   // wallet does not, so we refresh explicitly right before the send that selects coins.
-  await ensureFreshVtxos(wallet);
+  await ensureFreshVtxos(context);
 
   let txid: string;
   try {
+    assertRuntimeCurrent(runtime);
     txid = await wallet.send({ address: pendingSwap.response.address, amount: totalSats });
   } catch (err) {
     // Same opaque-message translation as wallet.ts's send path. The unfunded

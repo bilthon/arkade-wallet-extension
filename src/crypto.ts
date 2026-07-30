@@ -5,9 +5,8 @@ import type { NetworkName } from '@arkade-os/sdk';
 
 /**
  * At-rest keystore crypto. Pure crypto + encoding only — NO
- * `chrome.*` here so it round-trips under plain WebCrypto in vitest. The lock model
- * (SW-memory seed, auto-lock) lives in `keystore.ts`; the typed storage I/O in
- * `storage.ts`.
+ * `chrome.*` here so it round-trips under plain WebCrypto in vitest. Live identity
+ * ownership lives in `wallet-runtime.ts`; typed vault I/O lives in `storage.ts`.
  *
  * Cipher: AES-256-GCM, fresh random 12-byte IV per write, auth tag verified on
  * decrypt (we NEVER return unauthenticated plaintext — a tampered blob throws).
@@ -180,7 +179,7 @@ export async function decryptVault(
   return mnemonic;
 }
 
-/** BIP39 mnemonic -> 64-byte seed. Used by `buildWallet`; kept here beside derivation. */
+/** BIP39 mnemonic -> a temporary 64-byte seed cleared by the runtime after identity creation. */
 export function mnemonicToSeed(mnemonic: string): Uint8Array {
   return mnemonicToSeedSync(mnemonic);
 }

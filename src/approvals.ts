@@ -23,6 +23,7 @@
  * persisted record is cleaned up on resolution or when a stale window is detected.
  */
 
+import type { NetworkName } from '@arkade-os/sdk';
 import type { PsbtSummary } from './psbt-inspect';
 
 export type ApprovalKind = 'connect' | 'signMessage' | 'signPsbt';
@@ -48,6 +49,8 @@ export interface PendingRequest {
   /** SW-derived origin (origin.ts). The approval UI shows THIS, verbatim. */
   origin: string;
   createdAt: number;
+  /** Public identity of the runtime session that originated this approval. */
+  session: { epoch: number; network: NetworkName };
   /** Kind-specific render data (the message / the PSBT summary). */
   payload: ApprovalPayload;
 }
@@ -61,7 +64,7 @@ const PENDING_KEY = 'pendingApproval';
 /** A typed error a web app handler can surface when a request can't be queued. */
 export class ApprovalError extends Error {
   constructor(
-    readonly code: 'BUSY' | 'NO_REQUEST' | 'WINDOW_FAILED',
+    readonly code: 'BUSY' | 'NO_REQUEST' | 'WINDOW_FAILED' | 'LOCKED',
     message: string,
   ) {
     super(message);
@@ -96,7 +99,10 @@ async function persist(request: PendingRequest | null): Promise<void> {
  * ever learns the SW-derived origin through this — it cannot be told a different label.
  */
 export async function getPendingRequest(requestId: string): Promise<PendingRequest | null> {
+  const expected = inFlight;
+  if (!expected || expected.request.requestId !== requestId) return null;
   const got = await browser.storage.session.get(PENDING_KEY);
+  if (inFlight !== expected) return null;
   const rec = got[PENDING_KEY] as PendingRequest | undefined;
   if (!rec || rec.requestId !== requestId) return null;
   return rec;
@@ -114,6 +120,7 @@ export async function requestApproval(
   payload: ApprovalPayload,
   origin: string,
   openWindow: (request: PendingRequest) => Promise<number | null>,
+  session: PendingRequest['session'],
 ): Promise<ApprovalDecision> {
   if (inFlight) {
     throw new ApprovalError(
@@ -127,22 +134,46 @@ export async function requestApproval(
     kind: payload.kind,
     origin,
     createdAt: Date.now(),
+    session,
     payload,
   };
 
   // Establish the in-flight record BEFORE opening the window so a fast approve can't race
   // a null `inFlight`. Persist the serializable half for the window to read.
-  let record!: InFlight;
+  let resolveDecision!: (decision: ApprovalDecision) => void;
+  let rejectDecision!: (err: Error) => void;
   const decision = new Promise<ApprovalDecision>((resolve, reject) => {
-    record = { request, windowId: null, resolve, reject };
-    inFlight = record;
+    resolveDecision = resolve;
+    rejectDecision = reject;
   });
+  const record: InFlight = {
+    request,
+    windowId: null,
+    resolve: resolveDecision,
+    reject: rejectDecision,
+  };
+  inFlight = record;
+  // Cancellation can land while the request is still being persisted, before this async
+  // function adopts `decision`. Keep that brief interval from surfacing an unhandled
+  // rejection; callers still receive the same rejection through the returned promise.
+  void decision.catch(() => {});
   await persist(request);
+
+  // A lock may have cancelled this request while persistence was in flight. Ensure the
+  // serializable record is gone and never open a stale approval window.
+  if (inFlight !== record) {
+    await persistCurrent();
+    return decision;
+  }
 
   let windowId: number | null;
   try {
     windowId = await openWindow(request);
   } catch (err) {
+    if (inFlight !== record) {
+      await persistCurrent();
+      return decision;
+    }
     await clearInFlight();
     throw new ApprovalError(
       'WINDOW_FAILED',
@@ -186,6 +217,16 @@ export async function rejectApprovalForOrigin(origin: string, reason: string): P
   return true;
 }
 
+/** Reject the current request regardless of origin or approval kind. Used when locking. */
+export async function rejectPendingApproval(reason: string): Promise<boolean> {
+  if (!inFlight) return false;
+  const { reject } = inFlight;
+  inFlight = null;
+  reject(new ApprovalError('LOCKED', reason));
+  await persistCurrent();
+  return true;
+}
+
 /** The origin/window of the current in-flight request, or null. */
 export function currentInFlight(): { origin: string; windowId: number | null } | null {
   if (!inFlight) return null;
@@ -195,7 +236,16 @@ export function currentInFlight(): { origin: string; windowId: number | null } |
 /** Clear in-flight state + the persisted record. Internal; also used on stale cleanup. */
 async function clearInFlight(): Promise<void> {
   inFlight = null;
-  await persist(null);
+  await persistCurrent();
+}
+
+/** Keep the persisted record aligned even if a new request starts during cleanup. */
+async function persistCurrent(): Promise<void> {
+  while (true) {
+    const current = inFlight;
+    await persist(current?.request ?? null);
+    if (inFlight === current) return;
+  }
 }
 
 /**

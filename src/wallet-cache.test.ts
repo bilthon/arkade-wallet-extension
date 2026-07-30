@@ -16,16 +16,13 @@ const browserMock = {
       set: vi.fn(async (items: Record<string, unknown>) => {
         for (const [k, v] of Object.entries(items)) store.set(k, v);
       }),
-      remove: vi.fn(async (key: string) => {
-        store.delete(key);
-      }),
     },
   },
 };
 // `browser` is a global in the WXT/webext runtime; provide it for the unit test.
 vi.stubGlobal('browser', browserMock);
 
-const { getSnapshot, setSnapshot, clearSnapshot } = await import('./wallet-cache');
+const { getSnapshot, setSnapshot } = await import('./wallet-cache');
 import type { WalletSnapshot } from './wallet-cache';
 
 const snap = (over: Partial<WalletSnapshot> = {}): WalletSnapshot => ({
@@ -54,11 +51,5 @@ describe('wallet-cache snapshot store', () => {
     await setSnapshot(snap({ network: 'regtest', address: 'tark1qregtest' }));
     // Switching to mutinynet must not serve the regtest operator's address.
     expect(await getSnapshot('mutinynet')).toBeNull();
-  });
-
-  it('clears the snapshot', async () => {
-    await setSnapshot(snap());
-    await clearSnapshot();
-    expect(await getSnapshot('regtest')).toBeNull();
   });
 });

@@ -10,8 +10,7 @@ import type { Wallet } from '@arkade-os/sdk';
  * the wallet never auto-locks while the service worker lives.
  *
  * Module mocking strategy:
- *  • './keystore' → real module, with only the seed readers overridden.
- *  • './wallet-runtime' → `getSessionWallet`/`ensureFreshVtxos` spies, no real wallet.
+ *  • './wallet-runtime' → unlock gate + wallet/freshness spies, no real wallet.
  *  • './wallet' → the three settle/read helpers the tick calls.
  */
 
@@ -32,21 +31,22 @@ vi.stubGlobal('browser', {
   alarms: { create: alarmCreate, clear: vi.fn(async () => {}), onAlarm: { addListener: vi.fn() } },
 });
 
-const state = vi.hoisted(() => ({ seed: new Uint8Array(32).fill(1) as Uint8Array | null }));
-
-// Keep the REAL `armAutoLock` and watch the alarm it creates, rather than spying on a
-// mock of it. A spy only catches someone importing `armAutoLock` into this module by
-// name; watching the alarm catches any transitive rearm, and it survives a rename.
-vi.mock('./keystore', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('./keystore')>()),
-  getUnlockedSeed: vi.fn(() => state.seed),
-  isUnlocked: vi.fn(() => state.seed !== null),
-}));
+const state = vi.hoisted(() => ({ unlocked: true }));
 
 const wallet = vi.hoisted(() => ({}) as Wallet);
-const getSessionWallet = vi.hoisted(() => vi.fn());
+const context = vi.hoisted(() => ({
+  wallet,
+  network: 'regtest' as const,
+  epoch: 1,
+  assertCurrent: vi.fn(),
+}));
+const getSessionContext = vi.hoisted(() => vi.fn());
 const ensureFreshVtxos = vi.hoisted(() => vi.fn(async () => {}));
-vi.mock('./wallet-runtime', () => ({ getSessionWallet, ensureFreshVtxos }));
+vi.mock('./wallet-runtime', () => ({
+  getSessionContext,
+  ensureFreshVtxos,
+  isUnlocked: () => state.unlocked,
+}));
 
 const recoverExpiredVtxos = vi.hoisted(() => vi.fn(async () => ({ recovered: 0, sats: 0 })));
 const renewExpiringVtxos = vi.hoisted(() => vi.fn(async () => ({ renewed: 0 })));
@@ -69,9 +69,19 @@ vi.mock('./wallet', () => ({
 import { runRenewalTick } from './renewal';
 
 beforeEach(() => {
-  state.seed = new Uint8Array(32).fill(1);
-  vi.resetAllMocks(); // clearAllMocks leaves mockImplementation in place, which leaks between cases
-  getSessionWallet.mockResolvedValue(wallet);
+  state.unlocked = true;
+  vi.resetAllMocks();
+  getSessionContext.mockResolvedValue(context);
+  ensureFreshVtxos.mockResolvedValue(undefined);
+  recoverExpiredVtxos.mockResolvedValue({ recovered: 0, sats: 0 });
+  renewExpiringVtxos.mockResolvedValue({ renewed: 0 });
+  getExpiredVtxoSummary.mockResolvedValue({
+    expiredSats: 0,
+    count: 0,
+    recoverableSats: 0,
+    recoverableCount: 0,
+    nextExpiryAtMs: null,
+  });
 });
 
 describe('runRenewalTick', () => {
@@ -79,7 +89,7 @@ describe('runRenewalTick', () => {
     const result = await runRenewalTick();
 
     expect(result.state).toBe('unlocked');
-    expect(getSessionWallet).toHaveBeenCalledOnce();
+    expect(getSessionContext).toHaveBeenCalledOnce();
     // The whole point of the maintenance path: the idle window must not move. The
     // auto-lock alarm is how it moves, so assert none was ever created.
     expect(alarmCreate).not.toHaveBeenCalled();
@@ -110,17 +120,25 @@ describe('runRenewalTick', () => {
     // Selection reads the contract repository, so a stale cache here risks feeding a
     // swept coin into a renew round. Recover must still come before renew.
     expect(order).toEqual(['refresh', 'recover', 'renew']);
-    expect(ensureFreshVtxos).toHaveBeenCalledWith(wallet);
+    expect(ensureFreshVtxos).toHaveBeenCalledWith(context);
   });
 
   it('never asks for a wallet while locked', async () => {
-    state.seed = null;
+    state.unlocked = false;
 
     const result = await runRenewalTick();
 
     expect(result.state).toBe('locked');
-    expect(getSessionWallet).not.toHaveBeenCalled();
+    expect(getSessionContext).not.toHaveBeenCalled();
     expect(ensureFreshVtxos).not.toHaveBeenCalled();
     expect(alarmCreate).not.toHaveBeenCalled();
+  });
+
+  it('propagates LOCKED from a stale recovery context and skips renewal', async () => {
+    recoverExpiredVtxos.mockRejectedValue(new Error('LOCKED'));
+
+    await expect(runRenewalTick()).rejects.toThrow('LOCKED');
+
+    expect(renewExpiringVtxos).not.toHaveBeenCalled();
   });
 });

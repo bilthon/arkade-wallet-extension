@@ -1,5 +1,6 @@
-import { BIP322, type Identity, type NetworkName, type Wallet } from '@arkade-os/sdk';
+import { BIP322, networks } from '@arkade-os/sdk';
 import { hex } from '@scure/base';
+import type { SessionContext } from './wallet-runtime';
 import {
   parsePsbt,
   inspectPsbt,
@@ -20,8 +21,8 @@ import {
  *    get a signature valid over a real tx ("blind-sign" confusion). Arkade is Schnorr-only,
  *    so the `'ecdsa'` path is never offered.
  *  • `signPsbt` adds ONLY our partial Schnorr `tapScriptSig` (via `Identity.sign`) and
- *    returns the PSBT UNFINALIZED — other parties co-sign in sequence. The seed never
- *    leaves the SW; only the signed PSBT (public) crosses back to the page.
+ *    returns the PSBT UNFINALIZED — other parties co-sign in sequence. Signing key material
+ *    never leaves the SW; only the signed PSBT (public) crosses back to the page.
  */
 
 /** A signMessage validation failure surfaced to the page (its `.message` is user-facing). */
@@ -58,9 +59,8 @@ export function isSighashShaped(message: string): boolean {
  * uses for the P2TR address derivation (we pass the wallet's).
  */
 export async function signMessageBIP322(
-  identity: Identity,
+  context: SessionContext,
   message: string,
-  network?: Parameters<typeof BIP322.sign>[2],
 ): Promise<string> {
   if (message.trim().length === 0) {
     throw new SignMessageError('EMPTY', 'Cannot sign an empty message.');
@@ -72,7 +72,8 @@ export async function signMessageBIP322(
         'only signs human-readable messages here, never a raw 32-byte hash.',
     );
   }
-  return BIP322.sign(message, identity, network);
+  context.assertCurrent();
+  return BIP322.sign(message, context.wallet.identity, networks[context.network]);
 }
 
 /**
@@ -110,10 +111,10 @@ export const FEE_SANITY_BOUND_SATS = 100_000;
  * carry the 32-byte x-only form, so we slice the parity byte off a 33-byte key.
  */
 export async function buildInspectContext(
-  wallet: Wallet,
-  network: NetworkName,
+  context: SessionContext,
   dustSats: number,
 ): Promise<InspectContext> {
+  const { wallet, network } = context;
   const ownXOnly = hex.encode(await wallet.identity.xOnlyPublicKey());
   const operatorXOnly = hex.encode(toXOnly(wallet.arkServerPublicKey));
   const ownScripts: Uint8Array[] = [];
@@ -151,12 +152,13 @@ function toXOnly(key: Uint8Array): Uint8Array {
  * approved are the bytes we sign — no chance of signing a different tx than was inspected.
  */
 export async function signPsbtPartial(
-  wallet: Wallet,
+  context: SessionContext,
   psbt: string,
   inputIndexes: number[],
 ): Promise<string> {
   const tx = parsePsbt(psbt);
-  const signed = await wallet.identity.sign(tx, inputIndexes);
+  context.assertCurrent();
+  const signed = await context.wallet.identity.sign(tx, inputIndexes);
   // toPSBT() serializes WITHOUT extracting/finalizing — the partial sig rides along.
   const { base64 } = await import('@scure/base');
   return base64.encode(signed.toPSBT());

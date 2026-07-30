@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { DustChangeError, type Wallet } from '@arkade-os/sdk';
 import { SendValidationError } from './wallet';
+import type { SessionContext } from './wallet-runtime';
 
 /**
  * `sendOnchain` integration tests — verifies address validation, balance pre-check,
@@ -16,6 +17,7 @@ import { SendValidationError } from './wallet';
 
 // vi.hoisted runs before module resolution, making offboardMock available to vi.mock.
 const offboardMock = vi.hoisted(() => vi.fn(async () => 'offboard-txid'));
+const onboardMock = vi.hoisted(() => vi.fn(async () => 'onboard-txid'));
 
 vi.mock('./storage', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./storage')>();
@@ -29,12 +31,13 @@ vi.mock('@arkade-os/sdk', async (importOriginal) => {
     Ramps: class {
       constructor(_w: unknown) {}
       offboard = offboardMock;
+      onboard = onboardMock;
     },
   };
 });
 
 // Import AFTER vi.mock so the mocked modules are in place.
-import { sendOnchain } from './wallet';
+import { onboardBoarding, sendOnchain } from './wallet';
 
 const AVAILABLE = 100_000;
 
@@ -57,24 +60,30 @@ function mockWallet(available = AVAILABLE) {
   } as unknown as Wallet;
 }
 
+function context(wallet: Wallet, assertCurrent: () => void = vi.fn()): SessionContext {
+  return { wallet, network: 'regtest', epoch: 1, assertCurrent };
+}
+
 beforeEach(() => {
   offboardMock.mockResolvedValue('offboard-txid');
   offboardMock.mockClear();
+  onboardMock.mockResolvedValue('onboard-txid');
+  onboardMock.mockClear();
 });
 
 describe('sendOnchain — validation', () => {
   it('rejects an on-chain address for the wrong network', async () => {
     const wallet = mockWallet();
     // regtest expects bcrt1…; bc1… is mainnet → ADDRESS_WRONG_NETWORK
-    await expect(sendOnchain(wallet, { address: 'bc1qtest', amount: 1000 })).rejects.toBeInstanceOf(
-      SendValidationError,
-    );
+    await expect(
+      sendOnchain(context(wallet), { address: 'bc1qtest', amount: 1000 }),
+    ).rejects.toBeInstanceOf(SendValidationError);
   });
 
   it('rejects when explicit amount exceeds available balance', async () => {
     const wallet = mockWallet(50_000);
     await expect(
-      sendOnchain(wallet, { address: 'bcrt1qtest', amount: 100_000 }),
+      sendOnchain(context(wallet), { address: 'bcrt1qtest', amount: 100_000 }),
     ).rejects.toBeInstanceOf(SendValidationError);
   });
 });
@@ -82,7 +91,10 @@ describe('sendOnchain — validation', () => {
 describe('sendOnchain — Ramps.offboard call', () => {
   it('calls offboard with address, fees, and BigInt amount for explicit amount', async () => {
     const wallet = mockWallet();
-    const result = await sendOnchain(wallet, { address: 'bcrt1qtest', amount: 50_000 });
+    const result = await sendOnchain(context(wallet), {
+      address: 'bcrt1qtest',
+      amount: 50_000,
+    });
     expect(offboardMock).toHaveBeenCalledOnce();
     expect(offboardMock).toHaveBeenCalledWith('bcrt1qtest', { someField: 1 }, BigInt(50_000));
     expect(result.txid).toBe('offboard-txid');
@@ -90,7 +102,7 @@ describe('sendOnchain — Ramps.offboard call', () => {
 
   it('calls offboard without amount for send-all (Max)', async () => {
     const wallet = mockWallet();
-    const result = await sendOnchain(wallet, { address: 'bcrt1qtest' });
+    const result = await sendOnchain(context(wallet), { address: 'bcrt1qtest' });
     expect(offboardMock).toHaveBeenCalledOnce();
     expect(offboardMock).toHaveBeenCalledWith('bcrt1qtest', { someField: 1 }, undefined);
     expect(result.txid).toBe('offboard-txid');
@@ -99,7 +111,7 @@ describe('sendOnchain — Ramps.offboard call', () => {
   it('skips balance check when amount is omitted (send-all path)', async () => {
     // Even with a tiny balance, send-all should not throw AMOUNT_EXCEEDS_BALANCE.
     const wallet = mockWallet(100);
-    await expect(sendOnchain(wallet, { address: 'bcrt1qtest' })).resolves.toEqual({
+    await expect(sendOnchain(context(wallet), { address: 'bcrt1qtest' })).resolves.toEqual({
       txid: 'offboard-txid',
     });
     expect(wallet.getBalance).not.toHaveBeenCalled();
@@ -112,7 +124,7 @@ describe('sendOnchain — offboard error translation', () => {
   // non-raw message on the funds-leaving popup.
   it('translates the empty/dust wallet send-all failure', async () => {
     offboardMock.mockRejectedValue(new Error('No vtxos available after deducting fees'));
-    await expect(sendOnchain(mockWallet(), { address: 'bcrt1qtest' })).rejects.toThrow(
+    await expect(sendOnchain(context(mockWallet()), { address: 'bcrt1qtest' })).rejects.toThrow(
       /no spendable balance to withdraw/i,
     );
   });
@@ -122,14 +134,14 @@ describe('sendOnchain — offboard error translation', () => {
       new Error('Amount is greater than total amount of vtxos after fees'),
     );
     await expect(
-      sendOnchain(mockWallet(), { address: 'bcrt1qtest', amount: 50_000 }),
+      sendOnchain(context(mockWallet()), { address: 'bcrt1qtest', amount: 50_000 }),
     ).rejects.toThrow(/too little after the network fee/i);
   });
 
   it('translates DustChangeError to a use-Max message', async () => {
     offboardMock.mockRejectedValue(new DustChangeError(10n, 330n));
     await expect(
-      sendOnchain(mockWallet(), { address: 'bcrt1qtest', amount: 50_000 }),
+      sendOnchain(context(mockWallet()), { address: 'bcrt1qtest', amount: 50_000 }),
     ).rejects.toThrow(/leftover change would be too small/i);
   });
 });
@@ -154,7 +166,7 @@ describe('sendOnchain — scheduled-session guard', () => {
 
   it('refuses (with an ETA) when the next settlement window is far out', async () => {
     const wallet = walletWithSession(Math.floor(Date.now() / 1000) + 3600); // ~1h out
-    await expect(sendOnchain(wallet, { address: 'bcrt1qtest' })).rejects.toThrow(
+    await expect(sendOnchain(context(wallet), { address: 'bcrt1qtest' })).rejects.toThrow(
       /scheduled windows/i,
     );
     expect(offboardMock).not.toHaveBeenCalled();
@@ -162,9 +174,41 @@ describe('sendOnchain — scheduled-session guard', () => {
 
   it('proceeds when the session window is open/imminent', async () => {
     const wallet = walletWithSession(Math.floor(Date.now() / 1000)); // open now
-    await expect(sendOnchain(wallet, { address: 'bcrt1qtest' })).resolves.toEqual({
+    await expect(sendOnchain(context(wallet), { address: 'bcrt1qtest' })).resolves.toEqual({
       txid: 'offboard-txid',
     });
     expect(offboardMock).toHaveBeenCalledOnce();
+  });
+
+  it('does not start offboard after the session context becomes stale', async () => {
+    const wallet = mockWallet();
+    const assertCurrent = vi.fn(() => {
+      throw new Error('LOCKED');
+    });
+
+    await expect(
+      sendOnchain(context(wallet, assertCurrent), { address: 'bcrt1qtest' }),
+    ).rejects.toThrow('LOCKED');
+    expect(offboardMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('onboardBoarding — session authorization', () => {
+  it('does not start onboarding after the operator read invalidates the context', async () => {
+    let current = true;
+    const wallet = mockWallet();
+    wallet.getBalance = vi.fn(async () => ({
+      boarding: { confirmed: 10_000, unconfirmed: 0, total: 10_000 },
+    })) as never;
+    wallet.arkProvider.getInfo = vi.fn(async () => {
+      current = false;
+      return { fees: { someField: 1 } };
+    }) as never;
+    const assertCurrent = () => {
+      if (!current) throw new Error('LOCKED');
+    };
+
+    await expect(onboardBoarding(context(wallet, assertCurrent))).rejects.toThrow('LOCKED');
+    expect(onboardMock).not.toHaveBeenCalled();
   });
 });

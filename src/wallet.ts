@@ -1,6 +1,5 @@
 import {
   Wallet,
-  SeedIdentity,
   ArkAddress,
   Ramps,
   DustChangeError,
@@ -12,11 +11,12 @@ import {
   IndexedDBWalletRepository,
   IndexedDBContractRepository,
   type NetworkName,
+  type Identity,
   type WalletBalance,
   type ExtendedVirtualCoin,
   type ArkTransaction,
 } from '@arkade-os/sdk';
-import { getNetwork as getStoredNetwork } from './storage';
+import type { SessionContext } from './wallet-runtime';
 import {
   adjustBalanceForExpiry,
   partitionVtxos,
@@ -32,7 +32,7 @@ import {
  * SDK wallet runtime.
  *
  * `wallet-runtime.ts` holds one `Wallet` for the whole unlocked session and builds
- * it via `buildWallet(seed, network)`, backed by IndexedDB repositories (where the
+ * it via `buildWallet(identity, network)`, backed by IndexedDB repositories (where the
  * SDK persists VTXO/balance/history state so it survives SW restarts). The
  * functions below all operate on that already-built wallet.
  */
@@ -100,19 +100,16 @@ export function networkConfig(network: NetworkName): NetworkConfig {
 // ─── buildWallet — wallet construction ────────────────────────────────────────
 
 /**
- * Build a `Wallet` from the in-memory seed and the given network's config, backed
+ * Build a `Wallet` from the runtime-owned identity and the given network's config, backed
  * by IndexedDB repositories. `network` is passed in explicitly (rather than read
  * from storage here) so the caller's cache key and the constructed wallet always
  * refer to the same network.
  *
- * The seed is BIP86-derived for the given network (coin type 0' mainnet / 1'
- * otherwise) via `SeedIdentity.fromSeed` — the canonical seed-first factory
- * (symmetric with `MnemonicIdentity.fromMnemonic`), so the keystore never has to
- * hand the mnemonic across.
+ * Identity derivation happens once at the runtime boundary. This builder never receives
+ * the mnemonic or an application-owned raw seed.
  */
-export async function buildWallet(seed: Uint8Array, network: NetworkName): Promise<Wallet> {
+export async function buildWallet(identity: Identity, network: NetworkName): Promise<Wallet> {
   const cfg = networkConfig(network);
-  const identity = SeedIdentity.fromSeed(seed, { isMainnet: cfg.isMainnet });
   return Wallet.create({
     identity,
     // arkServerUrl/esploraUrl are @deprecated in favor of explicit providers, but
@@ -234,21 +231,6 @@ export async function listCoins(wallet: Wallet): Promise<{ coins: CoinInfo[] }> 
     ],
   };
 }
-
-/** The active network name (from storage; addresses are operator-bound to it). */
-export function getNetwork(): Promise<NetworkName> {
-  // The wallet's operator is fixed by this at build time; re-exposed here so the
-  // provider/messaging layer reads the network through the wallet read-method surface.
-  return getStoredNetwork();
-}
-
-/**
- * Persist the active network. The next `buildWallet` picks up the new operator →
- * a different Arkade address (operator is baked into the address).
- * ponytail: no interactive picker UI yet (read-only pill); this exists for later
- * renewal and the settings screen to call, and for completeness of the wallet surface.
- */
-export { setNetwork } from './storage';
 
 /**
  * Raw user key as hex — x-only (32B) + compressed (33B). Exposed for web apps that
@@ -433,17 +415,18 @@ export function validateAmount(amount: number, available: number): void {
  * `Ramps.offboard` / Boltz with their own approval UX (separate, later PRs).
  */
 export async function send(
-  wallet: Wallet,
+  context: SessionContext,
   { address, amount, outpoints }: { address: string; amount: number; outpoints?: string[] },
 ): Promise<{ txid: string }> {
-  const network = await getStoredNetwork();
+  context.assertCurrent();
+  const { wallet, network } = context;
   validateArkadeAddress(address, network);
 
   // Coin-control path: the caller picked exact inputs. Those coins are the only inputs
   // and their sum is the spend ceiling (classic coin control — no auto-top-up from
   // unselected coins). Handled separately below.
   if (outpoints && outpoints.length > 0) {
-    return sendSelected(wallet, address.trim(), amount, outpoints);
+    return sendSelected(context, address.trim(), amount, outpoints);
   }
 
   // Validate the amount against the LIVE *expiry-adjusted* available balance (not the
@@ -455,6 +438,7 @@ export async function send(
 
   // A single Recipient { address, amount } is the off-chain Arkade→Arkade case.
   try {
+    context.assertCurrent();
     const txid = await wallet.send({ address: address.trim(), amount });
     return { txid };
   } catch (err) {
@@ -482,11 +466,13 @@ export async function send(
  * its own coin selection and can't be constrained to a chosen set.
  */
 async function sendSelected(
-  wallet: Wallet,
+  context: SessionContext,
   address: string,
   amount: number,
   outpoints: string[],
 ): Promise<{ txid: string }> {
+  context.assertCurrent();
+  const { wallet } = context;
   // Re-fetch and resolve the outpoints against the LIVE spendable set. A coin renewed or
   // swept in the background since the popup listed it won't be found -> COIN_GONE_MESSAGE.
   const vtxos = await wallet.getVtxos({ withRecoverable: true });
@@ -495,6 +481,7 @@ async function sendSelected(
   validateAmount(amount, selectedSats);
 
   try {
+    context.assertCurrent();
     const txid = await wallet.sendBitcoin({ address, amount, selectedVtxos: selected });
     return { txid };
   } catch (err) {
@@ -520,10 +507,11 @@ async function sendSelected(
  * from the total internally.
  */
 export async function sendOnchain(
-  wallet: Wallet,
+  context: SessionContext,
   { address, amount }: { address: string; amount?: number },
 ): Promise<{ txid: string }> {
-  const network = await getStoredNetwork();
+  context.assertCurrent();
+  const { wallet, network } = context;
   validateOnchainAddress(address, network);
   if (amount !== undefined) {
     const balance = await getBalance(wallet);
@@ -553,6 +541,7 @@ export async function sendOnchain(
   }
 
   try {
+    context.assertCurrent();
     const txid = await new Ramps(wallet).offboard(
       address.trim(),
       info.fees,
@@ -663,9 +652,11 @@ export function selectRenewable(
  * renew" from the SDK is a no-op, not an error — return `{ renewed: 0 }`.
  */
 export async function renewExpiringVtxos(
-  wallet: Wallet,
+  context: SessionContext,
   marginMs: number,
 ): Promise<{ renewed: number; txid?: string }> {
+  context.assertCurrent();
+  const { wallet } = context;
   const vtxos = await wallet.getVtxos({ withRecoverable: true });
   const renewable = selectRenewable(vtxos, marginMs);
   // Nothing renewable → no-op. Critically, we never call renewVtxos when only expired/
@@ -675,6 +666,7 @@ export async function renewExpiringVtxos(
   // We never dispose this manager: it stays cached on `wallet` for reuse, and a
   // disposed manager can't safely be reused. The session runtime owns the wallet's
   // (and therefore the manager's) lifetime, not this function.
+  context.assertCurrent();
   const manager = await wallet.getVtxoManager();
   const thresholdSeconds = Math.max(1, Math.round(marginMs / 1000));
   try {
@@ -702,6 +694,7 @@ export async function renewExpiringVtxos(
     // newly-swept coin first), so no funds are stuck and no intent stays wedged.
     if (hasRecoverableOrExpired(vtxos)) {
       try {
+        context.assertCurrent();
         await manager.recoverVtxos();
       } catch (err) {
         // "No recoverable" means nothing to drain (race) — fine, proceed to renew.
@@ -712,6 +705,7 @@ export async function renewExpiringVtxos(
       }
     }
 
+    context.assertCurrent();
     const txid = await manager.renewVtxos(undefined, { thresholdSeconds });
     return { renewed: renewable.length, txid };
   } catch (err) {
@@ -759,8 +753,10 @@ export function hasRecoverableOrExpired(vtxos: ExtendedVirtualCoin[]): boolean {
  * The caller guarantees the wallet is unlocked (this signs).
  */
 export async function recoverExpiredVtxos(
-  wallet: Wallet,
+  context: SessionContext,
 ): Promise<{ recovered: number; sats: number; txid?: string }> {
+  context.assertCurrent();
+  const { wallet } = context;
   // Not disposed here — see the same note in renewExpiringVtxos.
   const manager = await wallet.getVtxoManager();
   try {
@@ -769,6 +765,7 @@ export async function recoverExpiredVtxos(
     if (recoverable.vtxoCount === 0 || recoverable.recoverable <= 0n) {
       return { recovered: 0, sats: 0 };
     }
+    context.assertCurrent();
     const txid = await manager.recoverVtxos();
     return {
       recovered: recoverable.vtxoCount,
@@ -807,12 +804,15 @@ export async function recoverExpiredVtxos(
  * The caller guarantees the wallet is unlocked (this signs).
  */
 export async function onboardBoarding(
-  wallet: Wallet,
+  context: SessionContext,
 ): Promise<{ onboarded: boolean; txid?: string }> {
+  context.assertCurrent();
+  const { wallet } = context;
   const balance = await wallet.getBalance();
   if (balance.boarding.confirmed <= 0) return { onboarded: false };
   const info = await wallet.arkProvider.getInfo();
   try {
+    context.assertCurrent();
     const txid = await new Ramps(wallet).onboard(info.fees);
     return { onboarded: true, txid };
   } catch (err) {

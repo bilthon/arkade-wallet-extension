@@ -32,12 +32,15 @@ import {
   requestApproval,
   resolveApproval,
   rejectApprovalForOrigin,
+  rejectPendingApproval,
   getPendingRequest,
   onWindowClosed,
   currentInFlight,
   ApprovalError,
   type PendingRequest,
 } from './approvals';
+
+const APPROVAL_SESSION = { epoch: 1, network: 'regtest' } as const;
 
 // Track every pending promise a test creates so a leftover rejected promise always has
 // a catch attached (no unhandled rejection escapes between tests).
@@ -53,10 +56,20 @@ async function settle(): Promise<void> {
   for (let i = 0; i < 5; i++) await Promise.resolve();
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 beforeEach(async () => {
+  browserMock.storage.session.remove.mockReset().mockImplementation(async (key: string) => {
+    session.delete(key);
+  });
   session.clear();
-  await rejectApprovalForOrigin('https://a.example', 'reset').catch(() => {});
-  await rejectApprovalForOrigin('https://b.example', 'reset').catch(() => {});
+  await rejectPendingApproval('reset').catch(() => {});
   await Promise.allSettled(tracked.splice(0));
 });
 
@@ -80,12 +93,15 @@ describe('requestApproval / resolveApproval', () => {
       return 42;
     });
 
-    const pending = track(requestApproval({ kind: 'connect' }, 'https://a.example', openWindow));
+    const pending = track(
+      requestApproval({ kind: 'connect' }, 'https://a.example', openWindow, APPROVAL_SESSION),
+    );
     await settle();
 
     const rec = await getPendingRequest(captured);
     expect(rec?.origin).toBe('https://a.example');
     expect(rec?.kind).toBe('connect');
+    expect(rec?.session).toEqual(APPROVAL_SESSION);
     expect(currentInFlight()?.windowId).toBe(42);
 
     const ok = await resolveApproval(captured, { approved: true });
@@ -98,7 +114,9 @@ describe('requestApproval / resolveApproval', () => {
 
   it('resolves with approved=false on reject', async () => {
     const c = capture();
-    const pending = track(requestApproval({ kind: 'connect' }, 'https://a.example', c.open));
+    const pending = track(
+      requestApproval({ kind: 'connect' }, 'https://a.example', c.open, APPROVAL_SESSION),
+    );
     await settle();
     await resolveApproval(c.id(), { approved: false });
     await expect(pending).resolves.toEqual({ approved: false });
@@ -106,10 +124,12 @@ describe('requestApproval / resolveApproval', () => {
 
   it('rejects a concurrent second request (one window at a time)', async () => {
     const c = capture();
-    const first = track(requestApproval({ kind: 'connect' }, 'https://a.example', c.open));
+    const first = track(
+      requestApproval({ kind: 'connect' }, 'https://a.example', c.open, APPROVAL_SESSION),
+    );
 
     await expect(
-      requestApproval({ kind: 'connect' }, 'https://b.example', async () => 2),
+      requestApproval({ kind: 'connect' }, 'https://b.example', async () => 2, APPROVAL_SESSION),
     ).rejects.toMatchObject({ code: 'BUSY' });
 
     await resolveApproval(c.id(), { approved: true });
@@ -118,7 +138,9 @@ describe('requestApproval / resolveApproval', () => {
 
   it('does not resolve on a mismatched requestId', async () => {
     const c = capture();
-    const pending = track(requestApproval({ kind: 'connect' }, 'https://a.example', c.open));
+    const pending = track(
+      requestApproval({ kind: 'connect' }, 'https://a.example', c.open, APPROVAL_SESSION),
+    );
     await settle();
 
     expect(await resolveApproval('not-the-id', { approved: true })).toBe(false);
@@ -129,7 +151,14 @@ describe('requestApproval / resolveApproval', () => {
 
 describe('rejectApprovalForOrigin', () => {
   it('rejects a pending request from the matching origin (revoke during pending)', async () => {
-    const pending = track(requestApproval({ kind: 'connect' }, 'https://a.example', async () => 1));
+    const pending = track(
+      requestApproval(
+        { kind: 'connect' },
+        'https://a.example',
+        async () => 1,
+        APPROVAL_SESSION,
+      ),
+    );
     await settle();
 
     const rejected = await rejectApprovalForOrigin('https://a.example', 'revoked');
@@ -139,7 +168,9 @@ describe('rejectApprovalForOrigin', () => {
 
   it('does not reject a pending request from a different origin', async () => {
     const c = capture();
-    const pending = track(requestApproval({ kind: 'connect' }, 'https://a.example', c.open));
+    const pending = track(
+      requestApproval({ kind: 'connect' }, 'https://a.example', c.open, APPROVAL_SESSION),
+    );
     await settle();
 
     expect(await rejectApprovalForOrigin('https://other.example', 'x')).toBe(false);
@@ -148,9 +179,77 @@ describe('rejectApprovalForOrigin', () => {
   });
 });
 
+describe('rejectPendingApproval', () => {
+  it('synchronously detaches and rejects a pending connect regardless of origin', async () => {
+    const pending = track(
+      requestApproval(
+        { kind: 'connect' },
+        'https://a.example',
+        async () => 1,
+        APPROVAL_SESSION,
+      ),
+    );
+    await settle();
+
+    const cancellation = rejectPendingApproval('locked');
+    expect(currentInFlight()).toBeNull();
+
+    await expect(cancellation).resolves.toBe(true);
+    await expect(pending).rejects.toMatchObject({ code: 'LOCKED' });
+    expect(session.get('pendingApproval')).toBeUndefined();
+  });
+
+  it('rejects the request even when persisted-record cleanup fails', async () => {
+    const pending = track(
+      requestApproval(
+        { kind: 'signMessage', message: 'hello' },
+        'https://a.example',
+        async () => 1,
+        APPROVAL_SESSION,
+      ),
+    );
+    await settle();
+    browserMock.storage.session.remove.mockRejectedValueOnce(new Error('storage failed'));
+
+    const cancellation = rejectPendingApproval('locked');
+    expect(currentInFlight()).toBeNull();
+    await expect(cancellation).rejects.toThrow('storage failed');
+    await expect(pending).rejects.toMatchObject({ code: 'LOCKED' });
+  });
+
+  it('does not open or persist a request cancelled during its initial write', async () => {
+    const gate = deferred<void>();
+    browserMock.storage.session.set.mockImplementationOnce(async (items) => {
+      await gate.promise;
+      for (const [key, value] of Object.entries(items)) session.set(key, value);
+    });
+    const openWindow = vi.fn(async () => 1);
+    const pending = track(
+      requestApproval({ kind: 'connect' }, 'https://a.example', openWindow, APPROVAL_SESSION),
+    );
+    await vi.waitFor(() => expect(currentInFlight()).not.toBeNull());
+
+    const cancellation = rejectPendingApproval('locked');
+    expect(currentInFlight()).toBeNull();
+    gate.resolve();
+
+    await expect(cancellation).resolves.toBe(true);
+    await expect(pending).rejects.toMatchObject({ code: 'LOCKED' });
+    expect(openWindow).not.toHaveBeenCalled();
+    expect(session.get('pendingApproval')).toBeUndefined();
+  });
+});
+
 describe('onWindowClosed', () => {
   it('rejects the in-flight request when its window is dismissed', async () => {
-    const pending = track(requestApproval({ kind: 'connect' }, 'https://a.example', async () => 99));
+    const pending = track(
+      requestApproval(
+        { kind: 'connect' },
+        'https://a.example',
+        async () => 99,
+        APPROVAL_SESSION,
+      ),
+    );
     await settle();
 
     await onWindowClosed(99);
@@ -160,7 +259,9 @@ describe('onWindowClosed', () => {
 
   it('ignores closure of an unrelated window', async () => {
     const c = capture();
-    const pending = track(requestApproval({ kind: 'connect' }, 'https://a.example', c.open));
+    const pending = track(
+      requestApproval({ kind: 'connect' }, 'https://a.example', c.open, APPROVAL_SESSION),
+    );
     await settle();
 
     await onWindowClosed(123);

@@ -25,25 +25,20 @@ export interface WalletSnapshot {
   fetchedAt: number;
 }
 
-const SNAPSHOT_KEY = 'walletSnapshot';
+export const WALLET_SNAPSHOT_KEY = 'walletSnapshot';
 
 /**
  * Read the cached snapshot for a network. Returns null if absent or if the cached
  * snapshot is for a different network (operator changed → addresses invalid).
  */
 export async function getSnapshot(network: NetworkName): Promise<WalletSnapshot | null> {
-  const got = await browser.storage.local.get(SNAPSHOT_KEY);
-  const snap = got[SNAPSHOT_KEY] as WalletSnapshot | undefined;
+  const got = await browser.storage.local.get(WALLET_SNAPSHOT_KEY);
+  const snap = got[WALLET_SNAPSHOT_KEY] as WalletSnapshot | undefined;
   if (!snap || snap.network !== network) return null;
   return snap;
 }
 
 /** Persist a fresh snapshot (after a successful live read). */
 export async function setSnapshot(snap: WalletSnapshot): Promise<void> {
-  await browser.storage.local.set({ [SNAPSHOT_KEY]: snap });
-}
-
-/** Drop the snapshot (e.g. on wallet reset). */
-export async function clearSnapshot(): Promise<void> {
-  await browser.storage.local.remove(SNAPSHOT_KEY);
+  await browser.storage.local.set({ [WALLET_SNAPSHOT_KEY]: snap });
 }

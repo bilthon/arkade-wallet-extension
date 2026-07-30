@@ -11,9 +11,10 @@ Built with [WXT](https://wxt.dev) + React.
 ## Overview
 
 The extension follows a **hub-and-spoke** model: the **background service worker** is the only
-component that holds secrets, talks to the Arkade operator, and signs transactions. Everything
-else — the popup UI, the page provider, the approval window — is a client that asks the service
-worker for things.
+component with a live signing identity, operator access, or transaction-signing capability.
+Everything else — the popup UI, the page provider, the approval window — is a client that asks
+the service worker for things. The popup handles a mnemonic only during explicit
+create/import/backup screens; it never owns the live wallet session.
 
 ```mermaid
 flowchart TB
@@ -29,11 +30,15 @@ flowchart TB
 
   subgraph sw["Background service worker"]
     BG["background.ts<br/>message router"]
-    KS["keystore.ts<br/>seed in memory only"]
-    WAL["wallet.ts<br/>Arkade SDK Wallet"]
+    KS["keystore.ts<br/>encrypted vault + authentication"]
+    RT["wallet-runtime.ts<br/>live identity + network + Wallet"]
+    LIFE["session-lock.ts / auto-lock.ts<br/>session lifecycle"]
+    WAL["wallet.ts<br/>Arkade SDK operations"]
     PH["provider-handlers.ts<br/>origin + grant gating"]
     BG --> KS
-    BG --> WAL
+    BG --> RT
+    BG --> LIFE
+    RT --> WAL
     BG --> PH
   end
 
@@ -67,14 +72,16 @@ helper (`defineBackground`, `defineContentScript`, etc.).
 
 ### Background (`entrypoints/background.ts`)
 
-Stateless request router. Holds no live `Wallet` object between wakes — it rebuilds one from
-the in-memory seed + IndexedDB on each request. The only persistent in-memory secret is the
-unlocked seed in `keystore.ts`, zeroed on lock or auto-lock.
+Thin request router. While the service worker is alive and unlocked, `wallet-runtime.ts` owns
+one live signing identity, its network, and one lazily built SDK `Wallet`. Requests share that
+wallet for the lifetime of the session. A service-worker restart loses the whole runtime
+session and starts locked. Durable storage survives, but none of it restores session authority.
 
 Responsibilities:
 
-- **Keystore** — create, import, unlock, lock, backup reveal, network switch
-- **Reads** — network (from `storage.ts`); address + balance are cache-first via `wallet-cache.ts` (instant `getWalletSnapshot`, then a live `refreshWalletSnapshot`) and readable while locked; transaction history is an on-demand, unlock-gated SDK fetch (rebuilt per call, not cached)
+- **Vault** — create, import, password-authenticated unlock, and backup reveal through `keystore.ts`
+- **Lifecycle** — manual/idle lock through `session-lock.ts`; alarm policy through `auto-lock.ts`; serialized, password-authenticated network changes through `network-switch.ts`
+- **Reads** — configured network from `storage.ts`; address + balance are cache-first via `wallet-cache.ts` (instant `getWalletSnapshot`, then an unlock-gated live `refreshWalletSnapshot`); transaction history is an on-demand SDK fetch through the shared session wallet
 - **Writes** — off-chain send, on-chain offboard, VTXO renewal/recovery/onboarding
 - **Provider** — origin-derived, grant-gated handlers for web app connect/read/sign
 - **Approvals** — opens approval windows, resolves user decisions back to waiting web app promises
@@ -108,7 +115,7 @@ React app with a simple route union (no router library). On mount it asks the SW
 and routes to welcome → create/import → unlock → home.
 
 - `App.tsx` — route switcher
-- `client.ts` — typed `sendMessage` wrapper (the popup never holds secrets)
+- `client.ts` — typed `sendMessage` wrapper (the popup never holds a live signing capability)
 - `screens/` — Welcome, CreatePassword, Backup, Import, Unlock, WalletHome, Send, Receive, History, Settings
 
 ### Approval (`entrypoints/approval/`)
@@ -123,10 +130,16 @@ approvals.
 | Module | Purpose |
 |--------|---------|
 | `messaging.ts` | Typed message protocol (`ProtocolMap`) between all clients and the background |
-| `keystore.ts` | Encrypted vault + in-memory seed while unlocked; auto-lock alarms |
+| `keystore.ts` | Encrypted mnemonic vault, password authentication, create/import, and backup reveal |
 | `crypto.ts` | Mnemonic generation, vault encryption/decryption |
-| `storage.ts` | `chrome.storage.local` (vault, network) and `session` (unlock flag only) |
-| `wallet.ts` | Wraps `@arkade-os/sdk` — builds `Wallet`, reads/writes/transactions |
+| `storage.ts` | Typed persistent storage for the encrypted vault and configured network |
+| `wallet-runtime.ts` | Live identity, active session network, SDK wallet, epoch, and refresh state |
+| `session-access.ts` | Popup/provider session access policy and user-activity auto-lock behavior |
+| `session-lock.ts` | Shared manual/idle lock coordinator and capability revocation |
+| `auto-lock.ts` | Browser alarm adapter; owns no wallet or vault state |
+| `network-switch.ts` | Serialized, fail-closed vault/network/runtime transition coordinator |
+| `wallet.ts` | Wraps `@arkade-os/sdk` wallet reads, writes, ramps, renewal, and recovery |
+| `lightning.ts` | Session-bound Boltz/Lightning runtime with its own disposable manager lifecycle |
 | `wallet-cache.ts` | Caches address + balance for instant popup render |
 | `page-bridge.ts` | `postMessage` envelope shared by provider and content script |
 | `provider-api.ts` | Provider types and error codes surfaced to web apps |
@@ -142,17 +155,27 @@ approvals.
 
 ## Data storage
 
-Three tiers, from most to least sensitive:
+State is split by lifetime and sensitivity:
 
 | Tier | Location | Contents |
 |------|----------|----------|
-| In-memory seed | `keystore.ts` (SW only) | Decrypted seed while unlocked. Cleared on lock or SW kill (~30s idle). |
+| Live session | `wallet-runtime.ts` (SW only) | `SeedIdentity`, active network, session epoch, and lazy SDK `Wallet`. No longer obtainable from the runtime after lock; captured contexts are revoked. |
 | Encrypted vault | `chrome.storage.local` | Mnemonic encrypted with the user's password, bound to the active network (switching networks re-encrypts it, so the switch needs the password). |
 | Public cache | `chrome.storage.local` | Address, balance snapshot, connected-site grants. No secrets. |
+| Ephemeral metadata | `chrome.storage.session` | The pending approval shown in the approval window. No secret or unlock hint. |
 | SDK state | IndexedDB | VTXO/balance/history persisted by `@arkade-os/sdk`. Survives SW restarts. History reads call the SDK live rather than reading this store directly. |
 
-The seed **never** goes to session storage, the popup, or web pages — except when the user
-explicitly requests a backup phrase reveal.
+`keystore.ts` never retains a plaintext mnemonic or an application-owned raw seed. It passes a
+short-lived mnemonic to `wallet-runtime.ts`, which derives `SeedIdentity` and clears its
+temporary raw-seed buffer after the SDK copies it. Mnemonics cross the popup/SW boundary only
+for explicit create, import, and password-gated backup flows. No mnemonic, seed, identity, or
+unlock flag is persisted in `chrome.storage.session`.
+
+Locking is capability revocation, not guaranteed cryptographic erasure: the runtime drops its
+active module-owned references and invalidates captured contexts synchronously. An already
+running stack may still hold a stale reference, JavaScript cannot zero strings, and the SDK
+controls its identity's internal key memory; this is why every mutation revalidates its context
+immediately before entering the SDK.
 
 ## Message paths
 
@@ -179,18 +202,38 @@ Website → window.arkadeWallet.connect()
 
 ```
 Send screen → client.send(address, amount)
-           → background (requireWallet → validate → SDK sign)
+           → background (acquire session context → validate → assert current → SDK sign)
            → txid back to popup
 ```
 
+### Lock and network transitions
+
+Manual and idle locks call the same `lockWallet` coordinator. It synchronously revokes the
+runtime session before awaiting wallet/Lightning disposal, approval rejection, alarm cleanup,
+or provider `disconnect` delivery. Create/import/unlock and popup operations that acquire a
+session context rearm auto-lock. Provider requests and scheduled renewal do not, so a
+connected site cannot keep the wallet unlocked indefinitely.
+
+Network changes are serialized across authentication and commit. A wrong password is rejected
+before teardown. Once prepared, the transition fences the old wallet and Lightning runtimes,
+atomically persists the re-encrypted vault, target network, and snapshot invalidation, then
+installs a target-network session only if the source session remained unlocked. Storage
+failure leaves the runtime locked and the old durable vault/network pair authoritative.
+
 ## Security boundaries
 
-- **Seed isolation:** the decrypted seed lives only in SW module memory. It never crosses
-  the `browser.runtime` boundary except the explicit `getMnemonicForBackup` reveal.
+- **Secret isolation:** encrypted key material is durable; plaintext mnemonic/seed values are
+  short-lived, and the live SDK identity exists only inside the background runtime. Creation,
+  import, and password-gated backup are the deliberate mnemonic boundary exceptions.
+- **Session authority:** wallet, network, epoch, and signing identity come from one runtime
+  context. Mutation paths assert that context immediately before entering an SDK capability.
+- **Lock posture:** manual/idle lock invalidates session contexts before asynchronous cleanup;
+  pending approvals are rejected and connected providers receive `disconnect`.
 - **Origin authority:** provider handlers derive the caller origin from `sender`, never
   from a request body field the page could set.
 - **Grant gating:** web apps must `connect` (and get user approval) before any read or sign call.
-  Signing always re-prompts — it is not auto-granted by connect.
+  Signing always re-prompts, and approval records are bound to the originating session epoch
+  and network so they cannot resume after lock, unlock, or a network transition.
 - **Trusted vs untrusted paths:** popup messages and approval-window messages are trusted
   extension pages. Provider messages are untrusted and always go through origin + grant checks.
 

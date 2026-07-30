@@ -14,19 +14,15 @@ import type { LnPayStatus, LnReceiveStatus } from './lightning-utils';
  * Typed content <-> background protocol over the `browser.runtime` hop.
  * `@webext-core/messaging` gives full TS inference — no stringly-typed switch.
  *
- * Two surfaces here:
- *  • KEYSTORE ops — run entirely in the SW; the seed/mnemonic NEVER crosses this
- *    boundary except the explicit, user-initiated `getMnemonicForBackup` reveal.
- *    Everything else returns only booleans / lock state.
- *  • READ methods — addresses, balances, network. Built per-wake from the in-memory
- *    seed; only the public results cross the boundary. Cache-first: the snapshot
- *    variants return the cached value instantly, the plain variants reconcile live.
+ * Mnemonics cross this boundary only for the explicit create/import/backup flows. The live
+ * signing identity and session wallet never do. Public reads use one lazily built wallet for
+ * the current runtime session; cache-first snapshot reads can return without constructing it.
  */
 export interface ProtocolMap {
   // data: optional caller-supplied echo payload; returns pong + SW-side timestamp.
   ping(data?: { echo?: string }): { pong: true; timestamp: number; echo?: string };
 
-  // ─── Keystore (seed stays in the SW) ───────────────────────────────────────
+  // ─── Vault and session lifecycle ──────────────────────────────────────────
   hasVault(): boolean;
   getLockState(): LockState;
   /** Returns the fresh mnemonic for the one-time backup flow (creation only). */
@@ -68,11 +64,11 @@ export interface ProtocolMap {
 
   // ─── Off-chain send (the first write/spend path) ───────────────────────────
   /**
-   * In-wallet off-chain Arkade→Arkade send. Gated on unlock (`requireWallet`).
+   * In-wallet off-chain Arkade→Arkade send. Gated on a live popup wallet session.
    * The SW validates the address (well-formed Arkade address for the ACTIVE
    * network — rejects on-chain/malformed/cross-network) and the amount (integer,
    * > 0, ≥ dust, ≤ live available balance) BEFORE signing, then calls the SDK's
-   * `send`. The seed never crosses this boundary. Returns the txid.
+   * `send`. Signing key material never crosses this boundary. Returns the txid.
    * Validation failures surface as an Error whose serialized `.message` is the
    * user-facing string the popup renders (the `SendValidationError` class/`code`
    * live SW-side; only the message survives the message boundary).
@@ -192,8 +188,9 @@ export interface ProtocolMap {
   providerGetBalance(): AdjustedBalance;
   providerGetNetwork(): NetworkInfo;
   // Signing — each re-prompts via the approval window (NOT granted by connect). The SW
-  // validates everything itself; the seed never crosses this boundary, only the signature
-  // / signed PSBT does. `signPsbt` returns the PSBT UNFINALIZED (others co-sign after us).
+  // validates everything itself; signing key material never crosses this boundary, only the
+  // signature / signed PSBT does. `signPsbt` returns the PSBT UNFINALIZED so others can
+  // co-sign after us.
   providerSignMessage(data: { message: string }): { signature: string };
   providerSignPsbt(data: {
     psbt: string;

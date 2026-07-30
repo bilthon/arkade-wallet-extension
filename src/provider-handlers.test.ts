@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { webcrypto } from 'node:crypto';
 import type { MessageSenderLike } from './origin';
+import type { SessionContext } from './wallet-runtime';
 
 /**
  * Provider-handler gating. The end-to-end origin + grant contract the
@@ -19,13 +20,14 @@ const session = new Map<string, unknown>();
 let createdWindowId = 100;
 
 const tabsSent: unknown[] = [];
+const writeLocal = async (items: Record<string, unknown>) => {
+  for (const [k, v] of Object.entries(items)) local.set(k, v);
+};
 const browserMock = {
   storage: {
     local: {
       get: vi.fn(async (key: string) => ({ [key]: local.get(key) })),
-      set: vi.fn(async (items: Record<string, unknown>) => {
-        for (const [k, v] of Object.entries(items)) local.set(k, v);
-      }),
+      set: vi.fn(writeLocal),
       remove: vi.fn(async (key: string) => void local.delete(key)),
     },
     session: {
@@ -49,13 +51,10 @@ const browserMock = {
 vi.stubGlobal('browser', browserMock);
 if (!globalThis.crypto) vi.stubGlobal('crypto', webcrypto);
 
-// hasVault/getNetwork read storage (set in beforeEach). isUnlocked is the lock gate —
-// mock keystore so we control lock state without a real seed.
+// hasVault reads storage (set in beforeEach). Runtime state is the lock gate.
 let unlocked = true;
-vi.mock('./keystore', async () => {
-  const actual = await vi.importActual<typeof import('./keystore')>('./keystore');
-  return { ...actual, isUnlocked: () => unlocked };
-});
+let activeEpoch = 1;
+vi.mock('./wallet-runtime', () => ({ isUnlocked: () => unlocked }));
 // networkConfig is pure but imports the SDK; stub to avoid pulling SDK into the test.
 vi.mock('./wallet', () => ({
   networkConfig: () => ({ arkServerUrl: 'http://localhost:7070', esploraUrl: '', isMainnet: false }),
@@ -70,8 +69,9 @@ import {
   revokeSite,
   resolveApproval,
 } from './provider-handlers';
-import { setVault, setNetwork } from './storage';
-import { isMethodGranted } from './permissions';
+import { rejectPendingApproval } from './approvals';
+import { setVault } from './storage';
+import { getGrant, isMethodGranted } from './permissions';
 import { decodeProviderError } from './provider-api';
 
 function sender(partial: MessageSenderLike): MessageSenderLike {
@@ -81,19 +81,34 @@ function sender(partial: MessageSenderLike): MessageSenderLike {
 const HTTPS = sender({ origin: 'https://site.example' });
 
 /** A fake read-only wallet returning a deterministic Arkade address. */
-const fakeWallet = () =>
-  Promise.resolve({
-    getAddress: async () => 'tark1theaccount',
-    getBoardingAddress: async () => 'bcrt1boarding',
-    getBalance: async () => ({ available: 0 }),
-    getPublicKey: async () => ({ xOnly: 'aa', compressed: 'bb' }),
+const wallet = {
+  getAddress: async () => 'tark1theaccount',
+  getBoardingAddress: async () => 'bcrt1boarding',
+  getBalance: async () => ({ available: 0 }),
+  getPublicKey: async () => ({ xOnly: 'aa', compressed: 'bb' }),
+};
+
+function fakeContext(): Promise<SessionContext> {
+  const epoch = activeEpoch;
+  return Promise.resolve({
+    wallet: wallet as never,
+    network: 'regtest',
+    epoch,
+    assertCurrent() {
+      if (!unlocked || activeEpoch !== epoch) throw new Error('LOCKED');
+    },
   });
+}
 
 /** Drive a connect to approval, auto-approving via resolveApproval. */
 async function connectApproving(s: MessageSenderLike) {
-  const promise = handleConnect(s, fakeWallet);
-  // Let requestApproval persist + open the window, then approve.
-  for (let i = 0; i < 6; i++) await Promise.resolve();
+  const promise = handleConnect(s, fakeContext);
+  // A real response can only arrive after the approval window exists. Wait for both
+  // halves instead of resolving directly from an early storage write.
+  await vi.waitFor(() => {
+    expect(browserMock.windows.create).toHaveBeenCalled();
+    expect(session.get('pendingApproval')).toBeTruthy();
+  });
   const pending = session.get('pendingApproval') as { requestId: string } | undefined;
   if (pending) await resolveApproval(pending.requestId, { approved: true });
   return promise;
@@ -109,23 +124,24 @@ beforeEach(async () => {
   session.clear();
   tabsSent.length = 0;
   unlocked = true;
+  activeEpoch = 1;
+  browserMock.storage.local.set.mockImplementation(writeLocal);
   browserMock.windows.create.mockClear();
   browserMock.tabs.sendMessage.mockClear();
   await setVault({ v: 1 } as never); // hasVault() → true
-  await setNetwork('regtest');
 });
 
 describe('handleConnect — origin gating', () => {
   it('rejects an http (non-loopback) origin with BAD_ORIGIN before any approval', async () => {
     await expect(
-      handleConnect(sender({ origin: 'http://site.example' }), fakeWallet),
+      handleConnect(sender({ origin: 'http://site.example' }), fakeContext),
     ).rejects.toSatisfy((e: unknown) => codeOf(e) === 'BAD_ORIGIN');
     expect(browserMock.windows.create).not.toHaveBeenCalled();
   });
 
   it('rejects a null/opaque origin with BAD_ORIGIN', async () => {
     await expect(
-      handleConnect(sender({ origin: 'null' }), fakeWallet),
+      handleConnect(sender({ origin: 'null' }), fakeContext),
     ).rejects.toSatisfy((e: unknown) => codeOf(e) === 'BAD_ORIGIN');
   });
 
@@ -151,26 +167,83 @@ describe('handleConnect — approval + grant', () => {
   });
 
   it('rejects with REJECTED when the user declines', async () => {
-    const promise = handleConnect(HTTPS, fakeWallet);
-    for (let i = 0; i < 6; i++) await Promise.resolve();
+    const promise = handleConnect(HTTPS, fakeContext);
+    await vi.waitFor(() => expect(browserMock.windows.create).toHaveBeenCalled());
     const pending = session.get('pendingApproval') as { requestId: string };
     await resolveApproval(pending.requestId, { approved: false });
     await expect(promise).rejects.toSatisfy((e: unknown) => codeOf(e) === 'REJECTED');
   });
 
+  it('rejects with LOCKED when session lock cancels the pending connect', async () => {
+    const promise = handleConnect(HTTPS, fakeContext);
+    await vi.waitFor(() => expect(browserMock.windows.create).toHaveBeenCalled());
+
+    await rejectPendingApproval('Wallet locked by the user.');
+
+    await expect(promise).rejects.toSatisfy((e: unknown) => codeOf(e) === 'LOCKED');
+    expect(await isMethodGranted('https://site.example', 'getBalance')).toBe(false);
+  });
+
   it('is idempotent — a second connect from an already-granted origin does not re-prompt', async () => {
     await connectApproving(HTTPS);
     browserMock.windows.create.mockClear();
-    const again = await handleConnect(HTTPS, fakeWallet);
+    const again = await handleConnect(HTTPS, fakeContext);
     expect(again.accounts).toEqual(['tark1theaccount']);
     expect(browserMock.windows.create).not.toHaveBeenCalled();
   });
 
   it('throws LOCKED when the wallet is locked at connect time', async () => {
     unlocked = false;
-    await expect(handleConnect(HTTPS, fakeWallet)).rejects.toSatisfy(
+    await expect(handleConnect(HTTPS, fakeContext)).rejects.toSatisfy(
       (e: unknown) => codeOf(e) === 'LOCKED',
     );
+  });
+
+  it('rolls back a grant written while the captured session becomes stale', async () => {
+    const promise = handleConnect(HTTPS, fakeContext);
+    const pending = await vi.waitFor(() => {
+      const value = session.get('pendingApproval') as { requestId: string } | undefined;
+      expect(value).toBeTruthy();
+      return value!;
+    });
+
+    browserMock.storage.local.set.mockImplementationOnce(async (items) => {
+      await writeLocal(items);
+      activeEpoch++;
+    });
+    await resolveApproval(pending.requestId, { approved: true });
+
+    await expect(promise).rejects.toSatisfy((e: unknown) => codeOf(e) === 'LOCKED');
+    expect(await isMethodGranted('https://site.example', 'getBalance')).toBe(false);
+  });
+
+  it('does not roll back a newer grant after its captured session becomes stale', async () => {
+    const promise = handleConnect(HTTPS, fakeContext);
+    const pending = await vi.waitFor(() => {
+      const value = session.get('pendingApproval') as { requestId: string } | undefined;
+      expect(value).toBeTruthy();
+      return value!;
+    });
+
+    browserMock.storage.local.set.mockImplementationOnce(async (items) => {
+      await writeLocal(items);
+      const grants = structuredClone(local.get('grants')) as Record<
+        string,
+        { id: string; accounts: string[]; grantedAt: number }
+      >;
+      grants['https://site.example'] = {
+        ...grants['https://site.example'],
+        id: crypto.randomUUID(),
+        accounts: ['tark1newer'],
+        grantedAt: grants['https://site.example'].grantedAt + 1,
+      };
+      local.set('grants', grants);
+      activeEpoch++;
+    });
+    await resolveApproval(pending.requestId, { approved: true });
+
+    await expect(promise).rejects.toSatisfy((e: unknown) => codeOf(e) === 'LOCKED');
+    expect((await getGrant('https://site.example'))?.accounts).toEqual(['tark1newer']);
   });
 });
 

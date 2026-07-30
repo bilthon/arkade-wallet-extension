@@ -26,6 +26,7 @@ vi.stubGlobal('browser', browserMock);
 import {
   grantConnect,
   revokeGrant,
+  revokeGrantIfCurrent,
   getGrant,
   listGrants,
   isConnected,
@@ -91,6 +92,17 @@ describe('revokeGrant', () => {
 
   it('is a no-op for an unknown origin', async () => {
     await expect(revokeGrant('https://never.example')).resolves.toBeUndefined();
+  });
+
+  it('conditionally revokes only the exact grant issuance', async () => {
+    const old = await grantConnect('https://site.example', ['tark1old']);
+    const current = await grantConnect('https://site.example', ['tark1new']);
+
+    await expect(revokeGrantIfCurrent(old.origin, old.id)).resolves.toBe(false);
+    expect((await getGrant(old.origin))?.accounts).toEqual(['tark1new']);
+
+    await expect(revokeGrantIfCurrent(current.origin, current.id)).resolves.toBe(true);
+    expect(await getGrant(current.origin)).toBeNull();
   });
 });
 
