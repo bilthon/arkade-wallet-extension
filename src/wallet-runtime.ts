@@ -13,8 +13,8 @@ import { withTimeout } from './async';
  */
 
 interface RuntimeSession {
-  epoch: number;
-  network: NetworkName;
+  readonly epoch: number;
+  readonly network: NetworkName;
   identity: SeedIdentity;
   wallet: Wallet | null;
   pendingWallet: Promise<Wallet> | null;
@@ -278,12 +278,7 @@ export function getSessionContext(): Promise<SessionContext> {
 }
 
 function assertSessionOwner(owner: RuntimeSession, wallet: Wallet): void {
-  if (
-    session !== owner ||
-    owner.wallet !== wallet ||
-    session.epoch !== owner.epoch ||
-    session.network !== owner.network
-  ) {
+  if (session !== owner || owner.wallet !== wallet) {
     throw new Error('LOCKED');
   }
 }
