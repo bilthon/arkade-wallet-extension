@@ -12,6 +12,28 @@ import { withTimeout } from './async';
  * mnemonic nor an application-owned raw seed is retained here.
  */
 
+/**
+ * The two views of one wallet session. They are separate types because they describe
+ * that session at different lifetimes, not because one is more privileged.
+ *
+ *  1. `RuntimeSession` is the live record we mutate. Its wallet, pending build and
+ *     freshness fields change throughout the session, and `wallet` stays null until a
+ *     build succeeds. Only this module ever holds one.
+ *  2. `SessionContext` is a frozen snapshot of a single moment, handed to callers. Its
+ *     `wallet` is never null, so callers never null check it, and `assertCurrent` closes
+ *     over the exact session and wallet the snapshot came from.
+ *
+ * A caller proves its session is still current by comparing object references, which is
+ * what `assertCurrent` does. `SessionContext` also carries a plain numeric `epoch` for
+ * the one place a reference cannot go: the pending approval record outlives the call and
+ * crosses the approval window, so it stores the number instead. See `requestApprovalSafe`
+ * in `provider-handlers.ts`.
+ *
+ * `SessionContext` has no `identity` field, and that is not a security boundary. The
+ * wallet it carries exposes a working signer, and the signing helpers reach it directly
+ * as `context.wallet.identity`. What stops a stale caller from signing is calling
+ * `assertCurrent()` immediately before the SDK call, not the shape of this type.
+ */
 interface RuntimeSession {
   readonly epoch: number;
   readonly network: NetworkName;
@@ -20,6 +42,19 @@ interface RuntimeSession {
   pendingWallet: Promise<Wallet> | null;
   lastRefreshMs: number;
   refreshPromise: Promise<void> | null;
+}
+
+/**
+ * An atomic capability for work performed by one live wallet session. Call
+ * `assertCurrent()` immediately before any SDK operation that can sign or persist a
+ * session-bound mutation. It throws if a lock, unlock, or network transition replaced the
+ * captured session while earlier asynchronous validation was running.
+ */
+export interface SessionContext {
+  readonly wallet: Wallet;
+  readonly network: NetworkName;
+  readonly epoch: number;
+  assertCurrent(): void;
 }
 
 export interface RuntimeVersion {
@@ -53,19 +88,6 @@ export interface RuntimeNetworkTransition {
   readonly disposal: Promise<void>;
   install(): boolean;
   abort(): void;
-}
-
-/**
- * An atomic capability for work performed by one live wallet session. Call
- * `assertCurrent()` immediately before any SDK operation that can sign or persist a
- * session-bound mutation; it rejects if a lock, unlock, or network transition replaced
- * the captured session while earlier asynchronous validation was running.
- */
-export interface SessionContext {
-  readonly wallet: Wallet;
-  readonly network: NetworkName;
-  readonly epoch: number;
-  assertCurrent(): void;
 }
 
 let session: RuntimeSession | null = null;
