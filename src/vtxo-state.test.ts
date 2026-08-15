@@ -11,13 +11,14 @@ import {
 } from './vtxo-state';
 
 /**
- * The confirmed-bug fix: an expired-but-unswept VTXO must NOT
- * count as `available`, and the renewal-trigger decision must be a pure function.
- *
  * Fixtures are synthetic VirtualCoins shaped to the SDK's `isExpired`/`isSpendable`
  * contract: `isExpired` is true when state==="swept" OR `batchExpiry` (epoch ms) is in
  * the past (ignoring obviously-non-time/block-height values); `isSpendable` is
  * `!isSpent`. We build only the fields those helpers read, cast through `unknown`.
+ *
+ * Raw balances here follow SDK 0.4.62, where `available` already excludes expired and
+ * swept coins, `recoverable` is the sum of both of those, and `settled`/`preconfirmed`
+ * include funds locked in a contract (`gated`).
  */
 
 const HOUR = 60 * 60 * 1000;
@@ -48,6 +49,8 @@ function balance(over: Partial<WalletBalance>): WalletBalance {
     settled: 0,
     preconfirmed: 0,
     available: 0,
+    gated: 0,
+    intentLocked: 0,
     recoverable: 0,
     pendingRecovery: 0,
     total: 0,
@@ -103,25 +106,44 @@ describe('partitionVtxos', () => {
   });
 });
 
-describe('adjustBalanceForExpiry — the core fix', () => {
-  it('excludes an expired-but-unswept VTXO from available', () => {
-    // The bug: a 1 BTC coin expired but state is still "settled", so the raw SDK
-    // balance counts it in settled/available. After adjustment it must be 0 there.
+describe('adjustBalanceForExpiry', () => {
+  it('reports an elapsed-but-unswept VTXO as expired, and leaves available alone', () => {
+    // SDK 0.4.62 already routes this coin to `recoverable` and keeps it out of
+    // `available`, so we must not subtract it a second time.
     const expired = vtxo({ value: 100_000_000, state: 'settled', expiryMs: NOW - HOUR });
     const raw = balance({
-      settled: 100_000_000,
+      settled: 0,
       preconfirmed: 0,
-      available: 100_000_000,
+      available: 0,
+      recoverable: 100_000_000,
       total: 100_000_000,
     });
 
     const adj = adjustBalanceForExpiry(raw, [expired]);
 
     expect(adj.available).toBe(0);
-    expect(adj.settled).toBe(0);
     expect(adj.expired).toBe(100_000_000);
-    // The funds still exist — total is untouched.
+    // The funds still exist, so total is untouched.
     expect(adj.total).toBe(100_000_000);
+  });
+
+  it('leaves a swap lockup gated and out of available', () => {
+    // A funded VHTLC lockup counts in `settled` but not in `available`. Recomputing
+    // available as settled + preconfirmed would hand the lockup back as spendable.
+    const live = vtxo({ value: 80_000, state: 'settled', expiryMs: NOW + 3 * HOUR });
+    const raw = balance({
+      settled: 100_000,
+      preconfirmed: 0,
+      available: 80_000,
+      gated: 20_000,
+      total: 100_000,
+    });
+
+    const adj = adjustBalanceForExpiry(raw, [live]);
+
+    expect(adj.available).toBe(80_000);
+    expect(adj.gated).toBe(20_000);
+    expect(adj.settled).toBe(100_000);
   });
 
   it('keeps a live coin fully available and reports its expiry', () => {
@@ -136,85 +158,46 @@ describe('adjustBalanceForExpiry — the core fix', () => {
     expect(adj.nextExpiryAtMs).toBe(at);
   });
 
-  it('drains preconfirmed before settled', () => {
-    // 30k expired; raw split is 20k preconfirmed + 60k settled (available 80k).
-    // Drain 20k from preconfirmed (→0), remaining 10k from settled (→50k).
-    const expired = vtxo({ value: 30_000, state: 'settled', expiryMs: NOW - HOUR });
-    const live = vtxo({ value: 50_000, state: 'settled', expiryMs: NOW + HOUR, txid: 'live' });
-    const raw = balance({
-      settled: 60_000,
-      preconfirmed: 20_000,
-      available: 80_000,
-      total: 80_000,
-    });
-
-    const adj = adjustBalanceForExpiry(raw, [expired, live]);
-
-    expect(adj.preconfirmed).toBe(0);
-    expect(adj.settled).toBe(50_000);
-    expect(adj.available).toBe(50_000);
-    expect(adj.expired).toBe(30_000);
-  });
-
-  it('does NOT re-drain a swept coin coexisting with a live coin (double-drain fix)', () => {
-    // The bug: `adjustBalanceForExpiry` subtracted ALL isExpired&&isSpendable coins
-    // (which includes swept/recoverable) from available. But the SDK's getBalance()
-    // already puts swept coins ONLY in `recoverable`, never in `available`. So with a
-    // live 70k coin + a swept 50k coin, the raw balance is available=70k, recoverable=50k.
-    // Subtracting the swept 50k again would understate available to 20k. After the fix
-    // available must stay 70k (only the live coin), and recoverableSats must surface 50k.
-    const live = vtxo({ value: 70_000, state: 'settled', expiryMs: NOW + 3 * HOUR, txid: 'live' });
-    const swept = vtxo({ value: 50_000, state: 'swept', expiryMs: NOW - HOUR, txid: 'swept' });
-    const raw = balance({
-      settled: 70_000,
-      preconfirmed: 0,
-      available: 70_000, // SDK already excluded the swept coin from here
-      recoverable: 50_000, // …and accounted for it here
-      total: 120_000,
-    });
-
-    const adj = adjustBalanceForExpiry(raw, [live, swept]);
-
-    // Available reflects ONLY the live coin — the swept coin is not re-subtracted.
-    expect(adj.available).toBe(70_000);
-    expect(adj.settled).toBe(70_000);
-    // No time-expired-unswept coins here.
-    expect(adj.expired).toBe(0);
-    // The swept value is surfaced for the Recover bucket (from the SDK's own field).
-    expect(adj.recoverableSats).toBe(50_000);
-    expect(adj.total).toBe(120_000);
-  });
-
-  it('drains a time-expired-unswept coin but leaves a coexisting swept coin alone', () => {
-    // Mixed: a live 40k, a time-expired-unswept 30k (state still settled → still in
-    // available, must drain), and a swept 50k (recoverable, must NOT drain).
+  it('splits the SDK recoverable figure into expired and swept', () => {
+    // The SDK reports one `recoverable` number covering both cases. They are fixed by
+    // different calls, so we report them apart and their sum must match that number.
     const live = vtxo({ value: 40_000, state: 'settled', expiryMs: NOW + HOUR, txid: 'live' });
     const timeExpired = vtxo({ value: 30_000, state: 'settled', expiryMs: NOW - HOUR, txid: 'exp' });
     const swept = vtxo({ value: 50_000, state: 'swept', expiryMs: NOW - 2 * HOUR, txid: 'swept' });
     const raw = balance({
-      settled: 70_000, // live 40k + time-expired 30k (swept already excluded by SDK)
-      available: 70_000,
-      recoverable: 50_000,
+      settled: 40_000,
+      available: 40_000,
+      recoverable: 80_000, // the elapsed 30k plus the swept 50k
       total: 120_000,
     });
 
     const adj = adjustBalanceForExpiry(raw, [live, timeExpired, swept]);
 
-    expect(adj.available).toBe(40_000); // only the live coin
-    expect(adj.expired).toBe(30_000); // the time-expired-unswept coin
-    expect(adj.recoverableSats).toBe(50_000); // the swept coin, not re-drained
+    expect(adj.available).toBe(40_000);
+    expect(adj.expired).toBe(30_000);
+    expect(adj.recoverableSats).toBe(50_000);
+    expect(adj.expired + adj.recoverableSats).toBe(raw.recoverable);
   });
 
-  it('clamps at zero when expired value exceeds the spendable buckets', () => {
-    // Defensive: indexer balance and VTXO sum disagree → never go negative.
-    const expired = vtxo({ value: 200_000, state: 'settled', expiryMs: NOW - HOUR });
-    const raw = balance({ settled: 50_000, available: 50_000, total: 50_000 });
+  it('counts a swept coin once, in recoverableSats only', () => {
+    // recoverableSats comes from our own VTXO sum. Reading the SDK's `recoverable`
+    // instead would fold in the expired bucket and count those coins twice, because
+    // the wallet home adds `expired` and `recoverableSats` together.
+    const live = vtxo({ value: 70_000, state: 'settled', expiryMs: NOW + 3 * HOUR, txid: 'live' });
+    const swept = vtxo({ value: 50_000, state: 'swept', expiryMs: NOW - HOUR, txid: 'swept' });
+    const raw = balance({
+      settled: 70_000,
+      available: 70_000,
+      recoverable: 50_000,
+      total: 120_000,
+    });
 
-    const adj = adjustBalanceForExpiry(raw, [expired]);
+    const adj = adjustBalanceForExpiry(raw, [live, swept]);
 
-    expect(adj.available).toBe(0);
-    expect(adj.settled).toBe(0);
-    expect(adj.preconfirmed).toBe(0);
+    expect(adj.available).toBe(70_000);
+    expect(adj.expired).toBe(0);
+    expect(adj.recoverableSats).toBe(50_000);
+    expect(adj.total).toBe(120_000);
   });
 });
 

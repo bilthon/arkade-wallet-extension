@@ -527,18 +527,28 @@ function Breakdown({
   onboardError: string;
   onOnboard: () => void;
 }) {
-  const rows: Array<{ label: string; amount: number; tip: string }> = [
-    {
-      label: 'Preconfirmed',
-      amount: balance.preconfirmed,
-      tip: 'Cosigned by the operator and spendable now, but not yet anchored to Bitcoin.',
-    },
-    {
-      label: 'Settled',
-      amount: balance.settled,
-      tip: 'Anchored to Bitcoin in a batch — final.',
-    },
-  ];
+  // We break the wallet down by whether funds can be spent, not by how final they are.
+  // Each row is money the hero's Available figure leaves out, and says why. `settled`
+  // and `preconfirmed` are deliberately absent: they answer the finality question, and
+  // since SDK 0.4.62 both of them also count funds locked in a contract, so showing
+  // either next to Available would read as spendable when it is not.
+  const rows: Array<{ label: string; amount: number; tip: string }> = [];
+
+  if (balance.gated > 0) {
+    rows.push({
+      label: 'In an active swap',
+      amount: balance.gated,
+      tip: 'Locked in a Lightning swap contract until that swap completes or refunds.',
+    });
+  }
+
+  if (balance.intentLocked > 0) {
+    rows.push({
+      label: 'In a settlement round',
+      amount: balance.intentLocked,
+      tip: 'Committed to a batch round that is still running. Spendable again once it ends.',
+    });
+  }
 
   const hasBoarding = balance.boarding.total > 0;
   if (hasBoarding) {
@@ -549,8 +559,8 @@ function Breakdown({
     });
   }
 
-  // Nothing beyond Available to elaborate on → skip the section entirely.
-  if (rows.every((r) => r.amount === 0) && !hasBoarding) return null;
+  // Nothing beyond Available to explain, so skip the section entirely.
+  if (rows.length === 0) return null;
 
   return (
     <div className="breakdown">
