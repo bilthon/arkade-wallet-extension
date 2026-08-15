@@ -1,0 +1,5 @@
+# esbuild's postinstall links the platform binary, so we let it run.
+# spawn-sync is a legacy transitive polyfill for Node 0.10 and needs nothing.
+allowBuilds:
+  esbuild: true
+  spawn-sync: false
