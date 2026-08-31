@@ -1,6 +1,7 @@
 {
   "name": "arkade-wallet-extension",
   "description": "Tapscript-focused Bitcoin L2 wallet browser extension for Arkade (MV3).",
+  "license": "MIT",
   "private": true,
   "version": "0.0.0",
   "type": "module",
