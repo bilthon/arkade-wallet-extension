@@ -6,7 +6,9 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "predev": "node dev/ensure-browser-profiles.mjs",
     "dev": "wxt",
+    "predev:firefox": "node dev/ensure-browser-profiles.mjs",
     "dev:firefox": "wxt -b firefox",
     "build": "wxt build",
     "build:firefox": "wxt build -b firefox",

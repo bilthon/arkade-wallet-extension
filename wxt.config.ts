@@ -1,9 +1,23 @@
+import { resolve } from 'node:path';
 import { defineConfig } from 'wxt';
+
+const DEV_PROFILE_DIR = resolve(import.meta.dirname, '.dev-browser-profiles');
 
 // See https://wxt.dev/api/config.html
 export default defineConfig({
   modules: ['@wxt-dev/module-react'],
-  manifest: {
+  webExt: {
+    chromiumProfile: resolve(DEV_PROFILE_DIR, 'chrome'),
+    firefoxProfile: resolve(DEV_PROFILE_DIR, 'firefox'),
+    keepProfileChanges: true,
+    // Temporary add-ons are uninstalled when Firefox closes. Keep their stable UUID
+    // and extension storage in this dedicated dev profile so the next run can reuse it.
+    firefoxPref: {
+      'extensions.webextensions.keepStorageOnUninstall': true,
+      'extensions.webextensions.keepUuidOnUninstall': true,
+    },
+  },
+  manifest: ({ browser, command }) => ({
     name: 'Arkade Wallet',
     // `tabs`: needed to deliver provider events (disconnect/networkChanged) to the
     // pages of a CONNECTED site. Least-privilege (security review): we never call
@@ -43,5 +57,9 @@ export default defineConfig({
     web_accessible_resources: [
       { resources: ['provider.js'], matches: ['<all_urls>'] },
     ],
-  },
+    // A stable ID lets Firefox associate temporary installs with the same storage.
+    ...(browser === 'firefox' && command === 'serve'
+      ? { browser_specific_settings: { gecko: { id: 'arkade-wallet-dev@arkade.local' } } }
+      : {}),
+  }),
 });
