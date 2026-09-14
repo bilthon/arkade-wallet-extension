@@ -59,7 +59,7 @@ export interface NetworkConfig {
  */
 export const NETWORK_CONFIG: Record<NetworkName, NetworkConfig> = {
   regtest: {
-    arkServerUrl: 'http://localhost:7070',
+    arkServerUrl: 'http://localhost:7071',
     esploraUrl: 'http://localhost:30000',
     isMainnet: false,
     boltzApiUrl: 'http://localhost:9069',
