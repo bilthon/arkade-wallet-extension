@@ -1,6 +1,10 @@
 # Local-only planning & notes (never committed)
 .local/
 
+# Machine-specific endpoint overrides
+.env.local
+.env.*.local
+
 # Agent
 .claude
 

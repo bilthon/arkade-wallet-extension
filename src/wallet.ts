@@ -17,6 +17,7 @@ import {
   type ArkTransaction,
 } from '@arkade-os/sdk';
 import type { SessionContext } from './wallet-runtime';
+import { localhostUrl } from './regtest-config';
 import {
   adjustBalanceForExpiry,
   partitionVtxos,
@@ -50,17 +51,28 @@ export interface NetworkConfig {
   boltzApiUrl?: string;
 }
 
+function isOverridePresent(name: string): boolean {
+  return import.meta.env[name] !== undefined;
+}
+
+const arkServerUrl = isOverridePresent('WXT_REGTEST_ARK_PORT')
+? localhostUrl('WXT_REGTEST_ARK_PORT', import.meta.env.WXT_REGTEST_ARK_PORT)
+: 'http://localhost:7070';
+const esploraUrl = isOverridePresent('WXT_REGTEST_ESPLORA_PORT')
+? localhostUrl('WXT_REGTEST_ESPLORA_PORT', import.meta.env.WXT_REGTEST_ESPLORA_PORT)
+: 'http://localhost:30000';
+
 /**
  * Endpoints per network. Switched together — operator + esplora (+ Boltz where available).
  * Delegate URLs are intentionally absent here; this is read-only.
  *
- * ponytail: regtest points at nigiri's local services. arkd on :7070, electrs REST
- * on :30000 — verified reachable from the SW (NOT chopsticks :3000, which is not the REST base).
+ * Regtest defaults to Nigiri's local services; optional port overrides are documented
+ * in .env.example and shared with the test webapp.
  */
 export const NETWORK_CONFIG: Record<NetworkName, NetworkConfig> = {
   regtest: {
-    arkServerUrl: 'http://localhost:7071',
-    esploraUrl: 'http://localhost:30000',
+    arkServerUrl,
+    esploraUrl,
     isMainnet: false,
     boltzApiUrl: 'http://localhost:9069',
   },

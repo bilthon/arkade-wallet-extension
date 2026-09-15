@@ -12,3 +12,8 @@ Built with [WXT](https://wxt.dev) + React.
 
 For application integration, see [linked Arkade signing](docs/ARKADE-SIGNING.md), including
 single-step escrow release signing and staged checkpoint approval.
+
+Regtest defaults to Nigiri's operator on port `7070` and Esplora on `30000`.
+For custom local ports, copy [.env.example](.env.example) to `.env.local` and set
+the overrides there. Restart the development servers or rebuild the extension
+after editing; both the extension and test webapp use these settings.

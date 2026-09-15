@@ -22,8 +22,11 @@ import {
 } from '@arkade-os/sdk';
 import { Address, OutScript } from '@scure/btc-signer';
 import { hex, base64 } from '@scure/base';
+import { localhostUrl } from '../src/regtest-config';
 
-const ESPLORA = 'http://localhost:30000';
+const ESPLORA = import.meta.env.WXT_REGTEST_ESPLORA_PORT !== undefined
+  ? localhostUrl('WXT_REGTEST_ESPLORA_PORT', import.meta.env.WXT_REGTEST_ESPLORA_PORT)
+  : 'http://localhost:30000';
 const FEE_SATS = 1000n;
 
 // The page's inline script exposes its timestamped logger as window.appLog.
