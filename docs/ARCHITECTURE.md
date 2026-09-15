@@ -86,6 +86,17 @@ Responsibilities:
 - **Provider** — origin-derived, grant-gated handlers for web app connect/read/sign
 - **Approvals** — opens approval windows, resolves user decisions back to waiting web app promises
 
+While unlocked, `session-keepalive.ts` calls a lightweight extension API every 20 seconds
+to prevent Chrome's normal worker idle suspension. The heartbeat stops on lock and during
+network transitions, and restarts only if an unlocked session is installed. It does not
+reset the 10-minute auto-lock alarm or persist the signing identity. Worker termination,
+extension reloads, and browser shutdown still discard the session.
+
+To check this behavior in Chrome, unlock the wallet, close its popup and worker DevTools,
+then reopen the popup after a minute: it should remain unlocked. Leaving it idle beyond
+10 minutes should still lock it. Keep worker DevTools closed during this check, since
+inspection can itself keep the worker alive.
+
 ### Content script (`entrypoints/content.ts`)
 
 Runs on `<all_urls>` at `document_start`. Three jobs:
