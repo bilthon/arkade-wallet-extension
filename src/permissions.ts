@@ -1,3 +1,5 @@
+import { beginArkadeConnectionChange } from './arkade-approvals';
+
 /**
  * Per-origin scoped grants.
  *
@@ -83,30 +85,40 @@ export async function getGrant(origin: string): Promise<Grant | null> {
  * Overwrites any prior grant for the same origin (re-connect refreshes `accounts`).
  */
 export async function grantConnect(origin: string, accounts: string[]): Promise<Grant> {
-  return mutateGrants(async () => {
-    const grant: Grant = {
-      id: crypto.randomUUID(),
-      origin,
-      accounts,
-      grantedMethods: [...READ_METHODS],
-      grantedAt: Date.now(),
-    };
-    const map = await readAll();
-    map[origin] = grant;
-    await writeAll(map);
-    return grant;
-  });
+  const finish = beginArkadeConnectionChange(origin);
+  try {
+    return await mutateGrants(async () => {
+      const grant: Grant = {
+        id: crypto.randomUUID(),
+        origin,
+        accounts,
+        grantedMethods: [...READ_METHODS],
+        grantedAt: Date.now(),
+      };
+      const map = await readAll();
+      map[origin] = grant;
+      await writeAll(map);
+      return grant;
+    });
+  } finally {
+    finish();
+  }
 }
 
 /** Remove an origin's grant. Idempotent — revoking an unknown origin is a no-op. */
 export async function revokeGrant(origin: string): Promise<void> {
-  await mutateGrants(async () => {
-    const map = await readAll();
-    if (origin in map) {
-      delete map[origin];
-      await writeAll(map);
-    }
-  });
+  const finish = beginArkadeConnectionChange(origin);
+  try {
+    await mutateGrants(async () => {
+      const map = await readAll();
+      if (origin in map) {
+        delete map[origin];
+        await writeAll(map);
+      }
+    });
+  } finally {
+    finish();
+  }
 }
 
 /** Remove exactly one grant issuance, preserving any newer reconnect. */
@@ -114,9 +126,14 @@ export function revokeGrantIfCurrent(origin: string, grantId: string): Promise<b
   return mutateGrants(async () => {
     const map = await readAll();
     if (map[origin]?.id !== grantId) return false;
-    delete map[origin];
-    await writeAll(map);
-    return true;
+    const finish = beginArkadeConnectionChange(origin);
+    try {
+      delete map[origin];
+      await writeAll(map);
+      return true;
+    } finally {
+      finish();
+    }
   });
 }
 

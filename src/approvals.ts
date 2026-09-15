@@ -24,9 +24,10 @@
  */
 
 import type { NetworkName } from '@arkade-os/sdk';
+import type { ArkadeTransactionSummary } from './arkade-inspect';
 import type { PsbtSummary } from './psbt-inspect';
 
-export type ApprovalKind = 'connect' | 'signMessage' | 'signPsbt';
+export type ApprovalKind = 'connect' | 'signMessage' | 'signPsbt' | 'approveArkadeTransaction';
 
 /**
  * The serializable payload each approval kind shows the user. NO secrets ever cross
@@ -40,7 +41,8 @@ export type ApprovalKind = 'connect' | 'signMessage' | 'signPsbt';
 export type ApprovalPayload =
   | { kind: 'connect' }
   | { kind: 'signMessage'; message: string }
-  | { kind: 'signPsbt'; summary: PsbtSummary };
+  | { kind: 'signPsbt'; summary: PsbtSummary }
+  | { kind: 'approveArkadeTransaction'; summary: ArkadeTransactionSummary; signCheckpoints: boolean };
 
 /** Serializable request the approval window reads (NO secrets, NO promise callbacks). */
 export interface PendingRequest {

@@ -50,6 +50,8 @@ import {
   handleGetNetwork,
   handleSignMessage,
   handleSignPsbt,
+  handleApproveArkadeTransaction,
+  handleSignArkadeCheckpoints,
   requireRead,
   revokeSite,
   resolveApproval,
@@ -348,6 +350,13 @@ export default defineBackground(() => {
   );
   onMessage('providerSignPsbt', ({ sender, data }) =>
     handleSignPsbt(sender, data, getProviderContext),
+  );
+
+  onMessage('providerApproveArkadeTransaction', ({ sender, data }) =>
+    handleApproveArkadeTransaction(sender, data, getProviderContext),
+  );
+  onMessage('providerSignArkadeCheckpoints', ({ sender, data }) =>
+    handleSignArkadeCheckpoints(sender, data, getProviderContext),
   );
 
   // ── Approval window ↔ background (trusted extension page) ──────────────────

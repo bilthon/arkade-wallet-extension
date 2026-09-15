@@ -2,6 +2,7 @@ import { SeedIdentity, type NetworkName, type Wallet } from '@arkade-os/sdk';
 import { mnemonicToSeed } from './crypto';
 import { buildWallet, networkConfig } from './wallet';
 import { withTimeout } from './async';
+import { invalidateArkadeApprovals } from './arkade-approvals';
 
 /**
  * The service worker's live wallet session.
@@ -180,6 +181,7 @@ export function beginRuntimeNetworkSwitch(
 
   const previous = session;
   session = null;
+  invalidateArkadeApprovals();
   const fenceEpoch = ++epoch;
   const disposal = disposeRuntimeSession(previous);
   let finished = false;
@@ -233,6 +235,7 @@ function assertRuntimeVersion(expected: RuntimeVersion): void {
 }
 
 function createSession(identity: SeedIdentity, network: NetworkName): RuntimeSession {
+  invalidateArkadeApprovals();
   return {
     epoch: ++epoch,
     network,
@@ -249,6 +252,7 @@ function createSession(identity: SeedIdentity, network: NetworkName): RuntimeSes
  * cannot acquire the old identity or wallet after this function returns.
  */
 export function beginSessionLock(): { didLock: boolean; disposal: Promise<void> } {
+  invalidateArkadeApprovals();
   const previous = session;
   const transition = activeNetworkTransition;
   session = null;

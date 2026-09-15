@@ -32,6 +32,22 @@ import {
 } from './signing';
 import { PsbtRejectedError } from './psbt-inspect';
 import type { Wallet } from '@arkade-os/sdk';
+import { hex } from '@scure/base';
+import type {
+  ApproveArkadeTransactionParams,
+  ApproveArkadeTransactionResult,
+  SignArkadeCheckpointsResult,
+} from './provider-api';
+import { inspectArkadeTransaction, prepareArkadeCheckpoints } from './arkade-inspect';
+import {
+  createArkadeApproval,
+  getArkadeApproval,
+  removeArkadeApproval,
+  startArkadeApprovalExpiry,
+  beginArkadeConnectionChange,
+  getArkadeConnectionVersion,
+  type ArkadeSigningApproval,
+} from './arkade-approvals';
 
 /**
  * Provider-facing handler logic. Every function here takes the message
@@ -184,10 +200,15 @@ export async function handleDisconnect(
   sender: MessageSenderLike | undefined,
 ): Promise<{ ok: true }> {
   const origin = originFromSender(sender);
-  await rejectApprovalForOrigin(origin, 'Disconnected by the site.');
-  await revokeGrant(origin);
-  await emitToOrigin(origin, 'disconnect');
-  return { ok: true };
+  const finish = beginArkadeConnectionChange(origin);
+  try {
+    await rejectApprovalForOrigin(origin, 'Disconnected by the site.');
+    await revokeGrant(origin);
+    await emitToOrigin(origin, 'disconnect');
+    return { ok: true };
+  } finally {
+    finish();
+  }
 }
 
 // ─── read methods (grant + unlock gated) ─────────────────────────────────────
@@ -396,6 +417,188 @@ export async function handleSignPsbt(
   });
 }
 
+/** Approve the final payment and its verified checkpoint graph together. */
+export async function handleApproveArkadeTransaction(
+  sender: MessageSenderLike | undefined,
+  params: unknown,
+  getContext: () => Promise<SessionContext>,
+): Promise<ApproveArkadeTransactionResult> {
+  const origin = await requireForSigning(sender);
+  const connectionVersion = getArkadeConnectionVersion(origin);
+  if (connectionVersion === null) {
+    providerError('NOT_CONNECTED', 'The connection is changing. Try again after connecting.');
+  }
+  const grant = await getGrant(origin);
+  if (!grant) providerError('NOT_CONNECTED', 'This site is no longer connected.');
+  const session = await requireCurrentContext(getContext);
+  let approval: ArkadeSigningApproval | undefined;
+  let retained = false;
+  try {
+    let info;
+    try {
+      info = await session.wallet.arkProvider.getInfo();
+    } catch {
+      providerError('BAD_REQUEST', 'Could not obtain the operator checkpoint parameters. Try again.');
+    }
+    if (
+      !info || typeof info.signerPubkey !== 'string' ||
+      !/^(?:02|03)?[0-9a-fA-F]{64}$/.test(info.signerPubkey) ||
+      typeof info.forfeitPubkey !== 'string' ||
+      !/^(?:02|03)[0-9a-fA-F]{64}$/.test(info.forfeitPubkey) ||
+      typeof info.checkpointTapscript !== 'string' ||
+      !Number.isSafeInteger(Number(info.dust)) || Number(info.dust) < 0
+    ) {
+      providerError('BAD_REQUEST', 'The operator returned invalid checkpoint parameters.');
+    }
+    const ctx = await buildInspectContext(session, Number(info.dust));
+    const operatorKey = hex.decode(info.signerPubkey);
+    if (hex.encode(operatorKey.length === 33 ? operatorKey.slice(1) : operatorKey) !== ctx.operatorXOnly) {
+      providerError('BAD_REQUEST', 'The operator key does not match the active wallet.');
+    }
+    const transaction = inspectArkadeTransaction(
+      params as ApproveArkadeTransactionParams, ctx, info.checkpointTapscript,
+      info.forfeitPubkey.slice(2).toLowerCase(),
+    );
+    assertProviderContext(session);
+    if ((await getGrant(origin))?.id !== grant.id) {
+      providerError('NOT_CONNECTED', 'The connection changed. Connect and request approval again.');
+    }
+    assertProviderContext(session);
+    if (getArkadeConnectionVersion(origin) !== connectionVersion) {
+      providerError('NOT_CONNECTED', 'The connection changed. Request transaction approval again.');
+    }
+    approval = createArkadeApproval({
+      origin, grantId: grant.id, connectionVersion, session, transaction,
+      operatorXOnly: ctx.operatorXOnly,
+    });
+    const signCheckpoints = (params as ApproveArkadeTransactionParams).signCheckpoints === true;
+    const decision = await requestApprovalSafe({
+      kind: 'approveArkadeTransaction', summary: transaction.summary, signCheckpoints,
+    }, origin, session);
+    if (!decision.approved) providerError('REJECTED', 'The transaction request was declined.');
+    startArkadeApprovalExpiry(approval);
+    const current = await authorizeArkadeSigning(approval, getContext);
+    assertLiveArkadeApproval(approval);
+    const arkadePsbt = await signPsbtPartial(
+      current, transaction.arkadePsbt, transaction.arkadeInputIndexes,
+    );
+    await authorizeArkadeSigning(approval, getContext);
+    assertLiveArkadeApproval(approval);
+    if (signCheckpoints) {
+      const checkpoints = await signApprovedCheckpoints(
+        approval, transaction.checkpoints.map((cp) => cp.psbt), getContext,
+      );
+      await authorizeArkadeSigning(approval, getContext);
+      assertLiveArkadeApproval(approval);
+      return { status: 'signed', arkadePsbt, checkpoints };
+    }
+    approval.ready = true;
+    retained = true;
+    return {
+      status: 'awaiting-checkpoints', approvalId: approval.id,
+      expiresAt: approval.expiresAt, arkadePsbt,
+    };
+  } catch (err) {
+    return throwArkadeSigningError(err);
+  } finally {
+    if (approval && !retained) removeArkadeApproval(approval);
+  }
+}
+
+/** Complete an existing approval; this never opens another approval window. */
+export async function handleSignArkadeCheckpoints(
+  sender: MessageSenderLike | undefined,
+  params: { approvalId?: unknown; checkpoints?: unknown } | null | undefined,
+  getContext: () => Promise<SessionContext>,
+): Promise<SignArkadeCheckpointsResult> {
+  const origin = await requireForSigning(sender);
+  if (
+    typeof params?.approvalId !== 'string' || !Array.isArray(params.checkpoints) ||
+    !params.checkpoints.every((cp) => typeof cp === 'string')
+  ) {
+    providerError('BAD_REQUEST', 'Expected an approvalId and checkpoint PSBTs.');
+  }
+  const approval = getArkadeApproval(params.approvalId);
+  if (!approval || !approval.ready || approval.origin !== origin) {
+    providerError('BAD_REQUEST', 'The transaction approval is missing or expired. Request approval again.');
+  }
+  if (approval.busy) providerError('BUSY', 'Checkpoint signing is already in progress.');
+  approval.busy = true;
+  try {
+    await authorizeArkadeSigning(approval, getContext);
+    const checkpoints = prepareArkadeCheckpoints(
+      approval.transaction, params.checkpoints, approval.operatorXOnly,
+    );
+    if (approval.completed) {
+      if (JSON.stringify(checkpoints) !== JSON.stringify(approval.completed.request)) {
+        providerError('BAD_REQUEST', 'The retry differs from the completed checkpoint request.');
+      }
+      await authorizeArkadeSigning(approval, getContext);
+      assertLiveArkadeApproval(approval);
+      return { checkpoints: [...approval.completed.result.checkpoints] };
+    }
+    const result = { checkpoints: await signApprovedCheckpoints(approval, checkpoints, getContext) };
+    await authorizeArkadeSigning(approval, getContext);
+    assertLiveArkadeApproval(approval);
+    approval.completed = { request: checkpoints, result };
+    return { checkpoints: [...result.checkpoints] };
+  } catch (err) {
+    return throwArkadeSigningError(err);
+  } finally {
+    approval.busy = false;
+  }
+}
+
+async function signApprovedCheckpoints(
+  approval: ArkadeSigningApproval,
+  checkpoints: string[],
+  getContext: () => Promise<SessionContext>,
+): Promise<string[]> {
+  const signed: string[] = [];
+  for (const [index, checkpoint] of checkpoints.entries()) {
+    const current = await authorizeArkadeSigning(approval, getContext);
+    assertLiveArkadeApproval(approval);
+    const indexes = approval.transaction.checkpoints[index].inputIndexes;
+    signed.push(indexes.length ? await signPsbtPartial(current, checkpoint, indexes) : checkpoint);
+  }
+  return signed;
+}
+
+/** Check the live grant and exact session immediately before signing or releasing results. */
+async function authorizeArkadeSigning(
+  approval: ArkadeSigningApproval,
+  getContext: () => Promise<SessionContext>,
+): Promise<SessionContext> {
+  const grant = await getGrant(approval.origin);
+  if (grant?.id !== approval.grantId) {
+    removeArkadeApproval(approval);
+    providerError('NOT_CONNECTED', 'The connection changed. Request transaction approval again.');
+  }
+  const current = await requireUnchangedContext(approval.session, getContext);
+  assertProviderContext(current);
+  assertLiveArkadeApproval(approval);
+  return current;
+}
+
+/** Run in the caller's continuation: an awaited authorization can itself become stale. */
+function assertLiveArkadeApproval(approval: ArkadeSigningApproval): void {
+  assertProviderContext(approval.session);
+  if (getArkadeConnectionVersion(approval.origin) !== approval.connectionVersion) {
+    providerError('NOT_CONNECTED', 'The connection changed. Request transaction approval again.');
+  }
+  if (getArkadeApproval(approval.id) !== approval) {
+    providerError('BAD_REQUEST', 'The transaction approval expired or was invalidated. Request approval again.');
+  }
+}
+
+function throwArkadeSigningError(err: unknown): never {
+  if (err instanceof PsbtRejectedError) providerError('BAD_REQUEST', err.message);
+  if (err instanceof Error && err.message === 'LOCKED') {
+    providerError('LOCKED', 'The wallet session changed. Request approval again.');
+  }
+  throw err;
+}
+
 /**
  * Reauthorize after approval and invoke `action` in the same continuation as the final
  * wallet/network check. Nothing may await between that check and starting the signer.
@@ -473,9 +676,14 @@ async function operatorDust(wallet: Wallet): Promise<number> {
 
 /** Revoke a site from the popup. Rejects its pending request + emits disconnect. */
 export async function revokeSite(origin: string): Promise<void> {
-  await rejectApprovalForOrigin(origin, 'Disconnected from Settings.');
-  await revokeGrant(origin);
-  await emitToOrigin(origin, 'disconnect');
+  const finish = beginArkadeConnectionChange(origin);
+  try {
+    await rejectApprovalForOrigin(origin, 'Disconnected from Settings.');
+    await revokeGrant(origin);
+    await emitToOrigin(origin, 'disconnect');
+  } finally {
+    finish();
+  }
 }
 
 // ─── events ──────────────────────────────────────────────────────────────────

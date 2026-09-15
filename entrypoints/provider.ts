@@ -4,7 +4,14 @@ import {
   isBridgeEvent,
   type BridgeRequest,
 } from '@/src/page-bridge';
-import { decodeProviderError, type ProviderEvent } from '@/src/provider-api';
+import {
+  decodeProviderError,
+  type ProviderEvent,
+  type ApproveArkadeTransactionParams,
+  type ApproveArkadeTransactionResult,
+  type SignArkadeCheckpointsParams,
+  type SignArkadeCheckpointsResult,
+} from '@/src/provider-api';
 
 /**
  * MAIN-world provider. An ISOLATED content script can't set page-visible globals,
@@ -113,6 +120,11 @@ export default defineUnlistedScript(() => {
       call<{ signature: string }>('signMessage', params).then((r) => r.signature),
     signPsbt: (params: { psbt: string; inputIndexes: number[] }) =>
       call<{ psbt: string }>('signPsbt', params).then((r) => r.psbt),
+
+    approveArkadeTransaction: (params: ApproveArkadeTransactionParams) =>
+      call<ApproveArkadeTransactionResult>('approveArkadeTransaction', params),
+    signArkadeCheckpoints: (params: SignArkadeCheckpointsParams) =>
+      call<SignArkadeCheckpointsResult>('signArkadeCheckpoints', params),
 
     // Events.
     on(eventName: ProviderEvent, handler: (...args: unknown[]) => void) {

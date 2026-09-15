@@ -9,3 +9,6 @@ The differentiator is first-class understanding of VTXO taproot script trees —
 timelocked unilateral-exit, and custom-condition leaves — which no other Bitcoin wallet exposes.
 
 Built with [WXT](https://wxt.dev) + React.
+
+For application integration, see [linked Arkade signing](docs/ARKADE-SIGNING.md), including
+single-step escrow release signing and staged checkpoint approval.

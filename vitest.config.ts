@@ -1,8 +1,8 @@
 import { defineConfig } from 'vitest/config';
 
-// Minimal config so `npm test` runs the page-bridge plumbing check. The check
-// imports only from `./` so no path aliases or browser globals are needed.
+// Match the application alias so bridge and approval tests exercise real entrypoints.
 export default defineConfig({
+  resolve: { alias: { '@': new URL('.', import.meta.url).pathname } },
   test: {
     include: ['src/**/*.test.ts'],
   },

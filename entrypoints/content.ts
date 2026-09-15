@@ -1,3 +1,4 @@
+import type { ApproveArkadeTransactionParams, SignArkadeCheckpointsParams } from '@/src/provider-api';
 import { injectScript } from 'wxt/utils/inject-script';
 import { sendMessage } from '@/src/messaging';
 import { BRIDGE_NS, isBridgeRequest, type BridgeResponse } from '@/src/page-bridge';
@@ -37,6 +38,10 @@ const PROVIDER_METHODS: Record<string, (params: unknown) => Promise<unknown>> = 
   getNetwork: () => sendMessage('providerGetNetwork', undefined),
   signMessage: (params: unknown) =>
     sendMessage('providerSignMessage', params as { message: string }),
+  approveArkadeTransaction: (params: unknown) =>
+    sendMessage('providerApproveArkadeTransaction', params as ApproveArkadeTransactionParams),
+  signArkadeCheckpoints: (params: unknown) =>
+    sendMessage('providerSignArkadeCheckpoints', params as SignArkadeCheckpointsParams),
   signPsbt: (params: unknown) =>
     sendMessage('providerSignPsbt', params as { psbt: string; inputIndexes: number[] }),
 };

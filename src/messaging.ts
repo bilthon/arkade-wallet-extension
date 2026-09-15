@@ -6,7 +6,14 @@ import type { AdjustedBalance } from './vtxo-state';
 import type { RenewalWarning } from './renewal';
 import type { Grant } from './permissions';
 import type { PendingRequest } from './approvals';
-import type { NetworkInfo, PublicKeyInfo } from './provider-api';
+import type {
+  ApproveArkadeTransactionParams,
+  ApproveArkadeTransactionResult,
+  SignArkadeCheckpointsParams,
+  SignArkadeCheckpointsResult,
+  NetworkInfo,
+  PublicKeyInfo,
+} from './provider-api';
 import type { CoinInfo, TxHistoryItem } from './wallet';
 import type { LnPayStatus, LnReceiveStatus } from './lightning-utils';
 
@@ -197,6 +204,9 @@ export interface ProtocolMap {
     inputIndexes: number[];
     allowHighFee?: boolean;
   }): { psbt: string };
+
+  providerApproveArkadeTransaction(data: ApproveArkadeTransactionParams): ApproveArkadeTransactionResult;
+  providerSignArkadeCheckpoints(data: SignArkadeCheckpointsParams): SignArkadeCheckpointsResult;
 
   // ─── Approval window ↔ background (trusted extension page) ──────────────────
   /** The approval window reads its request by id (shows the SW-derived origin). */

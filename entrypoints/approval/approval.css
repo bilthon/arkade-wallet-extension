@@ -119,3 +119,12 @@ body,
   padding: 8px 10px;
   margin-top: 6px;
 }
+
+/* Full payout addresses remain readable in the narrow approval window. */
+.approval-final-outputs li {
+  flex-direction: column;
+}
+.approval-final-outputs code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}

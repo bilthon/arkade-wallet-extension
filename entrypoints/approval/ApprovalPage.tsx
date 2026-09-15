@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { sendMessage } from '@/src/messaging';
 import { READ_METHODS } from '@/src/permissions';
 import type { PendingRequest } from '@/src/approvals';
+import type { ArkadeTransactionSummary } from '@/src/arkade-inspect';
 import type { PsbtSummary, LeafClause } from '@/src/psbt-inspect';
 
 /**
@@ -112,6 +113,13 @@ export function ApprovalPage() {
         <SignPsbtBody summary={request.payload.summary} />
       )}
 
+      {request.payload.kind === 'approveArkadeTransaction' && (
+        <ArkadeTransactionBody
+          summary={request.payload.summary}
+          signCheckpoints={request.payload.signCheckpoints}
+        />
+      )}
+
       <div className="spacer" />
       <div className="btn-row">
         <button onClick={() => respond(false)}>Reject</button>
@@ -128,9 +136,11 @@ export function ApprovalPage() {
 function headerTitle(kind: string): string {
   return kind === 'signMessage'
     ? 'Signature request'
-    : kind === 'signPsbt'
-      ? 'Transaction signature'
-      : 'Connection request';
+    : kind === 'approveArkadeTransaction'
+      ? 'Arkade transaction approval'
+      : kind === 'signPsbt'
+        ? 'Transaction signature'
+        : 'Connection request';
 }
 
 function ApprovalHeader({ kind, origin }: { kind: string; origin: string }) {
@@ -138,9 +148,11 @@ function ApprovalHeader({ kind, origin }: { kind: string; origin: string }) {
   const subtitle =
     kind === 'signMessage'
       ? 'A website is asking you to sign a message with your Arkade key.'
-      : kind === 'signPsbt'
-        ? 'A website is asking you to sign a Bitcoin transaction.'
-        : 'A website wants to connect to your Arkade wallet.';
+      : kind === 'approveArkadeTransaction'
+        ? 'A website is asking you to approve an Arkade payment and its checkpoints.'
+        : kind === 'signPsbt'
+          ? 'A website is asking you to sign a Bitcoin transaction.'
+          : 'A website wants to connect to your Arkade wallet.';
   return (
     <>
       <h1>{title}</h1>
@@ -194,6 +206,60 @@ function SignPsbtBody({ summary }: { summary: PsbtSummary }) {
         <OwnCoinView summary={summary} />
       )}
       {summary.flags.length > 0 && <DangerFlags flags={summary.flags} />}
+    </>
+  );
+}
+
+/** Linked approval shows final destinations once; checkpoints are intermediate outputs. */
+export function ArkadeTransactionBody({
+  summary,
+  signCheckpoints,
+}: {
+  summary: ArkadeTransactionSummary;
+  signCheckpoints: boolean;
+}) {
+  const addressed = summary.payment.outputs.filter((output) => output.address !== null);
+  const hasOwnInputs = summary.originalInputs.some((input) => input.role === 'own');
+  const flags = summary.payment.flags.filter((flag) => flag !== 'SWEEP' || hasOwnInputs);
+  return (
+    <>
+      <p>Final payments:</p>
+      <ul className="approval-outputs approval-final-outputs">
+        {addressed.map((output) => (
+          <li key={output.index}>
+            <code>{output.address}</code>
+            <span>{fmtSats(output.amount)}{output.isOwnChange ? ' (you)' : ''}</span>
+          </li>
+        ))}
+      </ul>
+      <p className="approval-note">Transaction fee: {fmtSats(summary.fee)}.</p>
+      <p>Original inputs you are signing:</p>
+      <ul className="approval-outputs">
+        {summary.originalInputs.map((input, index) => (
+          <li key={index} className="approval-cosign">
+            <strong>{input.role === 'contract' ? 'Shared contract' : 'Your wallet coin'}</strong>
+            <span>{fmtSats(input.amount)}</span>
+            {input.contract && (
+              <span className="approval-role">
+                You add 1 of {input.contract.required} required signatures.
+              </span>
+            )}
+          </li>
+        ))}
+      </ul>
+      <p className="approval-note">
+        {summary.checkpointCount} verified intermediate{' '}
+        {summary.checkpointCount === 1 ? 'checkpoint preserves' : 'checkpoints preserve'}{' '}
+        the cooperative spending path and input value, with an additional timed operator spending path.
+        These are steps toward the final payments above, not additional payments.
+      </p>
+      <p className="approval-note">
+        {signCheckpoints
+          ? 'Approval returns your payment and checkpoint signatures to this site immediately. The site controls their submission.'
+          : 'Approval returns your payment signature now and authorizes this site to obtain your signatures on these exact checkpoints after the operator signs them, without another prompt. This authorization expires after 10 minutes and ends if your wallet locks or the connection ends.'}
+        {' '}Transactions remain unfinalized; the site collects remaining signatures and submits them.
+      </p>
+      {flags.length > 0 && <DangerFlags flags={flags} />}
     </>
   );
 }

@@ -107,6 +107,9 @@ It talks to the content script via `window.postMessage` and exposes the provider
 - **Connection** — `connect`, `disconnect`, `isConnected`, `getAccounts`
 - **Reads** — `getAddress`, `getBoardingAddress`, `getPublicKey`, `getBalance`, `getNetwork`
 - **Signing** — `signMessage`, `signPsbt` (each opens its own approval window)
+- **Linked signing** — `approveArkadeTransaction` approves a payment and its checkpoints;
+  `signArkadeCheckpoints` completes a staged approval without another prompt. See
+  [the integration guide](ARKADE-SIGNING.md).
 - **Events** — `on` / `removeListener` for `accountsChanged`, `networkChanged`, `disconnect`
 
 ### Popup (`entrypoints/popup/`)
@@ -121,7 +124,7 @@ and routes to welcome → create/import → unlock → home.
 ### Approval (`entrypoints/approval/`)
 
 A separate extension page opened in its own browser window (not the toolbar popup). Used when a
-web app calls `connect`, `signMessage`, or `signPsbt`. The origin shown is SW-derived from the
+web app calls `connect`, `signMessage`, `signPsbt`, or `approveArkadeTransaction`. The origin shown is SW-derived from the
 pending request — never a site-supplied label. A short settle delay prevents blind click-through
 approvals.
 

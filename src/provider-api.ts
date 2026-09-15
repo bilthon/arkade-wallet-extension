@@ -2,9 +2,8 @@ import type { NetworkName } from '@arkade-os/sdk';
 import type { AdjustedBalance } from './vtxo-state';
 
 /**
- * Shared provider types. Mirrors the SDK method names so the provider stays a thin
- * pass-through (no translation layer that can drift). Covers connect + the read
- * surface and the signing surface (`signMessage` + `signPsbt`). `sendBitcoin`
+ * Shared provider types for connection, wallet reads, individual signatures and
+ * approval of linked Arkade transactions. `sendBitcoin`
  * (off-chain) + on-chain/Lightning are out of this generic provider — they map to
  * their own flows.
  *
@@ -25,13 +24,51 @@ export interface PublicKeyInfo {
   compressed: string;
 }
 
+/** Linked cooperative BTC transaction; the application handles submission/finalization. */
+export interface ApproveArkadeTransactionParams {
+  arkadePsbt: string;
+  checkpoints: {
+    psbt: string;
+    /** [0] signs this checkpoint; [] includes it only for linked validation. */
+    inputIndexes: number[];
+  }[];
+  /** Return checkpoint signatures immediately. Defaults to false (staged signing). */
+  signCheckpoints?: boolean;
+}
+
+export type ApproveArkadeTransactionResult =
+  | {
+      status: 'awaiting-checkpoints';
+      approvalId: string;
+      /** Approval expiry in Unix milliseconds. */
+      expiresAt: number;
+      arkadePsbt: string;
+    }
+  | {
+      status: 'signed';
+      arkadePsbt: string;
+      /** Base64, unfinalized PSBTs in request order. */
+      checkpoints: string[];
+    };
+
+export interface SignArkadeCheckpointsParams {
+  approvalId: string;
+  /** Complete operator-signed set; matched by transaction ID. */
+  checkpoints: string[];
+}
+
+export interface SignArkadeCheckpointsResult {
+  /** Base64, unfinalized PSBTs in the original approval-request order. */
+  checkpoints: string[];
+}
+
 /** The provider events a web app can subscribe to via `on()`. */
 export type ProviderEvent = 'accountsChanged' | 'networkChanged' | 'disconnect';
 
 /**
  * The `window.arkadeWallet` surface. Each method below maps to a `provider*` message
  * handled in the background behind origin + grant gating. Reads require an active grant;
- * the two signing methods are NEVER auto-granted — they re-prompt on every call.
+ * signing requires explicit approval, including a stored approval for staged completion.
  */
 export interface ArkadeWalletProvider {
   // Connection (read-only grant) — `connect` prompts; the rest read the grant.
@@ -47,7 +84,7 @@ export interface ArkadeWalletProvider {
   getBalance(): Promise<AdjustedBalance>;
   getNetwork(): Promise<NetworkInfo>;
 
-  // Signing (each re-prompts; never granted by connect).
+  // Signing (requires fresh or staged approval; never granted by connect).
   /** BIP322/Schnorr message signing. Returns the base64 signature. Rejects a
    *  sighash-shaped (bare 32-byte) message — only human-readable text is signed here. */
   signMessage(params: { message: string }): Promise<string>;
@@ -55,6 +92,15 @@ export interface ArkadeWalletProvider {
    *  validates the PSBT itself; for a co-signed VtxoScript leaf it adds only our
    *  Schnorr tapScriptSig so the other parties sign in sequence. */
   signPsbt(params: { psbt: string; inputIndexes: number[] }): Promise<string>;
+
+  /** Approve the final payment and its verified intermediate checkpoints together. */
+  approveArkadeTransaction(
+    params: ApproveArkadeTransactionParams,
+  ): Promise<ApproveArkadeTransactionResult>;
+  /** Complete a staged approval without another prompt, before its expiry. */
+  signArkadeCheckpoints(
+    params: SignArkadeCheckpointsParams,
+  ): Promise<SignArkadeCheckpointsResult>;
 
   // Events.
   on(event: ProviderEvent, handler: (...args: unknown[]) => void): void;
