@@ -415,6 +415,9 @@ export function WalletHome({
             ` · Next renewal due in ${untilRelative(adjBalance.nextExpiryAtMs)}`}
         </div>
       )}
+      <footer className="build-info" aria-label="Wallet build">
+        v{__APP_VERSION__} · {__GIT_REVISION__}
+      </footer>
     </main>
   );
 }
