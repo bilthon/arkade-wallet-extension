@@ -80,6 +80,8 @@ const BALANCE_READ_TIMEOUT_MS = 8_000;
  * is disposed only on lock or through the serialized network transition.
  * The live identity and active session network are owned by `wallet-runtime.ts`.
  *
+ * While unlocked, a 20-second extension-API heartbeat prevents normal worker idle
+ * suspension without extending the wallet's auto-lock deadline. Locking stops it.
  * None of that memory survives the service worker being killed. When the worker dies
  * the identity dies with it, so the wallet is locked again and the next sensitive action
  * asks for the password.
