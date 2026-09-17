@@ -49,6 +49,8 @@ export interface NetworkConfig {
   isMainnet: boolean;
   /** Boltz swap API for this network; absent → Lightning UI hidden. */
   boltzApiUrl?: string;
+  /** Optional delegate endpoint; configuring it does not enable delegation. */
+  delegateUrl?: string;
 }
 
 function isOverridePresent(name: string): boolean {
@@ -61,10 +63,13 @@ const arkServerUrl = isOverridePresent('WXT_REGTEST_ARK_PORT')
 const esploraUrl = isOverridePresent('WXT_REGTEST_ESPLORA_PORT')
 ? localhostUrl('WXT_REGTEST_ESPLORA_PORT', import.meta.env.WXT_REGTEST_ESPLORA_PORT)
 : 'http://localhost:30000';
+const delegateUrl = isOverridePresent('WXT_REGTEST_DELEGATE_PORT')
+? localhostUrl('WXT_REGTEST_DELEGATE_PORT', import.meta.env.WXT_REGTEST_DELEGATE_PORT)
+: 'http://localhost:7012';
 
 /**
  * Endpoints per network. Switched together — operator + esplora (+ Boltz where available).
- * Delegate URLs are intentionally absent here; this is read-only.
+ * Delegate configuration is available on regtest only and requires separate opt-in.
  *
  * Regtest defaults to Nigiri's local services; optional port overrides are documented
  * in .env.example and shared with the test webapp.
@@ -73,6 +78,7 @@ export const NETWORK_CONFIG: Record<NetworkName, NetworkConfig> = {
   regtest: {
     arkServerUrl,
     esploraUrl,
+    delegateUrl,
     isMainnet: false,
     boltzApiUrl: 'http://localhost:9069',
   },

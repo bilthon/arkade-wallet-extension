@@ -4,6 +4,7 @@ beforeEach(() => {
   vi.resetModules();
   vi.stubEnv('WXT_REGTEST_ARK_PORT', undefined);
   vi.stubEnv('WXT_REGTEST_ESPLORA_PORT', undefined);
+  vi.stubEnv('WXT_REGTEST_DELEGATE_PORT', undefined);
 });
 
 afterEach(() => vi.unstubAllEnvs());
@@ -14,6 +15,7 @@ describe('regtest endpoints', () => {
     expect(NETWORK_CONFIG.regtest).toMatchObject({
       arkServerUrl: 'http://localhost:7070',
       esploraUrl: 'http://localhost:30000',
+      delegateUrl: 'http://localhost:7012',
     });
   });
 
@@ -37,6 +39,26 @@ describe('regtest endpoints', () => {
       esploraUrl: 'http://localhost:65535',
     });
   });
+
+  it('overrides the delegate independently and exposes it only on regtest', async () => {
+    vi.stubEnv('WXT_REGTEST_DELEGATE_PORT', '7015');
+    const { NETWORK_CONFIG } = await import('./wallet');
+    expect(NETWORK_CONFIG.regtest).toMatchObject({
+      arkServerUrl: 'http://localhost:7070',
+      esploraUrl: 'http://localhost:30000',
+      delegateUrl: 'http://localhost:7015',
+    });
+    for (const [network, config] of Object.entries(NETWORK_CONFIG)) {
+      if (network !== 'regtest') expect(config.delegateUrl).toBeUndefined();
+    }
+  });
+
+  it.each(['', '0', '65536', '-1', '7012.5', '7e3', 'abc', '7012/path'])(
+    'rejects invalid delegate port %j with the variable name', async (value) => {
+      vi.stubEnv('WXT_REGTEST_DELEGATE_PORT', value);
+      await expect(import('./wallet')).rejects.toThrow('WXT_REGTEST_DELEGATE_PORT');
+    },
+  );
 
   it.each(['', '0', '65536', '-1', '7070.5', '7e3', 'abc', '7071/path'])(
     'rejects invalid port %j with the variable name', async (value) => {
