@@ -82,6 +82,7 @@ function fakeSigningWallet() {
     identity: buyerKey,
     arkServerPublicKey: O, // 32-byte x-only operator key
     offchainTapscript: ownScript,
+    getContractManager: async () => ({ getContracts: async () => [] }),
     boardingTapscript: ownScript,
     arkProvider: { getInfo: async () => ({ dust: 330n, signerPubkey: hex.encode(O), forfeitPubkey: `02${hex.encode(F)}`, checkpointTapscript: hex.encode(checkpointPath().script) }) },
   } as never;

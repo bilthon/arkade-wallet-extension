@@ -18,6 +18,10 @@ import {
 } from '@arkade-os/sdk';
 import type { SessionContext } from './wallet-runtime';
 import { localhostUrl } from './regtest-config';
+import { hex } from '@scure/base';
+import { getDelegationConfig } from './delegation-state';
+import { createSessionDelegate, guardDelegateManager, validateDelegateAddress } from './delegation-provider';
+import { sessionIdentity } from './session-identity';
 import {
   adjustBalanceForExpiry,
   partitionVtxos,
@@ -126,10 +130,22 @@ export function networkConfig(network: NetworkName): NetworkConfig {
  * Identity derivation happens once at the runtime boundary. This builder never receives
  * the mnemonic or an application-owned raw seed.
  */
-export async function buildWallet(identity: Identity, network: NetworkName): Promise<Wallet> {
+export async function buildWallet(
+  identity: Identity,
+  network: NetworkName,
+  assertCurrent: () => void = () => {},
+): Promise<Wallet> {
   const cfg = networkConfig(network);
-  return Wallet.create({
-    identity,
+  const delegation = network === 'regtest' ? await getDelegationConfig({
+    walletPublicKey: hex.encode(await identity.xOnlyPublicKey()),
+    network,
+    operatorUrl: cfg.arkServerUrl,
+  }) : null;
+  const delegate = delegation ? createSessionDelegate(delegation, assertCurrent) : null;
+  assertCurrent();
+  const wallet = await Wallet.create({
+    identity: sessionIdentity(identity, assertCurrent),
+    delegateProvider: delegate?.provider,
     // arkServerUrl/esploraUrl are @deprecated in favor of explicit providers, but
     // they still resolve to Rest/Esplora providers under the hood. Keep the URL
     // form until we need provider injection.
@@ -144,16 +160,9 @@ export async function buildWallet(identity: Identity, network: NetworkName): Pro
       walletRepository: new IndexedDBWalletRepository(`arkade-wallet-${network}`),
       contractRepository: new IndexedDBContractRepository(`arkade-contract-${network}`),
     },
-    // settlementConfig: false makes the wallet DELIBERATE — no background signing.
-    //
-    // With neither settlementConfig nor renewalConfig, the SDK falls back to
-    // DEFAULT_SETTLEMENT_CONFIG (boardingUtxoSweep + 60s poll) and `Wallet.create`
-    // eagerly starts a VtxoManager poll that auto-settles (onboards) new boarding
-    // UTXOs into VTXOs and auto-renews on `vtxo_received` — all with NO user action.
-    // That is why the read-only wallet silently onboarded funds. The SW wallet must
-    // not sign in the background, and explicit sends must be the only signing path.
-    // Deliberate renewal/delegation is a later job and will opt back in via
-    // `delegateProvider` / an explicit settlementConfig.
+    // The SDK defaults to automatic onboarding and renewal when this is omitted.
+    // Keep signing explicit until opt-in automation and outcome tracking are wired in.
+    // A delegate provider selects the receiving script without enabling automation.
     settlementConfig: false,
     // With one shared wallet per unlocked session (instead of one per message), the
     // ContractWatcher this starts also lives for the whole session, so its backoff
@@ -170,6 +179,18 @@ export async function buildWallet(identity: Identity, network: NetworkName): Pro
       maxReconnectDelayMs: 30_000,
     },
   });
+  try {
+    assertCurrent();
+    if (delegation && delegate) {
+      validateDelegateAddress(delegation, wallet);
+      await guardDelegateManager(wallet, delegate.assertDelegationAllowed);
+      assertCurrent();
+    }
+    return wallet;
+  } catch (error) {
+    await wallet.dispose().catch(() => {});
+    throw error;
+  }
 }
 
 // ─── Read methods (operate on a built wallet) ────────────────────────────────

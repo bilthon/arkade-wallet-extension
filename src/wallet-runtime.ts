@@ -33,8 +33,9 @@ import { startSessionKeepalive, stopSessionKeepalive } from './session-keepalive
  *
  * `SessionContext` has no `identity` field, and that is not a security boundary. The
  * wallet it carries exposes a working signer, and the signing helpers reach it directly
- * as `context.wallet.identity`. What stops a stale caller from signing is calling
- * `assertCurrent()` immediately before the SDK call, not the shape of this type.
+ * as `context.wallet.identity`. Callers check `assertCurrent()` before SDK operations;
+ * the wallet also wraps the identity to check session ownership at each signing call,
+ * including signing the SDK initiates after an await.
  */
 interface RuntimeSession {
   readonly epoch: number;
@@ -229,6 +230,20 @@ export function beginRuntimeNetworkSwitch(
   };
 }
 
+/** Reuse the transition fence while preserving the unlocked identity on this network. */
+export function beginRuntimeWalletRebuild(context: SessionContext): RuntimeNetworkTransition {
+  context.assertCurrent();
+  if (!session || activeNetworkTransition) throw new Error('LOCKED');
+  return beginRuntimeNetworkSwitch({
+    [PREPARED_NETWORK_SWITCH]: {
+      source: getRuntimeVersion(),
+      targetNetwork: session.network,
+      identity: session.identity,
+      consumed: false,
+    },
+  });
+}
+
 function assertRuntimeVersion(expected: RuntimeVersion): void {
   const current = getRuntimeVersion();
   if (current.epoch !== expected.epoch || current.network !== expected.network) {
@@ -315,11 +330,13 @@ function assertSessionOwner(owner: RuntimeSession, wallet: Wallet): void {
 
 /** Build a fresh wallet for one captured runtime session and cache it only if still current. */
 async function buildSessionWallet(owner: RuntimeSession): Promise<Wallet> {
-  const build = buildWallet(owner.identity, owner.network);
+  let timedOut = false;
+  const build = buildWallet(owner.identity, owner.network, () => {
+    if (session !== owner || timedOut) throw new Error('LOCKED');
+  });
 
   // `withTimeout` races rather than cancels. If the timer wins, dispose the wallet when
   // the underlying build eventually resolves so it cannot leak managers or watchers.
-  let timedOut = false;
   build.then(
     (late) => {
       if (timedOut) void disposeWallet(late);
@@ -356,12 +373,13 @@ async function disposeRuntimeSession(owner: RuntimeSession | null): Promise<void
 }
 
 /**
- * Dispose a wallet and permanently disable both manager accessors. SDK `dispose()` stops
+ * Dispose a wallet and permanently disable manager accessors. SDK `dispose()` stops
  * existing managers but otherwise leaves these accessors able to recreate background work.
  */
 async function disposeWallet(wallet: Wallet): Promise<void> {
   wallet.getContractManager = () => Promise.reject(new Error('LOCKED'));
   wallet.getVtxoManager = () => Promise.reject(new Error('LOCKED'));
+  wallet.getDelegateManager = () => Promise.reject(new Error('LOCKED'));
   await wallet.dispose().catch(() => {});
 }
 

@@ -573,16 +573,5 @@ function btcNetwork(network: NetworkName) {
   return { bech32: 'tb', pubKeyHash: 0x6f, scriptHash: 0xc4, wif: 0xef };
 }
 
-/**
- * Re-derive the set of our own output scripts (hex pkScripts) from the wallet so the
- * inspector can flag change. Imported by the background; kept here so the own-change
- * rule lives next to where it's consumed. The Arkade VTXO output script is the
- * `VtxoScript` pkScript for the wallet's own address; the boarding output is its own
- * taproot script. We accept a list of raw scripts and hex-encode them.
- */
-export function ownScriptsFrom(scripts: Uint8Array[]): Set<string> {
-  return new Set(scripts.map((s) => hex.encode(s)));
-}
-
 // re-export so callers (background) can decode a taptree to recover own VtxoScript outputs.
 export { VtxoScript, VtxoTaprootTree, getArkPsbtFields, MultisigTapscript };

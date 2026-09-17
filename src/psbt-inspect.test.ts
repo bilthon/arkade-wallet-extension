@@ -13,7 +13,6 @@ import {
   parsePsbt,
   inspectPsbt,
   PsbtRejectedError,
-  ownScriptsFrom,
   type InspectContext,
 } from './psbt-inspect';
 
@@ -44,7 +43,7 @@ function makeContext(ownScripts: Uint8Array[]): InspectContext {
     network: 'regtest',
     ownXOnly: hex.encode(U),
     operatorXOnly: hex.encode(O),
-    ownScriptsHex: ownScriptsFrom(ownScripts),
+    ownScriptsHex: new Set(ownScripts.map((s) => hex.encode(s))),
     dustSats: 330,
     feeSanityBoundSats: 50_000,
   };

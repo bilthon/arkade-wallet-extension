@@ -12,6 +12,7 @@ vi.mock('./wallet', () => ({
 
 import {
   beginSessionLock,
+  beginRuntimeWalletRebuild,
   ensureFreshVtxos,
   getSessionContext,
   getSessionNetwork,
@@ -60,6 +61,31 @@ beforeEach(async () => {
 });
 
 describe('runtime session ownership', () => {
+  it('rebuilds with the same identity while revoking old contexts and signing guards', async () => {
+    const oldWallet = fakeWallet();
+    const context = await installContext(oldWallet);
+    const [identity, , assertCurrent] = buildWalletMock.mock.calls[0];
+    const transition = beginRuntimeWalletRebuild(context);
+    expect(() => context.assertCurrent()).toThrow('LOCKED');
+    expect(() => assertCurrent()).toThrow('LOCKED');
+    await transition.disposal;
+    expect(transition.install()).toBe(true);
+    buildWalletMock.mockResolvedValueOnce(fakeWallet());
+    const next = await getSessionContext();
+    expect(next.epoch).not.toBe(context.epoch);
+    expect(buildWalletMock.mock.calls[1][0]).toBe(identity);
+    expect(oldWallet.dispose).toHaveBeenCalledOnce();
+  });
+
+  it('does not unlock again when locked during a configuration rebuild', async () => {
+    const context = await installContext(fakeWallet());
+    const transition = beginRuntimeWalletRebuild(context);
+    expect(() => openSession(MNEMONIC, 'regtest')).toThrow('NETWORK_TRANSITION');
+    await beginSessionLock().disposal;
+    expect(transition.install()).toBe(false);
+    expect(isUnlocked()).toBe(false);
+  });
+
   it('opens locally without building a wallet and clears the temporary seed', () => {
     expect(isUnlocked()).toBe(true);
     expect(getSessionNetwork()).toBe('regtest');
@@ -85,7 +111,7 @@ describe('runtime session ownership', () => {
 
     await expect(getSessionContext()).resolves.toMatchObject({ wallet });
 
-    expect(buildWalletMock).toHaveBeenCalledWith(expect.any(SeedIdentity), 'regtest');
+    expect(buildWalletMock).toHaveBeenCalledWith(expect.any(SeedIdentity), 'regtest', expect.any(Function));
     expect(buildWalletMock.mock.calls[0][0]).not.toBe(temporarySeed);
   });
 
@@ -251,7 +277,7 @@ describe('getSessionContext', () => {
     const newWallet = fakeWallet();
     buildWalletMock.mockResolvedValueOnce(newWallet);
     await expect(getSessionContext()).resolves.toMatchObject({ wallet: newWallet });
-    expect(buildWalletMock).toHaveBeenLastCalledWith(expect.any(SeedIdentity), 'mutinynet');
+    expect(buildWalletMock).toHaveBeenLastCalledWith(expect.any(SeedIdentity), 'mutinynet', expect.any(Function));
     expect(buildWalletMock.mock.calls[1][0]).not.toBe(oldIdentity);
   });
 
