@@ -1,8 +1,9 @@
-import { RestDelegateProvider } from '@arkade-os/sdk';
+import { createDelegateTransport } from './delegation-transport';
 import { hex } from '@scure/base';
 import { rejectPendingApproval } from './approvals';
 import { getDelegationConfig, setDelegationConfig, type DelegationConfig } from './delegation-state';
 import { createSessionDelegate, validateDelegateAddress } from './delegation-provider';
+import { assertOperatorFeesZero } from './delegation-policy';
 import { disposeSwaps } from './lightning';
 import { lockWallet } from './session-lock';
 import { networkConfig } from './wallet';
@@ -31,12 +32,14 @@ async function applyConfiguration(context: SessionContext, config: DelegationCon
     network: context.network,
     operatorUrl: network.arkServerUrl,
   };
-  context.assertCurrent();
   validateDelegateAddress(config, context.wallet);
   if (config.enabled) {
     if (config.delegate.url !== network.delegateUrl) throw new Error('Unexpected delegate endpoint.');
-    const remote = new RestDelegateProvider(config.delegate.url);
-    await createSessionDelegate(config, context.assertCurrent, remote).assertDelegationAllowed();
+    const remote = createDelegateTransport(config.delegate.url);
+    const proposedDelegate = createSessionDelegate(config, context.assertCurrent, remote, {
+      assertOperatorAllowed: () => assertOperatorFeesZero(context.wallet, context.assertCurrent),
+    });
+    await proposedDelegate.assertDelegationAllowed();
   } else {
     // Pause preserves the approved script; it is not a way to approve another key offline.
     const previous = await getDelegationConfig(scope);
@@ -47,7 +50,7 @@ async function applyConfiguration(context: SessionContext, config: DelegationCon
       throw new Error('Approve the delegate before pausing delegation.');
     }
   }
-  context.assertCurrent();
+  // The transition checks session ownership before changing runtime state.
   const transition = beginRuntimeWalletRebuild(context);
   try {
     await Promise.allSettled([

@@ -5,6 +5,8 @@ import type { DelegationConfig } from './delegation-state';
 
 const readConfig = vi.hoisted(() => vi.fn());
 vi.mock('./delegation-state', () => ({ getDelegationConfig: readConfig }));
+const initialize = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock('./delegation-maintenance', () => ({ initializeWalletDelegation: initialize }));
 import { buildWallet } from './wallet';
 
 const buyer = SingleKey.fromHex('11'.repeat(32));
@@ -26,6 +28,7 @@ let builds: WalletConfig[];
 
 beforeEach(() => {
   builds = [];
+  initialize.mockClear();
   readConfig.mockReset().mockResolvedValue(null);
   vi.spyOn(Wallet, 'create').mockImplementation(async (config) => {
     builds.push(config);
@@ -50,6 +53,7 @@ describe('delegate-aware wallet construction', () => {
     const wallet = await buildWallet(buyer, 'regtest');
     expect(wallet.offchainTapscript).toBeInstanceOf(DefaultVtxo.Script);
     expect(builds[0].delegateProvider).toBeUndefined();
+    expect(initialize).not.toHaveBeenCalled();
     expect(builds[0].settlementConfig).toBe(false);
   });
 
@@ -62,6 +66,7 @@ describe('delegate-aware wallet construction', () => {
     expect(enabled.offchainTapscript).toBeInstanceOf(DelegateVtxo.Script);
     expect(await paused.getAddress()).toEqual(await enabled.getAddress());
     expect(network).not.toHaveBeenCalled();
+    expect(initialize.mock.calls).toHaveLength(2);
     expect(builds.every((config) => config.settlementConfig === false)).toBe(true);
   });
 

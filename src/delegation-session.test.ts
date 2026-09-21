@@ -11,7 +11,13 @@ const mocks = vi.hoisted(() => ({
 vi.mock('./delegation-state', () => ({ getDelegationConfig: mocks.read, setDelegationConfig: mocks.write }));
 vi.mock('./delegation-provider', async (original) => ({
   ...await original<typeof import('./delegation-provider')>(),
-  createSessionDelegate: () => ({ assertDelegationAllowed: mocks.ready }),
+  createSessionDelegate: (_config: unknown, _current: unknown, _remote: unknown,
+    checks: { assertOperatorAllowed: () => Promise<void> }) => ({
+    assertDelegationAllowed: async () => {
+      await mocks.ready();
+      await checks.assertOperatorAllowed();
+    },
+  }),
 }));
 vi.mock('./wallet-runtime', () => ({ beginRuntimeWalletRebuild: mocks.begin, getSessionContext: mocks.build }));
 vi.mock('./session-lock', () => ({ lockWallet: mocks.lock }));
@@ -37,7 +43,10 @@ beforeEach(async () => {
   vi.clearAllMocks();
   current = true;
   context = {
-    wallet: { identity: buyer, network: { hrp: 'tark' }, arkServerPublicKey: await operator.compressedPublicKey() } as unknown as Wallet,
+    wallet: {
+      identity: buyer, network: { hrp: 'tark' }, arkServerPublicKey: await operator.compressedPublicKey(),
+      arkProvider: { getInfo: vi.fn(async () => ({ fees: { intentFee: {} } })) },
+    } as unknown as Wallet,
     network: 'regtest', epoch: 1,
     assertCurrent: () => { if (!current) throw new Error('LOCKED'); },
   };
@@ -68,7 +77,18 @@ describe('delegation configuration transition', () => {
   it('pauses the same delegate without a network request', async () => {
     await configureDelegation(context, { ...config, enabled: false });
     expect(mocks.ready).not.toHaveBeenCalled();
+    expect(context.wallet.arkProvider.getInfo).not.toHaveBeenCalled();
     expect(mocks.write).toHaveBeenCalledOnce();
+  });
+
+  it('rejects nonzero operator fees before persisting approval or rebuilding', async () => {
+    vi.mocked(context.wallet.arkProvider.getInfo).mockResolvedValue({
+      fees: { intentFee: { offchainInput: '1' } },
+    } as never);
+    await expect(configureDelegation(context, config)).rejects.toThrow('zero operator fees');
+    expect(mocks.begin).not.toHaveBeenCalled();
+    expect(mocks.write).not.toHaveBeenCalled();
+    expect(mocks.build).not.toHaveBeenCalled();
   });
 
   it('rejects a second queued change from the old session', async () => {

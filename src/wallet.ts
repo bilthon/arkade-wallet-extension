@@ -19,8 +19,10 @@ import {
 import type { SessionContext } from './wallet-runtime';
 import { localhostUrl } from './regtest-config';
 import { hex } from '@scure/base';
-import { getDelegationConfig } from './delegation-state';
-import { createSessionDelegate, guardDelegateManager, validateDelegateAddress } from './delegation-provider';
+import { initializeWalletDelegation } from './delegation-maintenance';
+import { assertOperatorFeesZero, validateDelegationIntent } from './delegation-policy';
+import { getDelegationConfig, type DelegationConfig } from './delegation-state';
+import { createSessionDelegate, validateDelegateAddress } from './delegation-provider';
 import { sessionIdentity } from './session-identity';
 import {
   adjustBalanceForExpiry,
@@ -134,14 +136,20 @@ export async function buildWallet(
   identity: Identity,
   network: NetworkName,
   assertCurrent: () => void = () => {},
+  onDelegationPolicyMismatch: (config: DelegationConfig) => void = () => {},
 ): Promise<Wallet> {
   const cfg = networkConfig(network);
-  const delegation = network === 'regtest' ? await getDelegationConfig({
-    walletPublicKey: hex.encode(await identity.xOnlyPublicKey()),
-    network,
-    operatorUrl: cfg.arkServerUrl,
+  const scope = {
+    walletPublicKey: hex.encode(await identity.xOnlyPublicKey()), network, operatorUrl: cfg.arkServerUrl,
+  };
+  const delegation = network === 'regtest' ? await getDelegationConfig(scope) : null;
+  const delegate = delegation ? createSessionDelegate(delegation, assertCurrent, undefined, {
+    assertOperatorAllowed: () => assertOperatorFeesZero(wallet, assertCurrent),
+    validateIntent: async (intent) => {
+      validateDelegationIntent(intent, delegation.delegate, await wallet.getAddress());
+    },
+    onPolicyMismatch: () => onDelegationPolicyMismatch(delegation),
   }) : null;
-  const delegate = delegation ? createSessionDelegate(delegation, assertCurrent) : null;
   assertCurrent();
   const wallet = await Wallet.create({
     identity: sessionIdentity(identity, assertCurrent),
@@ -161,8 +169,8 @@ export async function buildWallet(
       contractRepository: new IndexedDBContractRepository(`arkade-contract-${network}`),
     },
     // The SDK defaults to automatic onboarding and renewal when this is omitted.
-    // Keep signing explicit until opt-in automation and outcome tracking are wired in.
-    // A delegate provider selects the receiving script without enabling automation.
+    // Install authorization guards and tracking first; start opt-in automation below.
+    // A delegate provider alone selects the receiving script without starting it.
     settlementConfig: false,
     // With one shared wallet per unlocked session (instead of one per message), the
     // ContractWatcher this starts also lives for the whole session, so its backoff
@@ -183,7 +191,7 @@ export async function buildWallet(
     assertCurrent();
     if (delegation && delegate) {
       validateDelegateAddress(delegation, wallet);
-      await guardDelegateManager(wallet, delegate.assertDelegationAllowed);
+      await initializeWalletDelegation(wallet, scope, delegation, assertCurrent, delegate);
       assertCurrent();
     }
     return wallet;

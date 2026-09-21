@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ArkAddress, SingleKey, type DelegateProvider, type Wallet } from '@arkade-os/sdk';
+import { ArkAddress, SingleKey, type DelegateInfo, type DelegateProvider, type Wallet } from '@arkade-os/sdk';
 import { hex } from '@scure/base';
-import { createSessionDelegate, guardDelegateManager, validateDelegateAddress } from './delegation-provider';
+import { createSessionDelegate, validateDelegateAddress } from './delegation-provider';
+import { DelegationPolicyError } from './delegation-policy';
 import type { DelegationConfig } from './delegation-state';
 
 const operator = SingleKey.fromHex('11'.repeat(32));
@@ -12,11 +13,21 @@ const info = {
 };
 const config: DelegationConfig = { enabled: true, delegate: { url: 'http://localhost:7012', ...info } };
 const fakeRemote = () => ({
-  getDelegateInfo: vi.fn(async () => ({ ...info })),
+  getDelegateInfo: vi.fn(async (): Promise<DelegateInfo> => ({ ...info })),
   delegate: vi.fn(async () => {}),
 });
 
 describe('session delegate provider', () => {
+  it('does not publish if the session locks during signed intent validation', async () => {
+    let current = true;
+    const remote = fakeRemote();
+    const { provider } = createSessionDelegate(config, () => {
+      if (!current) throw new Error('LOCKED');
+    }, remote, { validateIntent: async () => { current = false; } });
+    await expect(provider.delegate({} as never, [])).rejects.toThrow('LOCKED');
+    expect(remote.delegate).not.toHaveBeenCalled();
+  });
+
   it('serves approved metadata offline and returns independent snapshots', async () => {
     const remote = fakeRemote();
     remote.getDelegateInfo.mockRejectedValue(new Error('offline'));
@@ -30,12 +41,9 @@ describe('session delegate provider', () => {
   it('keeps paused metadata available but refuses delegation before manager work', async () => {
     const remote = fakeRemote();
     const session = createSessionDelegate({ ...config, enabled: false }, () => {}, remote);
-    const submit = vi.fn();
-    const manager = { delegate: submit };
-    await guardDelegateManager({ getDelegateManager: async () => manager } as unknown as Wallet, session.assertDelegationAllowed);
     expect(await session.provider.getDelegateInfo()).toEqual(info);
-    await expect(manager.delegate([], 'destination')).rejects.toThrow('paused');
-    expect(submit).not.toHaveBeenCalled();
+    await expect(session.assertDelegationAllowed()).rejects.toThrow('paused');
+    expect(remote.delegate).not.toHaveBeenCalled();
     expect(remote.getDelegateInfo).not.toHaveBeenCalled();
   });
 
@@ -66,6 +74,64 @@ describe('session delegate provider', () => {
     const intent = {} as never;
     await provider.delegate(intent, ['forfeit'], { rejectReplace: true });
     expect(remote.delegate).toHaveBeenCalledWith(intent, ['forfeit'], { rejectReplace: true });
+  });
+
+  it('allows online settlement during an outage but still enforces operator policy and pause', async () => {
+    const remote = fakeRemote();
+    remote.getDelegateInfo.mockRejectedValue(new Error('offline'));
+    const checkOperator = vi.fn(async () => {});
+    const pause = vi.fn();
+    const session = createSessionDelegate(config, () => {}, remote, {
+      assertOperatorAllowed: checkOperator, onPolicyMismatch: pause,
+    });
+    await session.assertSettlementAllowed();
+    expect(remote.getDelegateInfo).not.toHaveBeenCalled();
+    expect(checkOperator).toHaveBeenCalledOnce();
+    checkOperator.mockRejectedValueOnce(new DelegationPolicyError('fees changed'));
+    await expect(session.assertSettlementAllowed()).rejects.toThrow('fees changed');
+    expect(pause).toHaveBeenCalledOnce();
+    await expect(session.assertSettlementAllowed()).rejects.toThrow('fees changed');
+    const paused = createSessionDelegate({ ...config, enabled: false }, () => {}, remote);
+    await expect(paused.assertSettlementAllowed()).rejects.toThrow('paused');
+  });
+
+  it('latches a changed policy and requests pause once, even if the service changes back', async () => {
+    const remote = fakeRemote();
+    const pause = vi.fn();
+    remote.getDelegateInfo.mockResolvedValueOnce({ ...info, fee: '1' });
+    const session = createSessionDelegate(config, () => {}, remote, { onPolicyMismatch: pause });
+    await expect(session.assertDelegationAllowed()).rejects.toThrow('zero-fee');
+    await expect(session.assertDelegationAllowed()).rejects.toThrow('zero-fee');
+    expect(pause).toHaveBeenCalledOnce();
+    expect(remote.getDelegateInfo).toHaveBeenCalledOnce();
+  });
+
+  it('retries an outage without pausing the approved configuration', async () => {
+    const remote = fakeRemote();
+    const pause = vi.fn();
+    remote.getDelegateInfo.mockRejectedValueOnce(new Error('offline'));
+    const session = createSessionDelegate(config, () => {}, remote, { onPolicyMismatch: pause });
+    await expect(session.assertDelegationAllowed()).rejects.toThrow('offline');
+    await session.assertDelegationAllowed();
+    expect(pause).not.toHaveBeenCalled();
+  });
+
+  it('pauses on operator fee changes and refuses publishing an invalid signed intent', async () => {
+    const remote = fakeRemote();
+    const pause = vi.fn();
+    const operator = createSessionDelegate(config, () => {}, remote, {
+      assertOperatorAllowed: async () => { throw new DelegationPolicyError('operator fees changed'); },
+      onPolicyMismatch: pause,
+    });
+    await expect(operator.assertDelegationAllowed()).rejects.toThrow('operator fees changed');
+    expect(pause).toHaveBeenCalledOnce();
+    const session = createSessionDelegate(config, () => {}, remote, {
+      validateIntent: async () => { throw new DelegationPolicyError('invalid intent'); },
+      onPolicyMismatch: pause,
+    });
+    await expect(session.provider.delegate({} as never, [])).rejects.toThrow('invalid intent');
+    expect(remote.delegate).not.toHaveBeenCalled();
+    expect(pause).toHaveBeenCalledTimes(2);
   });
 
   it('rejects a fee address on another network or operator', async () => {

@@ -10,6 +10,9 @@ vi.mock('./wallet', () => ({
   networkConfig: (network: NetworkName) => ({ isMainnet: network === 'bitcoin' }),
 }));
 
+const configureDelegationMock = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock('./delegation-session', () => ({ configureDelegation: configureDelegationMock }));
+
 import {
   beginSessionLock,
   beginRuntimeWalletRebuild,
@@ -52,6 +55,7 @@ beforeEach(async () => {
   const previous = beginSessionLock();
   await previous.disposal;
   buildWalletMock.mockReset();
+  configureDelegationMock.mockClear();
   mnemonicToSeedMock.mockReset();
   mnemonicToSeedMock.mockImplementation(() => {
     temporarySeed = new Uint8Array(64).fill(7);
@@ -61,6 +65,54 @@ beforeEach(async () => {
 });
 
 describe('runtime session ownership', () => {
+  it('routes a policy mismatch through a paused configuration for the current session', async () => {
+    const wallet = fakeWallet();
+    await installContext(wallet);
+    const onMismatch = buildWalletMock.mock.calls[0][3];
+    const config = { enabled: true, delegate: { url: 'http://delegate', fee: '0' } };
+    onMismatch(config);
+    await vi.waitFor(() => expect(configureDelegationMock).toHaveBeenCalledWith(
+      expect.objectContaining({ wallet }), { ...config, enabled: false },
+    ));
+  });
+
+  it('does not apply a late policy mismatch to a replacement session', async () => {
+    await installContext(fakeWallet());
+    const onMismatch = buildWalletMock.mock.calls[0][3];
+    await openSession(MNEMONIC, 'regtest');
+    onMismatch({ enabled: true });
+    // Give the dynamic module import and its continuation time to finish.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(configureDelegationMock).not.toHaveBeenCalled();
+  });
+
+  it('reports a failed policy pause using a controlled diagnostic', async () => {
+    await installContext(fakeWallet());
+    configureDelegationMock.mockRejectedValueOnce(new Error('private storage payload'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      buildWalletMock.mock.calls[0][3]({ enabled: true });
+      await vi.waitFor(() => expect(warn).toHaveBeenCalledExactlyOnceWith(
+        '[arkade] could not persist delegation pause after a policy change',
+      ));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('does not warn when a concurrent lock invalidates the policy pause', async () => {
+    await installContext(fakeWallet());
+    configureDelegationMock.mockRejectedValueOnce(new Error('LOCKED'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      buildWalletMock.mock.calls[0][3]({ enabled: true });
+      await vi.waitFor(() => expect(configureDelegationMock).toHaveBeenCalledOnce());
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('rebuilds with the same identity while revoking old contexts and signing guards', async () => {
     const oldWallet = fakeWallet();
     const context = await installContext(oldWallet);
@@ -111,7 +163,7 @@ describe('runtime session ownership', () => {
 
     await expect(getSessionContext()).resolves.toMatchObject({ wallet });
 
-    expect(buildWalletMock).toHaveBeenCalledWith(expect.any(SeedIdentity), 'regtest', expect.any(Function));
+    expect(buildWalletMock).toHaveBeenCalledWith(expect.any(SeedIdentity), 'regtest', expect.any(Function), expect.any(Function));
     expect(buildWalletMock.mock.calls[0][0]).not.toBe(temporarySeed);
   });
 
@@ -277,7 +329,7 @@ describe('getSessionContext', () => {
     const newWallet = fakeWallet();
     buildWalletMock.mockResolvedValueOnce(newWallet);
     await expect(getSessionContext()).resolves.toMatchObject({ wallet: newWallet });
-    expect(buildWalletMock).toHaveBeenLastCalledWith(expect.any(SeedIdentity), 'mutinynet', expect.any(Function));
+    expect(buildWalletMock).toHaveBeenLastCalledWith(expect.any(SeedIdentity), 'mutinynet', expect.any(Function), expect.any(Function));
     expect(buildWalletMock.mock.calls[1][0]).not.toBe(oldIdentity);
   });
 

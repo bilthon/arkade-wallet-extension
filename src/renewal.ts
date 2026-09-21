@@ -1,3 +1,4 @@
+import { hasDelegationAutomation, catchUpDelegation } from './delegation-maintenance';
 import { getSessionContext, ensureFreshVtxos, isUnlocked } from './wallet-runtime';
 import { renewExpiringVtxos, recoverExpiredVtxos, getExpiredVtxoSummary } from './wallet';
 
@@ -10,30 +11,30 @@ import { renewExpiringVtxos, recoverExpiredVtxos, getExpiredVtxoSummary } from '
  *   • locked  → WARN only. There is no live signing session, so we just retain the last
  *               warning for the popup to show with an "unlock to renew" prompt.
  *               No signing, ever, while locked (the encrypt-at-rest invariant).
- *   • unlocked → renew every VTXO within RENEW_MARGIN_MS of its batch expiry via the
- *                deliberate `renewExpiringVtxos` path (settlementConfig stays false;
- *                we renew EXPLICITLY, not by re-enabling the silent poll).
+ *   • unlocked with delegation → catch up on authorizations; the SDK owns onboarding
+ *                and renewal for that session. Unaccepted coins use the one-hour
+ *                fallback margin; accepted coins are left to Fulmine until expiry.
+ *   • otherwise unlocked → recover and renew through the existing fallback below.
  *
  * INHERENT LIMIT (documented, not a bug): under the Strict posture + the ~30s SW
  * idle-kill, after the SW dies the wallet is effectively locked, so this only runs
  * while the user keeps the wallet active/unlocked. That is expected. Delegation
- * (Mutinynet) is the real unattended answer; we do NOT hold a hot key
+ * lets Fulmine use previously accepted authorizations offline; we do NOT hold a hot key
  * to work around the SW lifecycle (it would break encrypt-at-rest for marginal gain).
  *
- * Cadence is dev-friendly: regtest VtxoTreeExpiry is ~17 min, so a 1-min alarm (the
- * MV3 minimum period) with an ~8-min margin renews with comfortable headroom. Both
- * are constants here — bump the margin up toward the mainnet `batchExpiry` window
- * once that value is known (open question).
+ * The alarm runs once a minute. The legacy fallback below retains its eight-minute
+ * renewal margin; delegation-automation.ts separately configures the SDK's one-hour
+ * window. Regtest VTXO lifetimes depend on the operator's selected test profile.
  */
 
 export const ALARM_RENEWAL = 'arkade:renew';
 
-/** Alarm period. 1 minute is the MV3 floor; fine for regtest's seconds-scale expiry. */
+/** Run catch-up and refresh expiry warnings once a minute while unlocked. */
 export const RENEWAL_PERIOD_MINUTES = 1;
 
 /**
- * Renew any VTXO expiring within this window. ~8 min sits comfortably inside the
- * ~17-min regtest tree expiry while leaving slack for the batch round to complete.
+ * Renewal window for the legacy fallback, used when delegation automation is off.
+ * The SDK automation's separate one-hour window is set in delegation-automation.ts.
  */
 export const RENEW_MARGIN_MS = 8 * 60 * 1000;
 
@@ -103,15 +104,6 @@ export async function runRenewalTick(): Promise<
     return { state: 'locked', warning };
   }
 
-  // Unlocked: RECOVER first (drains already-expired/swept coins into fresh VTXOs), THEN
-  // renew the still-valid expiring remainder. This ordering matters: renewal's batch
-  // round must not include expired/recoverable coins (the reproduced INVALID_INTENT_PROOF
-  // bug), and recovering first clears them so renew sees a clean set. The two are distinct
-  // rounds — isolate their errors so a failed recover doesn't skip renew and vice-versa.
-  // (`renewExpiringVtxos` also recovers-first internally as a standalone safety net for
-  // the manual `renewNow` path; after this recover leg it re-reads fresh and finds
-  // nothing to drain, so there is no double-recover.)
-  //
   // This is a scheduled tick, not user activity, so it goes straight to the shared
   // session wallet with no `armAutoLock()` anywhere on this path — a tick must not
   // keep extending the idle window on its own.
@@ -122,25 +114,39 @@ export async function runRenewalTick(): Promise<
   // renewable coins.
   await ensureFreshVtxos(context);
 
-  let recovered = 0;
-  let txid: string | undefined;
+  // Delegate-enabled sessions already have the SDK onboarding/renewal loop. Catch up
+  // authorizations here instead of racing it with the legacy automatic recovery loop.
   try {
-    const rec = await recoverExpiredVtxos(context);
-    recovered = rec.recovered;
-    txid = rec.txid;
-  } catch (err) {
-    if (err instanceof Error && err.message === 'LOCKED') throw err;
-    console.warn('[arkade] recovery leg failed', err);
+    await catchUpDelegation(wallet);
+  } catch (error) {
+    if (error instanceof Error && error.message === 'LOCKED') throw error;
+    // Reconciliation/storage outages must not hide expiry warnings or prevent the
+    // ordinary wallet's independent recovery and renewal legs from running.
+    console.warn('[arkade] delegation reconciliation failed; retrying on the next tick');
   }
-
+  let recovered = 0;
   let renewed = 0;
-  try {
-    const r = await renewExpiringVtxos(context, RENEW_MARGIN_MS);
-    renewed = r.renewed;
-    txid ??= r.txid;
-  } catch (err) {
-    if (err instanceof Error && err.message === 'LOCKED') throw err;
-    console.warn('[arkade] renewal leg failed', err);
+  let txid: string | undefined;
+  if (!hasDelegationAutomation(wallet)) {
+    // Recovery must precede renewal so swept coins do not enter an ordinary batch
+    // swap. Isolate the legs so one failure does not prevent the other from running.
+    try {
+      const rec = await recoverExpiredVtxos(context);
+      recovered = rec.recovered;
+      txid = rec.txid;
+    } catch (err) {
+      if (err instanceof Error && err.message === 'LOCKED') throw err;
+      console.warn('[arkade] recovery leg failed', err);
+    }
+
+    try {
+      const r = await renewExpiringVtxos(context, RENEW_MARGIN_MS);
+      renewed = r.renewed;
+      txid ??= r.txid;
+    } catch (err) {
+      if (err instanceof Error && err.message === 'LOCKED') throw err;
+      console.warn('[arkade] renewal leg failed', err);
+    }
   }
 
   // Re-read post-settle so the warning reflects the new state (ideally cleared).

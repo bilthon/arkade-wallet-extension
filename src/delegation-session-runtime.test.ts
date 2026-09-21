@@ -16,7 +16,10 @@ vi.mock('./wallet', () => ({
 vi.mock('./delegation-state', () => ({ setDelegationConfig: effects.write }));
 vi.mock('./delegation-provider', async (original) => ({
   ...await original<typeof import('./delegation-provider')>(),
-  createSessionDelegate: () => ({ assertDelegationAllowed: async () => {} }),
+  createSessionDelegate: (_config: unknown, _current: unknown, _remote: unknown,
+    checks: { assertOperatorAllowed: () => Promise<void> }) => ({
+    assertDelegationAllowed: () => checks.assertOperatorAllowed(),
+  }),
 }));
 vi.mock('./auto-lock', () => ({ clearAutoLock: effects.clearAutoLock }));
 vi.mock('./lightning', () => ({ disposeSwaps: effects.disposeSwaps }));
@@ -42,6 +45,7 @@ beforeEach(async () => {
   effects.write.mockReset().mockResolvedValue(undefined);
   effects.build.mockImplementation(async () => ({
     identity: buyer, network: { hrp: 'tark' }, arkServerPublicKey: await operator.compressedPublicKey(),
+    arkProvider: { getInfo: async () => ({ fees: { intentFee: {} } }) },
     dispose: async () => {},
   } as unknown as Wallet));
   vi.stubGlobal('browser', { storage: { local: { remove: vi.fn(async () => {}) } } });

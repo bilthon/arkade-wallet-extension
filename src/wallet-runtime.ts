@@ -1,3 +1,4 @@
+import type { DelegationConfig } from './delegation-state';
 import { SeedIdentity, type NetworkName, type Wallet } from '@arkade-os/sdk';
 import { mnemonicToSeed } from './crypto';
 import { buildWallet, networkConfig } from './wallet';
@@ -328,12 +329,43 @@ function assertSessionOwner(owner: RuntimeSession, wallet: Wallet): void {
   }
 }
 
+/**
+ * Persist a pause after the provider has already blocked work on a policy mismatch.
+ * Reuse the same queued configuration change as a user's pause, which saves the
+ * setting and rebuilds the wallet without automation. Ignore notifications from
+ * an old session so a delayed failure cannot pause a newer wallet session.
+ */
+async function pauseDelegationForSession(owner: RuntimeSession, config: DelegationConfig): Promise<void> {
+  // Load here to avoid a static import cycle: delegation-session uses this runtime.
+  const { configureDelegation } = await import('./delegation-session');
+  if (session !== owner) return;
+  const context = await getSessionContext();
+  if (session !== owner) return;
+  await configureDelegation(context, { ...config, enabled: false });
+}
+
 /** Build a fresh wallet for one captured runtime session and cache it only if still current. */
 async function buildSessionWallet(owner: RuntimeSession): Promise<Wallet> {
   let timedOut = false;
-  const build = buildWallet(owner.identity, owner.network, () => {
+  const assertBuildSessionCurrent = () => {
     if (session !== owner || timedOut) throw new Error('LOCKED');
-  });
+  };
+  const onDelegationPolicyMismatch = (config: DelegationConfig) => {
+    // The provider has already blocked new authorizations. Do not await the rebuild
+    // here: its disposal may need the SDK operation reporting this mismatch to finish.
+    void pauseDelegationForSession(owner, config).catch((error) => {
+      // A concurrent lock/rebuild already invalidated this request. Other failures
+      // deserve a diagnostic, without exposing arbitrary storage/provider payloads.
+      if (error instanceof Error && error.message === 'LOCKED') return;
+      console.warn('[arkade] could not persist delegation pause after a policy change');
+    });
+  };
+  const build = buildWallet(
+    owner.identity,
+    owner.network,
+    assertBuildSessionCurrent,
+    onDelegationPolicyMismatch,
+  );
 
   // `withTimeout` races rather than cancels. If the timer wins, dispose the wallet when
   // the underlying build eventually resolves so it cannot leak managers or watchers.
