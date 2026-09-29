@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { NetworkName } from '@arkade-os/sdk';
 import type { AdjustedBalance } from '@/src/vtxo-state';
+import type { DelegationSettings } from '@/src/delegation-settings';
+import { DelegationSummary } from '../delegation-status';
 import { withTimeout } from '@/src/async';
 import { type RenewalWarning, isWarningStale } from '@/src/renewal';
 import { client, isLockedError, errorMessage } from '../client';
@@ -48,6 +50,8 @@ export function WalletHome({
   onSettings: () => void;
 }) {
   const [network, setNetwork] = useState<NetworkName | null>(null);
+  const [delegation, setDelegation] = useState<DelegationSettings | null>(null);
+  const [delegationError, setDelegationError] = useState(false);
   const [address, setAddress] = useState<string | null>(null);
   const [boardingAddress, setBoardingAddress] = useState<string | null>(null);
   const [balance, setBalance] = useState<AdjustedBalance | null>(null);
@@ -108,6 +112,23 @@ export function WalletHome({
     await doRefresh();
     setPollResetKey((k) => k + 1);
   }, [doRefresh]);
+
+  // Read recorded authorizations on opening the screen and after user actions.
+  // Do not add status polling: these are last-known outcomes, not live renewal results.
+  useEffect(() => {
+    let cancelled = false;
+    setDelegation(null);
+    setDelegationError(false);
+    if (network !== 'regtest') return;
+    void client.getDelegationSettings().then((settings) => {
+      if (!cancelled) setDelegation(settings);
+    }).catch((err) => {
+      if (cancelled) return;
+      if (isLockedError(err)) onLocked();
+      else setDelegationError(true);
+    });
+    return () => { cancelled = true; };
+  }, [network, reloadKey, pollResetKey, onLocked]);
 
   useEffect(() => {
     let cancelled = false;
@@ -352,6 +373,11 @@ export function WalletHome({
           </div>
         )}
       </div>
+
+      {delegation?.available && <DelegationSummary settings={delegation} />}
+      {delegationError && (
+        <p className="delegation-note">Delegation status unavailable. Refresh to retry.</p>
+      )}
 
       {isEmpty ? (
         <EmptyState onReceive={() => setShowReceive(true)} />

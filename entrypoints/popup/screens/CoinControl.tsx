@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { CoinInfo } from '@/src/wallet';
+import type { CoinDelegationInfo, DelegationSettings } from '@/src/delegation-settings';
+import { CoinDelegationDetails } from '../delegation-status';
 import { client, isLockedError, errorMessage } from '../client';
 import { formatSats, untilRelative } from '../format';
 import { Send } from './Send';
@@ -28,6 +30,8 @@ export function CoinControl({
 }) {
   const [coins, setCoins] = useState<CoinInfo[] | null>(null);
   const [error, setError] = useState('');
+  const [delegation, setDelegation] = useState<DelegationSettings | null>(null);
+  const [delegationError, setDelegationError] = useState(false);
   // Sort is split into two independent controls: WHAT to sort by (criterion) and which
   // WAY (direction). Direction persists when you switch criterion — one control, one job.
   const [criterion, setCriterion] = useState<Criterion>('maturity');
@@ -40,6 +44,9 @@ export function CoinControl({
   useEffect(() => {
     let cancelled = false;
     setCoins(null);
+    setError('');
+    setDelegation(null);
+    setDelegationError(false);
     (async () => {
       try {
         const { coins } = await client.listCoins();
@@ -51,6 +58,18 @@ export function CoinControl({
           return;
         }
         setError(errorMessage(err));
+        return;
+      }
+      // Read saved outcomes after loading coins. A status failure must not prevent
+      // viewing or spending funds, and opening this screen never submits anything.
+      if (cancelled) return;
+      try {
+        const settings = await client.getDelegationSettings();
+        if (!cancelled) setDelegation(settings);
+      } catch (err) {
+        if (cancelled) return;
+        if (isLockedError(err)) onLocked();
+        else setDelegationError(true);
       }
     })();
     return () => {
@@ -155,10 +174,20 @@ export function CoinControl({
       {error && <p className="error">{error}</p>}
       {coins !== null && coins.length === 0 && <p className="subtitle">No coins yet.</p>}
 
+      {delegation?.available && (
+        <p className="delegation-note">
+          Last known delegation status. Delegated means the authorization was accepted,
+          not that renewal is complete. Pending coins await acceptance.
+        </p>
+      )}
+      {delegationError && <p className="delegation-note">Delegation status unavailable. Reopen this screen to retry.</p>}
+
       {sortedCoins?.map((coin) => (
         <CoinRow
           key={coin.outpoint}
           coin={coin}
+          showDelegation={delegation?.available === true}
+          delegation={delegation?.coins[coin.outpoint]}
           selected={selected.has(coin.outpoint)}
           onToggle={() => toggle(coin.outpoint)}
         />
@@ -185,10 +214,14 @@ export function CoinControl({
  *  Spendable coins are tappable; expired/recoverable coins are dimmed and inert. */
 function CoinRow({
   coin,
+  showDelegation,
+  delegation,
   selected,
   onToggle,
 }: {
   coin: CoinInfo;
+  showDelegation: boolean;
+  delegation: CoinDelegationInfo | undefined;
   selected: boolean;
   onToggle: () => void;
 }) {
@@ -250,6 +283,7 @@ function CoinRow({
           </span>
         )}
       </div>
+      {showDelegation && <CoinDelegationDetails info={delegation} state={coin.state} />}
     </div>
   );
 }

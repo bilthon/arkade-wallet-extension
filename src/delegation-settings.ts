@@ -25,6 +25,8 @@ export interface DelegationSettings {
   available: boolean;
   endpoint: string;
   config: DelegationConfig | null;
+  /** Saved status for each exact outpoint; replacement coins have their own status. */
+  coins: Record<string, CoinDelegationInfo>;
   summary: {
     delegated: number;
     pending: number;
@@ -35,6 +37,13 @@ export interface DelegationSettings {
     lastError: string | null;
   };
 }
+
+/** Public status details for the popup; never include signed authorizations. */
+export type CoinDelegationInfo =
+  | { status: 'delegated'; submittedAt: number }
+  | { status: 'pending' }
+  | { status: 'failed'; attemptedAt: number; error: string }
+  | { status: 'not-configured'; reason: string };
 
 export interface DelegateApproval {
   reviewId: string;
@@ -56,21 +65,30 @@ export async function getDelegationSettings(context: SessionContext): Promise<De
     const summary: DelegationSettings['summary'] = {
       delegated: 0, pending: 0, failed: 0, notConfigured: 0, totalSats: 0, lastError: null,
     };
-    return { available: false, sessionId: '', endpoint: '', config: null, summary };
+    return { available: false, sessionId: '', endpoint: '', config: null, coins: {}, summary };
   }
   const scope = await delegationScope(context);
   const config = await getDelegationConfig(scope);
-  const coins = await ordinaryDelegationCoins(context);
+  const { coins, ordinaryScripts } = await readDelegationCoins(context);
   const destination = await context.wallet.getAddress();
   const records = await getDelegationSubmissions(scope, coins.map((coin) => `${coin.txid}:${coin.vout}`));
   const compatibleScripts = config
     ? await delegateCompatibleScripts(context.wallet, scope.walletPublicKey, config.delegate.pubkey)
     : new Set<string>();
-  const summary = summarizeDelegation({ coins, records, config, destination, compatibleScripts });
+  const byOutpoint = new Map(records.map((record) => [record.outpoint, record]));
+  const statuses: Record<string, CoinDelegationInfo> = {};
+  for (const coin of coins) {
+    const outpoint = `${coin.txid}:${coin.vout}`;
+    statuses[outpoint] = classifyDelegation({
+      coin, record: byOutpoint.get(outpoint), config, destination, compatibleScripts, ordinaryScripts,
+    });
+  }
+  const ordinaryCoins = coins.filter((coin) => isOrdinaryCoin(coin, ordinaryScripts));
+  const summary = summarizeDelegation(ordinaryCoins, statuses);
   context.assertCurrent();
   return {
     sessionId: getOrCreateSessionId(context), available: true,
-    endpoint: networkConfig(context.network).delegateUrl ?? '', config, summary,
+    endpoint: networkConfig(context.network).delegateUrl ?? '', config, coins: statuses, summary,
   };
 }
 
@@ -161,42 +179,55 @@ export async function retryDelegation(context: SessionContext, expectedSessionId
 }
 
 /**
- * Count each coin once, using the first matching rule: accepted authorizations stay
- * Delegated; paused or incompatible coins are Not configured; failures for the current
- * delegate and destination are Failed; the remaining coins are Pending.
- * This only describes saved outcomes. Acceptance does not prove renewal completed.
+ * Describe saved outcomes before considering today's configuration. Pausing or changing
+ * the delegate cannot revoke an accepted authorization. A failure, however, describes
+ * only the delegate and destination used for that attempt.
  */
-function summarizeDelegation({ coins, records, config, destination, compatibleScripts }: {
-  coins: ExtendedVirtualCoin[];
-  records: DelegationSubmission[];
+function classifyDelegation({ coin, record, config, destination, compatibleScripts, ordinaryScripts }: {
+  coin: ExtendedVirtualCoin;
+  record: DelegationSubmission | undefined;
   config: DelegationConfig | null;
   destination: string;
   compatibleScripts: Set<string>;
-}): DelegationSettings['summary'] {
+  ordinaryScripts: Set<string>;
+}): CoinDelegationInfo {
+  if (record?.status === 'delegated') {
+    return { status: 'delegated', submittedAt: record.submittedAt };
+  }
+  if (coin.assets?.length) {
+    return { status: 'not-configured', reason: 'Coins containing assets are not supported by delegation yet.' };
+  }
+  if (!ordinaryScripts.has(coin.script.toLowerCase())) {
+    return { status: 'not-configured', reason: 'This contract is not supported by wallet delegation.' };
+  }
+  if (!config) return { status: 'not-configured', reason: 'No delegate has been approved.' };
+  if (!config.enabled) return { status: 'not-configured', reason: 'Delegation is paused.' };
+  if (!compatibleScripts.has(coin.script.toLowerCase())) {
+    return { status: 'not-configured', reason: 'This coin needs migration to the approved delegate’s receiving script.' };
+  }
+  if (record?.status === 'failed' && record.delegateUrl === config.delegate.url
+    && record.delegatePubkey === config.delegate.pubkey && record.destination === destination) {
+    return { status: 'failed', attemptedAt: record.attemptedAt, error: record.error };
+  }
+  return { status: 'pending' };
+}
+
+/** Count ordinary Bitcoin coins using the same statuses shown in coin control. */
+function summarizeDelegation(
+  coins: ExtendedVirtualCoin[], statuses: Record<string, CoinDelegationInfo>,
+): DelegationSettings['summary'] {
   const summary: DelegationSettings['summary'] = {
     delegated: 0, pending: 0, failed: 0, notConfigured: 0, totalSats: 0, lastError: null,
   };
-  const byOutpoint = new Map(records.map((record) => [record.outpoint, record]));
   let latestFailureAt = -1;
   for (const coin of coins) {
     summary.totalSats += coin.value;
-    const record = byOutpoint.get(`${coin.txid}:${coin.vout}`);
-    // Pausing or changing the delegate cannot revoke an accepted authorization.
-    if (record?.status === 'delegated') {
-      summary.delegated++;
-    } else if (!config?.enabled || !compatibleScripts.has(coin.script.toLowerCase())) {
-      summary.notConfigured++;
-    } else if (record?.status === 'failed'
-      && record.delegateUrl === config.delegate.url
-      && record.delegatePubkey === config.delegate.pubkey && record.destination === destination) {
-      summary.failed++;
-      // Show the most recent saved failure. These messages are safe for display.
-      if (record.attemptedAt > latestFailureAt) {
-        summary.lastError = record.error;
-        latestFailureAt = record.attemptedAt;
-      }
-    } else {
-      summary.pending++;
+    const info = statuses[`${coin.txid}:${coin.vout}`];
+    if (info.status === 'not-configured') summary.notConfigured++;
+    else summary[info.status]++;
+    if (info.status === 'failed' && info.attemptedAt > latestFailureAt) {
+      summary.lastError = info.error;
+      latestFailureAt = info.attemptedAt;
     }
   }
   return summary;
@@ -234,6 +265,15 @@ export async function delegationScope(context: SessionContext): Promise<Delegati
  * recoverable coins in the totals; migration applies its own spendability checks.
  */
 export async function ordinaryDelegationCoins(context: SessionContext): Promise<ExtendedVirtualCoin[]> {
+  const { coins, ordinaryScripts } = await readDelegationCoins(context);
+  return coins.filter((coin) => isOrdinaryCoin(coin, ordinaryScripts));
+}
+
+/** Read once so coin details and the ordinary-funds summary describe the same snapshot. */
+async function readDelegationCoins(context: SessionContext): Promise<{
+  coins: ExtendedVirtualCoin[];
+  ordinaryScripts: Set<string>;
+}> {
   const ownKey = hex.encode(await context.wallet.identity.xOnlyPublicKey());
   const manager = await context.wallet.getContractManager();
   const contracts = await manager.getContracts({ type: ['default', 'delegate'] });
@@ -242,7 +282,12 @@ export async function ordinaryDelegationCoins(context: SessionContext): Promise<
     return script ? [hex.encode(script)] : [];
   }));
   const coins = await context.wallet.getVtxos({ withRecoverable: true });
-  return coins.filter((coin) => scripts.has(coin.script.toLowerCase())
-    && !coin.isSpent && !coin.spentBy && !coin.isUnrolled && !coin.assets?.length);
+  return {
+    coins: coins.filter((coin) => !coin.isSpent && !coin.spentBy && !coin.isUnrolled),
+    ordinaryScripts: scripts,
+  };
 }
 
+function isOrdinaryCoin(coin: ExtendedVirtualCoin, scripts: Set<string>): boolean {
+  return scripts.has(coin.script.toLowerCase()) && !coin.assets?.length;
+}
