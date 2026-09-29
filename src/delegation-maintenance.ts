@@ -1,12 +1,11 @@
 import type { Wallet } from '@arkade-os/sdk';
-import { hex } from '@scure/base';
 import {
   listDelegationSubmissions, removeDelegationSubmission,
   type DelegationConfig, type DelegationScope,
 } from './delegation-state';
 import { installDelegationTracking } from './delegation-submissions';
 import { startDelegationAutomation } from './delegation-automation';
-import { ownedContractScript } from './wallet-scripts';
+import { delegateCompatibleScripts } from './wallet-scripts';
 
 interface WalletDelegation {
   enabled: boolean;
@@ -57,7 +56,7 @@ export async function initializeWalletDelegation(
   const delegateManager = manager;
   const submissions = installDelegationTracking(delegateManager, {
     scope, delegate: config.delegate, assertCurrent,
-    eligibleScripts: getEligibleDelegationScripts,
+    eligibleScripts: () => delegateCompatibleScripts(wallet, scope.walletPublicKey, config.delegate.pubkey),
     assertDelegationAllowed: checks.assertDelegationAllowed,
   });
 
@@ -86,22 +85,6 @@ export async function initializeWalletDelegation(
       await dispose();
     }
   };
-
-  /** Find ordinary wallet scripts that use the delegate approved for this session. */
-  async function getEligibleDelegationScripts(): Promise<Set<string>> {
-    const contractManager = await wallet.getContractManager();
-    const contracts = await contractManager.getContracts({ type: ['delegate'] });
-    // Stored scripts use an x-only key; approval stores the compressed public key.
-    const delegateKey = config.delegate.pubkey.slice(2).toLowerCase();
-    const scripts = new Set<string>();
-    for (const contract of contracts) {
-      if (contract.params?.delegatePubKey?.toLowerCase() !== delegateKey) continue;
-      // A delegate key match alone does not prove that this wallet owns the script.
-      const script = ownedContractScript(contract, scope.walletPublicKey);
-      if (script) scripts.add(hex.encode(script));
-    }
-    return scripts;
-  }
 
   /** Startup and alarm requests share any catch-up already running for this wallet. */
   function catchUp(): Promise<void> {

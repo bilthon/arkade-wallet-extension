@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DefaultVtxo, DelegateVtxo, SingleKey, type Contract, type Wallet } from '@arkade-os/sdk';
 import { hex } from '@scure/base';
-import { ownedContractScript } from './wallet-scripts';
+import { ownedContractScript, delegateCompatibleScripts } from './wallet-scripts';
 import { buildInspectContext } from './signing';
 
 const buyer = await SingleKey.fromHex('11'.repeat(32)).xOnlyPublicKey();
@@ -24,6 +24,27 @@ function contract(type: 'default' | 'delegate'): Contract {
 }
 
 describe('wallet-owned scripts', () => {
+  it('finds historical delegate scripts while skipping foreign and malformed contracts', async () => {
+    const historical = new DelegateVtxo.Script({
+      ...options, delegatePubKey: delegate, csvTimelock: { type: 'blocks', value: 288n },
+    });
+    const stored = contract('delegate');
+    const wallet = {
+      getContractManager: async () => ({ getContracts: async () => [
+        stored,
+        { ...stored, script: hex.encode(historical.pkScript), params: { ...stored.params, csvTimelock: '288' } },
+        { ...stored, params: undefined },
+        { ...stored, params: { ...stored.params, delegatePubKey: undefined } },
+        { ...stored, params: { ...stored.params, pubKey: hex.encode(operator) } },
+        contract('default'),
+      ] }),
+    } as unknown as Wallet;
+    expect(await delegateCompatibleScripts(wallet, hex.encode(buyer), `02${hex.encode(delegate)}`))
+      .toEqual(new Set([hex.encode(delegated.pkScript), hex.encode(historical.pkScript)]));
+    expect(await delegateCompatibleScripts(wallet, hex.encode(buyer), `02${hex.encode(operator)}`))
+      .toEqual(new Set());
+  });
+
   it('recognizes ordinary and historical delegated scripts for this identity', () => {
     expect(ownedContractScript(contract('default'), hex.encode(buyer))).toEqual(normal.pkScript);
     expect(ownedContractScript(contract('delegate'), hex.encode(buyer))).toEqual(delegated.pkScript);

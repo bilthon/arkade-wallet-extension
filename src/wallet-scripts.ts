@@ -53,3 +53,22 @@ export async function ownScriptsFor(wallet: Wallet, ownXOnly: string): Promise<S
   }
   return scripts;
 }
+
+/** Find verified wallet scripts usable by this delegate, including historical receiving scripts. */
+export async function delegateCompatibleScripts(
+  wallet: Wallet, ownXOnly: string, delegatePublicKey: string,
+): Promise<Set<string>> {
+  const manager = await wallet.getContractManager();
+  const contracts = await manager.getContracts({ type: ['delegate'] });
+  // Approval uses a compressed key; stored scripts use the x-only key.
+  const delegateKey = delegatePublicKey.slice(2).toLowerCase();
+  const scripts = new Set<string>();
+  for (const contract of contracts) {
+    if (contract.type !== 'delegate') continue;
+    const script = ownedContractScript(contract, ownXOnly);
+    if (script && contract.params.delegatePubKey.toLowerCase() === delegateKey) {
+      scripts.add(hex.encode(script));
+    }
+  }
+  return scripts;
+}

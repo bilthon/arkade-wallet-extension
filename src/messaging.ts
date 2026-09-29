@@ -16,6 +16,8 @@ import type {
 } from './provider-api';
 import type { CoinInfo, TxHistoryItem } from './wallet';
 import type { LnPayStatus, LnReceiveStatus } from './lightning-utils';
+import type { DelegationSettings, DelegateApproval } from './delegation-settings';
+import type { DelegationMigrationReview, DelegationMigrationResult } from './delegation-migration';
 
 /**
  * Typed content <-> background protocol over the `browser.runtime` hop.
@@ -68,6 +70,15 @@ export interface ProtocolMap {
    * the popup selects coins here, then spends them via `send` with their outpoints.
    */
   listCoins(): { coins: CoinInfo[] };
+
+  // Internal popup controls. These are not exposed through the dApp provider.
+  getDelegationSettings(): DelegationSettings;
+  previewDelegate(): DelegateApproval;
+  approveDelegate(data: { reviewId: string }): { ok: true };
+  setDelegationEnabled(data: { sessionId: string; enabled: boolean }): { ok: true };
+  retryDelegation(data: { sessionId: string }): { ok: true };
+  prepareDelegationMigration(): DelegationMigrationReview;
+  executeDelegationMigration(data: { reviewId: string }): DelegationMigrationResult;
 
   // ─── Off-chain send (the first write/spend path) ───────────────────────────
   /**

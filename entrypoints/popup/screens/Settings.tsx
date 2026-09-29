@@ -4,6 +4,7 @@ import { client } from '../client';
 import { networkLabel } from '../format';
 import { NETWORK_CONFIG } from '@/src/wallet';
 import { CoinControl } from './CoinControl';
+import { DelegationSettings } from './DelegationSettings';
 
 /**
  * Settings-lite: network picker (re-encrypts vault on switch — asks for the password),
@@ -15,6 +16,7 @@ export function Settings({ onBack, onLocked }: { onBack: () => void; onLocked: (
   const [sites, setSites] = useState(false);
   const [switching, setSwitching] = useState(false);
   const [coins, setCoins] = useState(false);
+  const [delegation, setDelegation] = useState(false);
 
   useEffect(() => {
     void client.getNetwork().then(({ network }) => setNetwork(network));
@@ -35,6 +37,10 @@ export function Settings({ onBack, onLocked }: { onBack: () => void; onLocked: (
 
   if (coins) {
     return <CoinControl onClose={() => setCoins(false)} onLocked={onLocked} />;
+  }
+
+  if (delegation) {
+    return <DelegationSettings onClose={() => setDelegation(false)} onLocked={onLocked} />;
   }
 
   if (switching) {
@@ -76,11 +82,20 @@ export function Settings({ onBack, onLocked }: { onBack: () => void; onLocked: (
           <div className="row-label">Renewal</div>
           <div className="row-sub">
             VTXOs are renewed automatically while your wallet is unlocked and open. Close or lock
-            it for a long time and coins can expire — reopen and unlock to renew. (Unattended
-            renewal via delegation is coming.)
+            it for a long time and coins can expire — reopen and unlock to renew.
           </div>
         </div>
       </div>
+
+      {network === 'regtest' && (
+        <div className="row">
+          <div>
+            <div className="row-label">Delegation</div>
+            <div className="row-sub">Approve a delegate to renew coins while you are offline.</div>
+          </div>
+          <button onClick={() => setDelegation(true)}>Manage</button>
+        </div>
+      )}
 
       <div className="row">
         <div>

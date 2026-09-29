@@ -50,6 +50,15 @@ export const client = {
     sendMessage('payLightningInvoice', { invoice, maxTotalSats }),
   getLightningPayStatus: (swapId: string) =>
     sendMessage('getLightningPayStatus', { swapId }),
+  getDelegationSettings: () => sendMessage('getDelegationSettings', undefined),
+  previewDelegate: () => sendMessage('previewDelegate', undefined),
+  approveDelegate: (reviewId: string) => sendMessage('approveDelegate', { reviewId }),
+  setDelegationEnabled: (sessionId: string, enabled: boolean) =>
+    sendMessage('setDelegationEnabled', { sessionId, enabled }),
+  retryDelegation: (sessionId: string) => sendMessage('retryDelegation', { sessionId }),
+  prepareDelegationMigration: () => sendMessage('prepareDelegationMigration', undefined),
+  executeDelegationMigration: (reviewId: string) =>
+    sendMessage('executeDelegationMigration', { reviewId }),
   // Connected sites: list + revoke per-origin web app grants.
   listConnectedSites: () => sendMessage('listConnectedSites', undefined),
   revokeConnectedSite: (origin: string) =>
