@@ -59,6 +59,11 @@ import {
 } from '@/src/provider-handlers';
 import { withTimeout } from '@/src/async';
 import { switchWalletNetwork } from '@/src/network-switch';
+import {
+  getDelegationSettings, previewDelegate, approveDelegate,
+  setDelegationEnabled, retryDelegation,
+} from '@/src/delegation-settings';
+import { prepareDelegationMigration, executeDelegationMigration } from '@/src/delegation-migration';
 
 /**
  * Bounds the snapshot's address and balance reads.
@@ -216,6 +221,28 @@ export default defineBackground(() => {
     await ensureFreshVtxos(context);
     return listCoins(context.wallet);
   });
+
+  // Delegation controls belong to the popup; the website bridge exposes none of them.
+  onMessage('getDelegationSettings', async () => getDelegationSettings(await getPopupContext()));
+  onMessage('previewDelegate', async () => previewDelegate(await getPopupContext()));
+  onMessage('approveDelegate', async ({ data }) => {
+    await approveDelegate(await getPopupContext(), data.reviewId);
+    return { ok: true as const };
+  });
+  onMessage('setDelegationEnabled', async ({ data }) => {
+    await setDelegationEnabled(await getPopupContext(), data.sessionId, data.enabled);
+    return { ok: true as const };
+  });
+  onMessage('retryDelegation', async ({ data }) => {
+    await retryDelegation(await getPopupContext(), data.sessionId);
+    return { ok: true as const };
+  });
+  onMessage('prepareDelegationMigration', async () =>
+    prepareDelegationMigration(await getPopupContext()),
+  );
+  onMessage('executeDelegationMigration', async ({ data }) =>
+    executeDelegationMigration(await getPopupContext(), data.reviewId),
+  );
 
   // ── Off-chain send ─────────────────────────────────────────────────────────
   // Gated on unlock via getPopupContext (re-arms auto-lock). The SW validates

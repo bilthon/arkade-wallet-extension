@@ -17,3 +17,6 @@ Regtest defaults to Nigiri's operator on port `7070` and Esplora on `30000`.
 For custom local ports, copy [.env.example](.env.example) to `.env.local` and set
 the overrides there. Restart the development servers or rebuild the extension
 after editing; both the extension and test webapp use these settings.
+
+For opt-in checks against the custom regtest stack, see the
+[live delegation test](dev/live/README.md).

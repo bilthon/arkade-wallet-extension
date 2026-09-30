@@ -1,10 +1,10 @@
 import { BIP322, networks } from '@arkade-os/sdk';
 import { hex } from '@scure/base';
 import type { SessionContext } from './wallet-runtime';
+import { ownScriptsFor } from './wallet-scripts';
 import {
   parsePsbt,
   inspectPsbt,
-  ownScriptsFrom,
   type InspectContext,
   type PsbtSummary,
 } from './psbt-inspect';
@@ -117,22 +117,13 @@ export async function buildInspectContext(
   const { wallet, network } = context;
   const ownXOnly = hex.encode(await wallet.identity.xOnlyPublicKey());
   const operatorXOnly = hex.encode(toXOnly(wallet.arkServerPublicKey));
-  const ownScripts: Uint8Array[] = [];
-  try {
-    ownScripts.push(wallet.offchainTapscript.pkScript);
-  } catch {
-    /* offchain script unavailable — own-change just won't match the VTXO output */
-  }
-  try {
-    ownScripts.push(wallet.boardingTapscript.pkScript);
-  } catch {
-    /* boarding script unavailable */
-  }
+  const ownScriptsHex = await ownScriptsFor(wallet, ownXOnly);
+  context.assertCurrent();
   return {
     network,
     ownXOnly,
     operatorXOnly,
-    ownScriptsHex: ownScriptsFrom(ownScripts),
+    ownScriptsHex,
     dustSats,
     feeSanityBoundSats: FEE_SANITY_BOUND_SATS,
   };

@@ -1,3 +1,4 @@
+import type { DelegationConfig } from './delegation-state';
 import { SeedIdentity, type NetworkName, type Wallet } from '@arkade-os/sdk';
 import { mnemonicToSeed } from './crypto';
 import { buildWallet, networkConfig } from './wallet';
@@ -33,8 +34,9 @@ import { startSessionKeepalive, stopSessionKeepalive } from './session-keepalive
  *
  * `SessionContext` has no `identity` field, and that is not a security boundary. The
  * wallet it carries exposes a working signer, and the signing helpers reach it directly
- * as `context.wallet.identity`. What stops a stale caller from signing is calling
- * `assertCurrent()` immediately before the SDK call, not the shape of this type.
+ * as `context.wallet.identity`. Callers check `assertCurrent()` before SDK operations;
+ * the wallet also wraps the identity to check session ownership at each signing call,
+ * including signing the SDK initiates after an await.
  */
 interface RuntimeSession {
   readonly epoch: number;
@@ -229,6 +231,20 @@ export function beginRuntimeNetworkSwitch(
   };
 }
 
+/** Reuse the transition fence while preserving the unlocked identity on this network. */
+export function beginRuntimeWalletRebuild(context: SessionContext): RuntimeNetworkTransition {
+  context.assertCurrent();
+  if (!session || activeNetworkTransition) throw new Error('LOCKED');
+  return beginRuntimeNetworkSwitch({
+    [PREPARED_NETWORK_SWITCH]: {
+      source: getRuntimeVersion(),
+      targetNetwork: session.network,
+      identity: session.identity,
+      consumed: false,
+    },
+  });
+}
+
 function assertRuntimeVersion(expected: RuntimeVersion): void {
   const current = getRuntimeVersion();
   if (current.epoch !== expected.epoch || current.network !== expected.network) {
@@ -313,13 +329,46 @@ function assertSessionOwner(owner: RuntimeSession, wallet: Wallet): void {
   }
 }
 
+/**
+ * Persist a pause after the provider has already blocked work on a policy mismatch.
+ * Reuse the same queued configuration change as a user's pause, which saves the
+ * setting and rebuilds the wallet without automation. Ignore notifications from
+ * an old session so a delayed failure cannot pause a newer wallet session.
+ */
+async function pauseDelegationForSession(owner: RuntimeSession, config: DelegationConfig): Promise<void> {
+  // Load here to avoid a static import cycle: delegation-session uses this runtime.
+  const { configureDelegation } = await import('./delegation-session');
+  if (session !== owner) return;
+  const context = await getSessionContext();
+  if (session !== owner) return;
+  await configureDelegation(context, { ...config, enabled: false });
+}
+
 /** Build a fresh wallet for one captured runtime session and cache it only if still current. */
 async function buildSessionWallet(owner: RuntimeSession): Promise<Wallet> {
-  const build = buildWallet(owner.identity, owner.network);
+  let timedOut = false;
+  const assertBuildSessionCurrent = () => {
+    if (session !== owner || timedOut) throw new Error('LOCKED');
+  };
+  const onDelegationPolicyMismatch = (config: DelegationConfig) => {
+    // The provider has already blocked new authorizations. Do not await the rebuild
+    // here: its disposal may need the SDK operation reporting this mismatch to finish.
+    void pauseDelegationForSession(owner, config).catch((error) => {
+      // A concurrent lock/rebuild already invalidated this request. Other failures
+      // deserve a diagnostic, without exposing arbitrary storage/provider payloads.
+      if (error instanceof Error && error.message === 'LOCKED') return;
+      console.warn('[arkade] could not persist delegation pause after a policy change');
+    });
+  };
+  const build = buildWallet(
+    owner.identity,
+    owner.network,
+    assertBuildSessionCurrent,
+    onDelegationPolicyMismatch,
+  );
 
   // `withTimeout` races rather than cancels. If the timer wins, dispose the wallet when
   // the underlying build eventually resolves so it cannot leak managers or watchers.
-  let timedOut = false;
   build.then(
     (late) => {
       if (timedOut) void disposeWallet(late);
@@ -356,12 +405,13 @@ async function disposeRuntimeSession(owner: RuntimeSession | null): Promise<void
 }
 
 /**
- * Dispose a wallet and permanently disable both manager accessors. SDK `dispose()` stops
+ * Dispose a wallet and permanently disable manager accessors. SDK `dispose()` stops
  * existing managers but otherwise leaves these accessors able to recreate background work.
  */
 async function disposeWallet(wallet: Wallet): Promise<void> {
   wallet.getContractManager = () => Promise.reject(new Error('LOCKED'));
   wallet.getVtxoManager = () => Promise.reject(new Error('LOCKED'));
+  wallet.getDelegateManager = () => Promise.reject(new Error('LOCKED'));
   await wallet.dispose().catch(() => {});
 }
 

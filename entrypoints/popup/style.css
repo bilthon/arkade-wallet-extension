@@ -12,6 +12,9 @@
   --warn-bg: #fff7ed;
   --warn-border: #fed7aa;
   --warn-text: #9a3412;
+  --delegation-green: #15803d;
+  --delegation-amber: #92400e;
+  --delegation-red: #b91c1c;
   --skeleton: #e7eaee;
   --skeleton-sheen: rgba(255, 255, 255, 0.65);
 
@@ -36,6 +39,9 @@
     --warn-bg: #2a1f12;
     --warn-border: #5a3a1a;
     --warn-text: #fbbf24;
+    --delegation-green: #86efac;
+    --delegation-amber: #fcd34d;
+    --delegation-red: #fca5a5;
     --skeleton: #2a2f37;
     --skeleton-sheen: rgba(255, 255, 255, 0.09);
   }
@@ -117,6 +123,14 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .strength-label { font-size: 12px; color: var(--muted); margin-top: 4px; }
 
 /* Wallet home */
+.build-info {
+  margin-top: auto;
+  padding-top: 16px;
+  color: var(--muted);
+  opacity: 0.2;
+  font-size: 11px;
+  text-align: center;
+}
 .home-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
 .pill {
   font-size: 11px;
@@ -290,7 +304,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* Horizontal padding + matching negative margin keeps rows edge-aligned with the rest
    of the screen while leaving room for the selected ring — no layout shift on select. */
-.coin-row { padding: 15px 8px; margin: 0 -8px; border-radius: 8px; }
+.coin-row { padding: 15px 8px; margin: 0 -8px; border-radius: 8px; flex-wrap: wrap; }
 .coin-row.selectable { cursor: pointer; }
 .coin-row.disabled { opacity: 0.55; }
 .coin-row.selected { background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--accent); }
@@ -302,6 +316,18 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .coin-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; }
 .coin-time { font-size: 12px; color: var(--muted); line-height: 1; white-space: nowrap; }
 .coin-check { width: 16px; text-align: center; color: var(--accent); font-weight: 700; }
+
+/* Delegation colors describe authorization; the energy bar still describes expiry. */
+.delegation-delegated { color: var(--delegation-green); }
+.delegation-pending { color: var(--delegation-amber); }
+.delegation-failed { color: var(--delegation-red); }
+.delegation-not-configured { color: var(--muted); }
+.delegation-note { font-size: 12px; line-height: 1.5; color: var(--muted); margin: 10px 0; }
+.coin-delegation { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; color: var(--muted); font-size: 11px; }
+.coin-delegation p { flex-basis: 100%; margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
+.delegation-summary { margin-bottom: 14px; font-size: 12px; line-height: 1.5; }
+.delegation-counts { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; }
+.delegation-summary p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
 
 /* Energy bar — fraction of a coin's lifetime left. Colors reuse the strength-meter palette. */
 .energy { width: 56px; height: 7px; background: var(--surface-2); border-radius: 999px; overflow: hidden; }

@@ -1,11 +1,35 @@
+import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from 'node:child_process';
 import { resolve } from 'node:path';
 import { defineConfig } from 'wxt';
+import { version } from './package.json';
 
 const DEV_PROFILE_DIR = resolve(import.meta.dirname, '.dev-browser-profiles');
+
+function getGitRevision(): string {
+  const options: ExecFileSyncOptionsWithStringEncoding = {
+    cwd: import.meta.dirname,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  };
+  try {
+    const commit = execFileSync('git', ['rev-parse', '--short=7', 'HEAD'], options).trim();
+    const changes = execFileSync('git', ['status', '--porcelain'], options).trim();
+    return changes ? `${commit}-dirty` : commit;
+  } catch {
+    // Source archives may not include Git metadata.
+    return 'unknown';
+  }
+}
 
 // See https://wxt.dev/api/config.html
 export default defineConfig({
   modules: ['@wxt-dev/module-react'],
+  vite: () => ({
+    define: {
+      __APP_VERSION__: JSON.stringify(version),
+      __GIT_REVISION__: JSON.stringify(getGitRevision()),
+    },
+  }),
   webExt: {
     chromiumProfile: resolve(DEV_PROFILE_DIR, 'chrome'),
     firefoxProfile: resolve(DEV_PROFILE_DIR, 'firefox'),

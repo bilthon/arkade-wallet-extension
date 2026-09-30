@@ -18,6 +18,12 @@ import {
 } from '@arkade-os/sdk';
 import type { SessionContext } from './wallet-runtime';
 import { localhostUrl } from './regtest-config';
+import { hex } from '@scure/base';
+import { initializeWalletDelegation } from './delegation-maintenance';
+import { assertOperatorFeesZero, validateDelegationIntent } from './delegation-policy';
+import { getDelegationConfig, type DelegationConfig } from './delegation-state';
+import { createSessionDelegate, validateDelegateAddress } from './delegation-provider';
+import { sessionIdentity } from './session-identity';
 import {
   adjustBalanceForExpiry,
   partitionVtxos,
@@ -49,6 +55,8 @@ export interface NetworkConfig {
   isMainnet: boolean;
   /** Boltz swap API for this network; absent → Lightning UI hidden. */
   boltzApiUrl?: string;
+  /** Optional delegate endpoint; configuring it does not enable delegation. */
+  delegateUrl?: string;
 }
 
 function isOverridePresent(name: string): boolean {
@@ -61,10 +69,13 @@ const arkServerUrl = isOverridePresent('WXT_REGTEST_ARK_PORT')
 const esploraUrl = isOverridePresent('WXT_REGTEST_ESPLORA_PORT')
 ? localhostUrl('WXT_REGTEST_ESPLORA_PORT', import.meta.env.WXT_REGTEST_ESPLORA_PORT)
 : 'http://localhost:30000';
+const delegateUrl = isOverridePresent('WXT_REGTEST_DELEGATE_PORT')
+? localhostUrl('WXT_REGTEST_DELEGATE_PORT', import.meta.env.WXT_REGTEST_DELEGATE_PORT)
+: 'http://localhost:7012';
 
 /**
  * Endpoints per network. Switched together — operator + esplora (+ Boltz where available).
- * Delegate URLs are intentionally absent here; this is read-only.
+ * Delegate configuration is available on regtest only and requires separate opt-in.
  *
  * Regtest defaults to Nigiri's local services; optional port overrides are documented
  * in .env.example and shared with the test webapp.
@@ -73,6 +84,7 @@ export const NETWORK_CONFIG: Record<NetworkName, NetworkConfig> = {
   regtest: {
     arkServerUrl,
     esploraUrl,
+    delegateUrl,
     isMainnet: false,
     boltzApiUrl: 'http://localhost:9069',
   },
@@ -120,10 +132,28 @@ export function networkConfig(network: NetworkName): NetworkConfig {
  * Identity derivation happens once at the runtime boundary. This builder never receives
  * the mnemonic or an application-owned raw seed.
  */
-export async function buildWallet(identity: Identity, network: NetworkName): Promise<Wallet> {
+export async function buildWallet(
+  identity: Identity,
+  network: NetworkName,
+  assertCurrent: () => void = () => {},
+  onDelegationPolicyMismatch: (config: DelegationConfig) => void = () => {},
+): Promise<Wallet> {
   const cfg = networkConfig(network);
-  return Wallet.create({
-    identity,
+  const scope = {
+    walletPublicKey: hex.encode(await identity.xOnlyPublicKey()), network, operatorUrl: cfg.arkServerUrl,
+  };
+  const delegation = network === 'regtest' ? await getDelegationConfig(scope) : null;
+  const delegate = delegation ? createSessionDelegate(delegation, assertCurrent, undefined, {
+    assertOperatorAllowed: () => assertOperatorFeesZero(wallet, assertCurrent),
+    validateIntent: async (intent) => {
+      validateDelegationIntent(intent, delegation.delegate, await wallet.getAddress());
+    },
+    onPolicyMismatch: () => onDelegationPolicyMismatch(delegation),
+  }) : null;
+  assertCurrent();
+  const wallet = await Wallet.create({
+    identity: sessionIdentity(identity, assertCurrent),
+    delegateProvider: delegate?.provider,
     // arkServerUrl/esploraUrl are @deprecated in favor of explicit providers, but
     // they still resolve to Rest/Esplora providers under the hood. Keep the URL
     // form until we need provider injection.
@@ -138,16 +168,9 @@ export async function buildWallet(identity: Identity, network: NetworkName): Pro
       walletRepository: new IndexedDBWalletRepository(`arkade-wallet-${network}`),
       contractRepository: new IndexedDBContractRepository(`arkade-contract-${network}`),
     },
-    // settlementConfig: false makes the wallet DELIBERATE — no background signing.
-    //
-    // With neither settlementConfig nor renewalConfig, the SDK falls back to
-    // DEFAULT_SETTLEMENT_CONFIG (boardingUtxoSweep + 60s poll) and `Wallet.create`
-    // eagerly starts a VtxoManager poll that auto-settles (onboards) new boarding
-    // UTXOs into VTXOs and auto-renews on `vtxo_received` — all with NO user action.
-    // That is why the read-only wallet silently onboarded funds. The SW wallet must
-    // not sign in the background, and explicit sends must be the only signing path.
-    // Deliberate renewal/delegation is a later job and will opt back in via
-    // `delegateProvider` / an explicit settlementConfig.
+    // The SDK defaults to automatic onboarding and renewal when this is omitted.
+    // Install authorization guards and tracking first; start opt-in automation below.
+    // A delegate provider alone selects the receiving script without starting it.
     settlementConfig: false,
     // With one shared wallet per unlocked session (instead of one per message), the
     // ContractWatcher this starts also lives for the whole session, so its backoff
@@ -164,6 +187,18 @@ export async function buildWallet(identity: Identity, network: NetworkName): Pro
       maxReconnectDelayMs: 30_000,
     },
   });
+  try {
+    assertCurrent();
+    if (delegation && delegate) {
+      validateDelegateAddress(delegation, wallet);
+      await initializeWalletDelegation(wallet, scope, delegation, assertCurrent, delegate);
+      assertCurrent();
+    }
+    return wallet;
+  } catch (error) {
+    await wallet.dispose().catch(() => {});
+    throw error;
+  }
 }
 
 // ─── Read methods (operate on a built wallet) ────────────────────────────────

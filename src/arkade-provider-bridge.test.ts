@@ -59,4 +59,16 @@ describe('linked Arkade provider bridge', () => {
     expect(sendMessage).not.toHaveBeenCalled();
     expect(page.postMessage).toHaveBeenCalledWith(expect.objectContaining({ ok: false, error: 'unknown method: unlock' }), '*');
   });
+
+  it.each([
+    'getDelegationSettings', 'previewDelegate', 'approveDelegate', 'setDelegationEnabled',
+    'retryDelegation', 'prepareDelegationMigration', 'executeDelegationMigration',
+  ])('keeps %s private to the extension', async (method) => {
+    page.postMessage({ ns: BRIDGE_NS, dir: 'request', id: 'delegation', method });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(page.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      ok: false, error: `unknown method: ${method}`,
+    }), '*');
+  });
 });

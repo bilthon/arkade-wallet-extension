@@ -65,6 +65,11 @@ vi.mock('./wallet', () => ({
   getExpiredVtxoSummary,
 }));
 
+const automation = vi.hoisted(() => ({ enabled: vi.fn(() => false), reconcile: vi.fn(async () => {}) }));
+vi.mock('./delegation-maintenance', () => ({
+  hasDelegationAutomation: automation.enabled, catchUpDelegation: automation.reconcile,
+}));
+
 // Import AFTER vi.mock so the mocked modules are in place.
 import { runRenewalTick } from './renewal';
 
@@ -141,4 +146,37 @@ describe('runRenewalTick', () => {
 
     expect(renewExpiringVtxos).not.toHaveBeenCalled();
   });
+});
+
+it('reconciles delegate-enabled sessions without running the legacy settlement loop', async () => {
+  automation.enabled.mockReturnValue(true);
+  await runRenewalTick();
+  expect(automation.reconcile).toHaveBeenCalledWith(wallet);
+  expect(recoverExpiredVtxos).not.toHaveBeenCalled();
+  expect(renewExpiringVtxos).not.toHaveBeenCalled();
+});
+
+it.each([true, false])('keeps warnings and the applicable fallback after reconciliation fails (automation %s)', async (enabled) => {
+  automation.enabled.mockReturnValue(enabled);
+  automation.reconcile.mockRejectedValue(new Error('private provider payload'));
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    await runRenewalTick();
+    expect(getExpiredVtxoSummary).toHaveBeenCalledWith(wallet);
+    expect(recoverExpiredVtxos).toHaveBeenCalledTimes(enabled ? 0 : 1);
+    expect(renewExpiringVtxos).toHaveBeenCalledTimes(enabled ? 0 : 1);
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      '[arkade] delegation reconciliation failed; retrying on the next tick',
+    );
+  } finally {
+    warn.mockRestore();
+  }
+});
+
+it('stops the tick when reconciliation reports a stale signing session', async () => {
+  automation.reconcile.mockRejectedValue(new Error('LOCKED'));
+  await expect(runRenewalTick()).rejects.toThrow('LOCKED');
+  expect(recoverExpiredVtxos).not.toHaveBeenCalled();
+  expect(renewExpiringVtxos).not.toHaveBeenCalled();
+  expect(getExpiredVtxoSummary).not.toHaveBeenCalled();
 });
