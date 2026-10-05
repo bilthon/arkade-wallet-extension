@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import {
+  ArkAddress,
   SingleKey,
   VtxoScript,
   MultisigTapscript,
@@ -9,6 +10,7 @@ import {
   Transaction,
 } from '@arkade-os/sdk';
 import { hex, base64 } from '@scure/base';
+import { validatePsbtForSigning } from './signing';
 import {
   parsePsbt,
   inspectPsbt,
@@ -217,6 +219,28 @@ describe('own-coin spend + own-change re-derivation', () => {
 // ─── reject paths ───────────────────────────────────────────────────────────────
 
 describe('reject paths', () => {
+  it('keeps native-looking outputs as OP_RETURN in ordinary inspection and signPsbt validation', () => {
+    const ownLeaf = MultisigTapscript.encode({ pubkeys: [O, U] }).script;
+    const address = new ArkAddress(O, new VtxoScript([ownLeaf]).pkScript.slice(2));
+    const { tx, psbtB64 } = buildSpend([ownLeaf], [
+      { script: address.subdustPkScript, amount: 5n },
+      { script: new Uint8Array([0x6a]), amount: 0n },
+    ], 5);
+    const ownCtx = makeContext([address.pkScript]);
+    for (const summary of [
+      inspectPsbt(tx, [0], ownCtx),
+      validatePsbtForSigning(psbtB64, [0], ownCtx, { allowHighFee: true }).summary,
+    ]) {
+      expect(summary.outputs.slice(0, 2)).toEqual([
+        { index: 0, address: null, amount: 5, isOwnChange: false, kind: 'op_return' },
+        { index: 1, address: null, amount: 0, isOwnChange: false, kind: 'op_return' },
+      ]);
+      expect(summary.flags).toContain('OP_RETURN');
+      expect(summary.totalToExternal).toBe(0);
+      expect(summary.totalLeaving).toBe(5);
+    }
+  });
+
   it('rejects an undecodable PSBT (parsePsbt → UNDECODABLE)', () => {
     expect(() => parsePsbt('not a psbt at all')).toThrow(PsbtRejectedError);
     try {

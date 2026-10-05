@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { SingleKey, VtxoScript, MultisigTapscript, CSVMultisigTapscript, CLTVMultisigTapscript, ConditionMultisigTapscript, buildOffchainTx, Transaction } from '@arkade-os/sdk';
+import { ArkAddress, SingleKey, VtxoScript, MultisigTapscript, CSVMultisigTapscript, CLTVMultisigTapscript, ConditionMultisigTapscript, buildOffchainTx, Transaction } from '@arkade-os/sdk';
 import { base64, hex } from '@scure/base';
 import { inspectArkadeTransaction, prepareArkadeCheckpoints } from './arkade-inspect';
 import { parsePsbt, type InspectContext } from './psbt-inspect';
 
-async function fixture(mixed = false, own = false, path: 'plain' | 'cltv' | 'conditional' = 'plain', value = 100_000, sameCheckpointKey = false) {
+async function fixture(mixed = false, own = false, path: 'plain' | 'cltv' | 'conditional' = 'plain', value = 100_000, sameCheckpointKey = false, native = false) {
   const operator = SingleKey.fromHex('11'.repeat(32));
   const buyer = SingleKey.fromHex('22'.repeat(32));
   const seller = SingleKey.fromHex('33'.repeat(32));
@@ -24,13 +24,20 @@ async function fixture(mixed = false, own = false, path: 'plain' | 'cltv' | 'con
     return { txid: (i ? 'bb' : 'aa').repeat(32), vout: 0, value, tapLeafScript: tree.findLeaf(hex.encode(leaf.script)), tapTree: tree.encode() };
   });
   const destination = new VtxoScript([foreign.script]);
-  const { arkTx, checkpoints } = buildOffchainTx(inputs, [
+  const treasury = new ArkAddress(O, new VtxoScript([MultisigTapscript.encode({ pubkeys: [O] }).script]).pkScript.slice(2));
+  const change = new ArkAddress(O, destination.pkScript.slice(2));
+  const buyerScript = new VtxoScript([MultisigTapscript.encode({ pubkeys: [O, B] }).script]).pkScript;
+  const { arkTx, checkpoints } = buildOffchainTx(inputs, native ? [
+    { script: buyerScript, amount: 1171n },
+    { script: treasury.subdustPkScript, amount: 5n },
+    { script: change.subdustPkScript, amount: 100n },
+  ] : [
     { script: destination.pkScript, amount: BigInt(inputs.length * value - 2_000) },
     { script: new VtxoScript([MultisigTapscript.encode({ pubkeys: [O] }).script]).pkScript, amount: 1_000n },
   ], checkpoint);
   const ctx: InspectContext = { network: 'regtest', ownXOnly: hex.encode(B), operatorXOnly: hex.encode(O), ownScriptsHex: new Set(), dustSats: 330, feeSanityBoundSats: 50_000 };
   const params = { arkadePsbt: base64.encode(arkTx.toPSBT()), checkpoints: checkpoints.map((cp, i) => ({ psbt: base64.encode(cp.toPSBT()), inputIndexes: i === 0 ? [0] : [] })) };
-  return { params, ctx, checkpoint: hex.encode(checkpoint.script), forfeitXOnly: hex.encode(F), operator, buyer, seller, arkTx, checkpoints };
+  return { params, ctx, treasury, change, checkpoint: hex.encode(checkpoint.script), forfeitXOnly: hex.encode(F), operator, buyer, seller, arkTx, checkpoints };
 }
 
 function edit(psbt: string, fn: (tx: Transaction) => void): string {
@@ -40,6 +47,104 @@ function edit(psbt: string, fn: (tx: Transaction) => void): string {
 }
 
 describe('linked Arkade approval inspection', () => {
+  it('accepts the unsigned 1276-sat release with 1171/5/100 native payouts', async () => {
+    const f = await fixture(false, false, 'plain', 1276, false, true);
+    f.ctx.ownXOnly = hex.encode(await f.seller.xOnlyPublicKey());
+    f.ctx.ownScriptsHex.add(hex.encode(f.change.pkScript));
+    const result = inspectArkadeTransaction(f.params, f.ctx, f.checkpoint, f.forfeitXOnly);
+    expect(result.summary.payment.outputs).toEqual([
+      expect.objectContaining({ index: 0, address: expect.stringMatching(/^bcrt1/), amount: 1171, isOwnChange: false }),
+      { index: 1, address: null, amount: 5, kind: 'arkade-subdust', outputKey: hex.encode(f.treasury.vtxoTaprootKey), isOwnChange: false },
+      { index: 2, address: null, amount: 100, kind: 'arkade-subdust', outputKey: hex.encode(f.change.vtxoTaprootKey), isOwnChange: true },
+    ]);
+    expect(result.summary.payment.totalToExternal).toBe(1176);
+    expect(result.summary.payment.totalLeaving).toBe(1176);
+    expect(result.summary.payment.fee).toBe(0);
+    expect(result.summary.fee).toBe(0);
+    expect(result.summary.payment.flags).toEqual([]);
+    expect(result.arkadePsbt).toBe(f.params.arkadePsbt);
+    expect(parsePsbt(result.arkadePsbt).getInput(0).tapScriptSig).toBeUndefined();
+  });
+
+  it.each([false, true])('accounts for native-only external payouts (own inputs: %s)', async (own) => {
+    const f = await fixture(false, own, 'plain', 1276, false, true);
+    f.params.arkadePsbt = edit(f.params.arkadePsbt, (tx) => {
+      tx.updateOutput(0, { script: f.treasury.subdustPkScript, amount: 329n });
+    });
+    // Knowing the signer or even the native script is NOT proof of own change.
+    f.ctx.ownScriptsHex.add(hex.encode(f.change.subdustPkScript));
+    const { payment } = inspectArkadeTransaction(f.params, f.ctx, f.checkpoint, f.forfeitXOnly).summary;
+    expect(payment.outputs.every((o) => o.kind === 'arkade-subdust' && !o.isOwnChange)).toBe(true);
+    expect(payment.totalToExternal).toBe(434);
+    expect(payment.totalLeaving).toBe(1276);
+    expect(payment.fee).toBe(842);
+    expect(payment.flags).toEqual(own ? ['SWEEP'] : []);
+    f.ctx.feeSanityBoundSats = 841;
+    expect(() => inspectArkadeTransaction(f.params, f.ctx, f.checkpoint, f.forfeitXOnly)).toThrow(/fee/i);
+  });
+
+  it.each([1n, 329n])('accepts native amount %s within the dust boundaries', async (amount) => {
+    const f = await fixture(false, false, 'plain', 1276, false, true);
+    f.params.arkadePsbt = edit(f.params.arkadePsbt, (tx) => {
+      tx.updateOutput(0, { amount: 800n });
+      tx.updateOutput(1, { amount });
+    });
+    const { payment } = inspectArkadeTransaction(f.params, f.ctx, f.checkpoint, f.forfeitXOnly).summary;
+    expect(payment.outputs[1].amount).toBe(Number(amount));
+    expect(payment.totalToExternal).toBe(900 + Number(amount));
+    expect(payment.fee).toBe(376 - Number(amount));
+  });
+
+  it('does not treat an output key equal to our signer key as own change', async () => {
+    const f = await fixture(false, true, 'plain', 1276, false, true);
+    f.params.arkadePsbt = edit(f.params.arkadePsbt, (tx) => {
+      tx.updateOutput(2, { script: hex.decode(`6a20${f.ctx.ownXOnly}`) });
+    });
+    const { payment } = inspectArkadeTransaction(f.params, f.ctx, f.checkpoint, f.forfeitXOnly).summary;
+    expect(payment.outputs[2].isOwnChange).toBe(false);
+    expect(payment.totalToExternal).toBe(1276);
+    expect(payment.flags).toEqual(['SWEEP']);
+  });
+
+  it.each([0n, 330n, 331n, BigInt(Number.MAX_SAFE_INTEGER) + 1n])('rejects invalid native amount %s', async (amount) => {
+    const f = await fixture(false, false, 'plain', 1276, false, true);
+    f.params.arkadePsbt = edit(f.params.arkadePsbt, (tx) => tx.updateOutput(1, { amount }));
+    expect(() => inspectArkadeTransaction(f.params, f.ctx, f.checkpoint, f.forfeitXOnly)).toThrow('Invalid native Arkade sub-dust amount');
+  });
+
+  it.each([0, -1, 5, 100, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])('fails closed for native payouts with dust threshold %s', async (dustSats) => {
+    const f = await fixture(false, false, 'plain', 1276, false, true);
+    f.ctx.dustSats = dustSats;
+    expect(() => inspectArkadeTransaction(f.params, f.ctx, f.checkpoint, f.forfeitXOnly)).toThrow('Invalid native Arkade sub-dust amount');
+  });
+
+  it.each(['data', 'short', 'long', 'pushdata', 'zero-key', 'out-of-field-key'] as const)('rejects native-looking %s scripts', async (variant) => {
+    const f = await fixture(false, false, 'plain', 1276, false, true);
+    const key = hex.encode(f.treasury.vtxoTaprootKey);
+    const scripts = {
+      data: '6a', short: `6a1f${key.slice(2)}`, long: `6a20${key}00`,
+      pushdata: `6a4c20${key}`, 'zero-key': `6a20${'00'.repeat(32)}`,
+      'out-of-field-key': `6a20${'ff'.repeat(32)}`,
+    };
+    f.params.arkadePsbt = edit(f.params.arkadePsbt, (tx) => tx.updateOutput(1, { script: hex.decode(scripts[variant]) }));
+    expect(() => inspectArkadeTransaction(f.params, f.ctx, f.checkpoint, f.forfeitXOnly)).toThrow();
+  });
+
+  it.each(['negative-fee', 'anchor-value', 'anchor-position', 'missing-anchor', 'checkpoint-value'] as const)('preserves linked validation for native payouts: %s', async (variant) => {
+    const f = await fixture(false, false, 'plain', 1276, false, true);
+    if (variant === 'checkpoint-value') {
+      f.params.checkpoints[0].psbt = edit(f.params.checkpoints[0].psbt, (tx) => tx.updateOutput(0, { amount: 1275n }));
+    } else {
+      f.params.arkadePsbt = edit(f.params.arkadePsbt, (tx) => {
+        if (variant === 'negative-fee') tx.updateOutput(0, { amount: 1172n });
+        if (variant === 'anchor-value') tx.updateOutput(3, { amount: 1n });
+        if (variant === 'anchor-position') tx.addOutput({ script: f.treasury.subdustPkScript, amount: 1n });
+        if (variant === 'missing-anchor') tx.updateOutput(3, { script: f.treasury.subdustPkScript, amount: 1n });
+      });
+    }
+    expect(() => inspectArkadeTransaction(f.params, f.ctx, f.checkpoint, f.forfeitXOnly)).toThrow();
+  });
+
   it('keeps supporting an operator that uses the same signer and forfeit key', async () => {
     const f = await fixture(false, false, 'plain', 100_000, true);
     expect(() => inspectArkadeTransaction(f.params, f.ctx, f.checkpoint, f.forfeitXOnly)).not.toThrow();

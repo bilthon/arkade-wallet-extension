@@ -11,6 +11,7 @@ import {
   type NetworkName,
 } from '@arkade-os/sdk';
 import { base64, hex } from '@scure/base';
+import { PubT, validatePubkey } from '@scure/btc-signer/utils.js';
 
 /**
  * SW-side PSBT decode + validation.
@@ -76,7 +77,9 @@ export interface OutputSummary {
   /** True when re-derivation matched this output to one of our own scripts (change). */
   isOwnChange: boolean;
   /** Set for non-address outputs so the UI can label them. */
-  kind?: 'op_return' | 'nonstandard';
+  kind?: 'op_return' | 'nonstandard' | 'arkade-subdust';
+  /** Full VTXO Taproot output key for native Arkade sub-dust, not an address. */
+  outputKey?: string;
 }
 
 /** The leaf clause an input satisfies (contract co-sign rendering). */
@@ -114,7 +117,7 @@ export interface PsbtSummary {
   signInputs: SignInputSummary[];
   /** sats leaving the wallet (sum of inputs we sign − own change returned to us). */
   totalLeaving: number;
-  /** sats going to addresses that are NOT our own (the external payout). */
+  /** sats going to destinations that are NOT our own (including native Arkade payouts). */
   totalToExternal: number;
   /** Transaction fee in sats, or null when not all prevout values are known. */
   fee: number | null;
@@ -138,7 +141,7 @@ export interface InspectContext {
   /** Hex pkScripts of outputs that are OUR OWN (Arkade address, boarding address, and
    *  any of our own single-owner VtxoScript outputs). Drives own-change detection. */
   ownScriptsHex: Set<string>;
-  /** Dust floor in sats (operator `info.dust`); a smaller amount can't be a real output. */
+  /** Dust floor in sats (operator `info.dust`); native Arkade sub-dust must be below it. */
   dustSats: number;
   /** Fee sanity bound in sats; a fee above this is rejected unless overridden. */
   feeSanityBoundSats: number;
@@ -191,7 +194,11 @@ export function inspectPsbt(
   tx: Transaction,
   inputIndexes: number[],
   ctx: InspectContext,
-  opts: { allowHighFee?: boolean } = {},
+  opts: {
+    allowHighFee?: boolean;
+    /** Internal only: enable for final payments in the linked Arkade validator. */
+    allowArkadeSubdust?: boolean;
+  } = {},
 ): PsbtSummary {
   if (inputIndexes.length === 0) {
     throw new PsbtRejectedError('NO_INPUTS', 'No inputs were specified to sign.');
@@ -203,16 +210,16 @@ export function inspectPsbt(
     }
   }
 
-  const outputs = decodeOutputs(tx, ctx);
+  const outputs = decodeOutputs(tx, ctx, opts.allowArkadeSubdust === true);
   const signInputs = indexes.map((i) => classifyInput(tx, i, ctx));
 
   // Totals. "Own change" = outputs we re-derived to our own scripts. External = the rest
-  // of the address outputs (data/nonstandard outputs carry no payout addressable to us).
+  // of the address or native Arkade outputs (arbitrary data is not a payout).
   const ownChangeSats = outputs
     .filter((o) => o.isOwnChange)
     .reduce((s, o) => s + o.amount, 0);
   const totalToExternal = outputs
-    .filter((o) => !o.isOwnChange && o.address !== null)
+    .filter((o) => !o.isOwnChange && (o.address !== null || o.kind === 'arkade-subdust'))
     .reduce((s, o) => s + o.amount, 0);
 
   const signedInputSats = signInputs.reduce((s, si) => s + si.amount, 0);
@@ -255,13 +262,34 @@ export function inspectPsbt(
 
 // ─── outputs ────────────────────────────────────────────────────────────────────
 
-function decodeOutputs(tx: Transaction, ctx: InspectContext): OutputSummary[] {
+function decodeOutputs(tx: Transaction, ctx: InspectContext, allowArkadeSubdust: boolean): OutputSummary[] {
   const out: OutputSummary[] = [];
   for (let i = 0; i < tx.outputsLength; i++) {
     const o = tx.getOutput(i);
     const amount = Number(o.amount ?? 0n);
     const scriptHex = o.script ? hex.encode(o.script) : '';
     const isOwnChange = scriptHex !== '' && ctx.ownScriptsHex.has(scriptHex);
+
+    if (allowArkadeSubdust && o.script?.length === 34 && scriptHex.startsWith('6a20')) {
+      if (
+        !Number.isSafeInteger(ctx.dustSats) || ctx.dustSats <= 0 ||
+        !Number.isSafeInteger(amount) || amount <= 0 || amount >= ctx.dustSats
+      ) {
+        throw new PsbtRejectedError('UNDECODABLE', 'Invalid native Arkade sub-dust amount or dust threshold.');
+      }
+      try {
+        validatePubkey(o.script.slice(2), PubT.schnorr);
+      } catch {
+        throw new PsbtRejectedError('UNDECODABLE', 'Invalid native Arkade sub-dust output key.');
+      }
+      const outputKey = scriptHex.slice(4);
+      out.push({
+        index: i, address: null, amount, kind: 'arkade-subdust', outputKey,
+        // Match the corresponding standard VTXO script, never a signer key or site claim.
+        isOwnChange: ctx.ownScriptsHex.has(`5120${outputKey}`),
+      });
+      continue;
+    }
 
     if (isOpReturn(o.script)) {
       out.push({ index: i, address: null, amount, isOwnChange: false, kind: 'op_return' });
@@ -546,7 +574,9 @@ function collectFlags(
   // Sweep: we sign every input in the tx AND ~nothing returns to us as change — the tx
   // drains the wallet to external destinations. (A normal send keeps change.)
   const weSignAll = signInputs.length === tx.inputsLength && tx.inputsLength > 0;
-  if (weSignAll && ownChangeSats === 0 && outputs.some((o) => o.address !== null && !o.isOwnChange)) {
+  if (weSignAll && ownChangeSats === 0 && outputs.some(
+    (o) => !o.isOwnChange && (o.address !== null || o.kind === 'arkade-subdust'),
+  )) {
     flags.add('SWEEP');
   }
 

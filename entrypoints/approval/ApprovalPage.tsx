@@ -218,16 +218,19 @@ export function ArkadeTransactionBody({
   summary: ArkadeTransactionSummary;
   signCheckpoints: boolean;
 }) {
-  const addressed = summary.payment.outputs.filter((output) => output.address !== null);
+  const payouts = summary.payment.outputs.filter(
+    (output) => output.address !== null || output.kind === 'arkade-subdust',
+  );
   const hasOwnInputs = summary.originalInputs.some((input) => input.role === 'own');
   const flags = summary.payment.flags.filter((flag) => flag !== 'SWEEP' || hasOwnInputs);
   return (
     <>
       <p>Final payments:</p>
       <ul className="approval-outputs approval-final-outputs">
-        {addressed.map((output) => (
+        {payouts.map((output) => (
           <li key={output.index}>
-            <code>{output.address}</code>
+            {output.kind === 'arkade-subdust' && <span>Native Arkade sub-dust · VTXO output key</span>}
+            <code>{output.address ?? output.outputKey}</code>
             <span>{fmtSats(output.amount)}{output.isOwnChange ? ' (you)' : ''}</span>
           </li>
         ))}

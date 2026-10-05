@@ -39,6 +39,35 @@ describe('linked Arkade approval', () => {
     expect(html).not.toContain('drains your wallet');
   });
 
+  it('shows every native payout with its full output key, amount and own-change marker', () => {
+    const treasuryKey = 'ab'.repeat(32);
+    const changeKey = 'cd'.repeat(32);
+    const html = renderToStaticMarkup(createElement(ArkadeTransactionBody, {
+      summary: {
+        ...summary, fee: 0,
+        payment: {
+          ...summary.payment, flags: [], fee: 0,
+          outputs: [
+            { index: 0, address, amount: 1171, isOwnChange: false },
+            { index: 1, address: null, kind: 'arkade-subdust', outputKey: treasuryKey, amount: 5, isOwnChange: false },
+            { index: 2, address: null, kind: 'arkade-subdust', outputKey: changeKey, amount: 100, isOwnChange: true },
+          ],
+        },
+      },
+      signCheckpoints: false,
+    }));
+    for (const destination of [address, treasuryKey, changeKey]) {
+      expect(html.split(`<code>${destination}</code>`)).toHaveLength(2);
+    }
+    expect(html.split('Native Arkade sub-dust · VTXO output key')).toHaveLength(3);
+    expect(html).toContain('1,171 sats');
+    expect(html).toContain('5 sats');
+    expect(html).toContain('100 sats (you)');
+    expect(html).toContain('Transaction fee: 0 sats');
+    expect(html).not.toContain('OP_RETURN');
+    expect(html).not.toContain('…');
+  });
+
   it('explains staged consent and retains a warning when signing own coins', () => {
     const html = renderToStaticMarkup(createElement(ArkadeTransactionBody, {
       summary: { ...summary, originalInputs: [{ index: 0, amount: 1000, role: 'own' }] },

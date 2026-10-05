@@ -265,7 +265,7 @@ function inspectLinked(
     }
   }
   // Only final payment outputs contribute to the approval and fee check.
-  const summary = inspectPsbt(payment, indexes, ctx);
+  const summary = inspectPsbt(payment, indexes, ctx, { allowArkadeSubdust: true });
   let anchorCount = 0;
   for (const out of summary.outputs) {
     const raw = payment.getOutput(out.index);
@@ -277,7 +277,10 @@ function inspectLinked(
         reject('Invalid SDK anchor.');
       }
       anchorCount++;
-    } else if (!out.address || out.amount <= 0 || !Number.isSafeInteger(out.amount)) {
+    } else if (
+      (!out.address && out.kind !== 'arkade-subdust') ||
+      out.amount <= 0 || !Number.isSafeInteger(out.amount)
+    ) {
       reject('Only standard BTC payment outputs and SDK anchors are supported.');
     }
   }
